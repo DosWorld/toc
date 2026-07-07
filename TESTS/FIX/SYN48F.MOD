@@ -1,0 +1,3 @@
+MODULE Syn48f;
+VAR lr: LONGREAL; i: INTEGER;
+BEGIN lr := 9.9; i := ENTIER(lr) END Syn48f.

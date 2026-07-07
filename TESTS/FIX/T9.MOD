@@ -1,0 +1,6 @@
+MODULE T9;
+VAR x, s, o: INTEGER;
+BEGIN
+  s := SYSTEM.SEG(x);
+  o := SYSTEM.OFS(x)
+END T9.

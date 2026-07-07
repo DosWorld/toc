@@ -1,0 +1,6 @@
+MODULE Size67e;
+VAR v: INTEGER;
+CONST X = SIZE(v);
+VAR y: INTEGER;
+BEGIN y := X
+END Size67e.

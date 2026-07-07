@@ -1,0 +1,3 @@
+MODULE Syn48b;
+VAR r: REAL; i: INTEGER;
+BEGIN r := 3.7; i := ENTIER(r) END Syn48b.

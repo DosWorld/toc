@@ -1,0 +1,5 @@
+(*$R+*)
+MODULE Bnd59c;
+VAR a: ARRAY 5 OF INTEGER;
+BEGIN a[-1] := 1
+END Bnd59c.

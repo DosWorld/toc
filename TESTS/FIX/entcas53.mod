@@ -1,0 +1,7 @@
+MODULE EntCas53;
+IMPORT Out;
+PROCEDURE Run*;
+BEGIN Out.String("ok53"); Out.Ln
+END Run;
+BEGIN
+END EntCas53.

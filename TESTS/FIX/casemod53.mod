@@ -1,0 +1,4 @@
+MODULE CaseMod53;
+VAR x: INTEGER;
+BEGIN x := 1
+END CaseMod53.

@@ -1,0 +1,3 @@
+MODULE Syn48e;
+VAR r: REAL;
+BEGIN r := FLOAT(42) END Syn48e.

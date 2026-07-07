@@ -1,0 +1,8 @@
+MODULE Extnear;
+PROCEDURE abc(x: INTEGER): INTEGER; NEAR; EXTERNAL;
+PROCEDURE Run*;
+  VAR r: INTEGER;
+BEGIN
+  r := abc(42)
+END Run;
+END Extnear.

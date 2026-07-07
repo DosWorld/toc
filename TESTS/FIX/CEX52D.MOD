@@ -1,0 +1,5 @@
+MODULE Cex52d;
+CONST Big = 1000 * 200;
+VAR x: LONGINT;
+BEGIN x := Big
+END Cex52d.

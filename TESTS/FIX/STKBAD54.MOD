@@ -1,0 +1,6 @@
+(*$M 0*)
+MODULE Stkbad54;
+PROCEDURE Run*;
+BEGIN
+END Run;
+END Stkbad54.

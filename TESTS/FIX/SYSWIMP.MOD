@@ -1,0 +1,6 @@
+MODULE Syswimp;
+IMPORT SYSTEM;
+PROCEDURE Go*; FAR;
+  VAR r: SYSTEM.Registers;
+BEGIN END Go;
+END Syswimp.

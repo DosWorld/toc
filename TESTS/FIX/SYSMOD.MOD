@@ -1,0 +1,4 @@
+MODULE Sysmod;
+PROCEDURE Init*; FAR;
+BEGIN END Init;
+END Sysmod.

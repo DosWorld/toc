@@ -1,0 +1,5 @@
+MODULE Len68b;
+VAR src: ARRAY 16 OF INTEGER;
+VAR dst: ARRAY LEN(src) OF INTEGER;
+BEGIN dst[15] := src[0]
+END Len68b.

@@ -1,0 +1,6 @@
+MODULE Dead5;
+PROCEDURE GetTwo*(VAR x: INTEGER);
+BEGIN
+  x := 2
+END GetTwo;
+END Dead5.

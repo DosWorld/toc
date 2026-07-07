@@ -1,0 +1,11 @@
+MODULE Localfar;
+PROCEDURE Foo*;
+BEGIN
+END Foo;
+PROCEDURE Bar;
+BEGIN
+  Foo
+END Bar;
+BEGIN
+  Foo
+END Localfar.

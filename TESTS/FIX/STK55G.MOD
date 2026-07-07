@@ -1,0 +1,6 @@
+(*$M 32768, 0, 0*)
+MODULE Stk55g;
+PROCEDURE Run*;
+BEGIN
+END Run;
+END Stk55g.

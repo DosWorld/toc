@@ -1,0 +1,5 @@
+MODULE Size67d;
+CONST X = SIZE(NoSuchType);
+VAR y: INTEGER;
+BEGIN y := X
+END Size67d.

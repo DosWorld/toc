@@ -1,0 +1,11 @@
+MODULE OPTMUL;
+(* Fixture for strength-reduction byte checks (opt.md A/B/C).
+   x*8 -> SHL (no IMUL F7 E9); x DIV 4 -> SAR (no IDIV F7 F9);
+   x MOD 16 -> AND AX,000F (25 0F 00). *)
+PROCEDURE Mul8*(x: INTEGER): INTEGER;
+BEGIN RETURN x * 8 END Mul8;
+PROCEDURE Div4*(x: INTEGER): INTEGER;
+BEGIN RETURN x DIV 4 END Div4;
+PROCEDURE Mod16*(x: INTEGER): INTEGER;
+BEGIN RETURN x MOD 16 END Mod16;
+END OPTMUL.

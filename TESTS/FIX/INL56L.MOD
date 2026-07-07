@@ -1,0 +1,12 @@
+MODULE Inl56l;
+PROCEDURE PushPopAX*;
+  INLINE(050H, 058H);
+PROCEDURE Const99*(): INTEGER;
+  INLINE(0B8H, 063H, 000H);
+PROCEDURE UseBoth*;
+VAR n: INTEGER;
+BEGIN
+  PushPopAX();
+  n := Const99();
+END UseBoth;
+END Inl56l.

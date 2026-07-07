@@ -1,0 +1,9 @@
+MODULE Dead4;
+PROCEDURE NeverCalled;
+BEGIN
+END NeverCalled;
+
+PROCEDURE Run*;
+BEGIN
+END Run;
+END Dead4.

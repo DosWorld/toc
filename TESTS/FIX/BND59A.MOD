@@ -1,0 +1,4 @@
+MODULE Bnd59a;
+VAR a: ARRAY 5 OF INTEGER;
+BEGIN a[5] := 1
+END Bnd59a.

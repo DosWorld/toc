@@ -1,0 +1,294 @@
+# tests/MANIFEST.TSV — Phase 2 integration-test table (see docs/migtest.md §4.2).
+#
+# Tab-separated, 6 columns:
+#   NAME     unique test id; '/' separates section from local name
+#   FIXTURE  filename under tests/FIX/  (or '-' to reuse the previous row's compile)
+#   CMD      oc invocation flags (prepended to fixture).  Empty = default compile.
+#            'fails' means the compile is expected to exit non-zero;
+#            EXPECT must be 'compile-fails'.  Otherwise CMD is splatted in front
+#            of the fixture, e.g. CMD='/ENTRY=Main' → oc /ENTRY=Main FIXTURE.
+#   EXPECT   one of: has-import no-import has-global no-global code-starts
+#            code-contains no-code-contains code-byte-at om-has-file
+#            om-member-equals om-member-contains mz-sp init-imports-empty
+#            has-segreloc no-segreloc has-reloc-and-segreloc has-reloc-for
+#            has-reloc-to-seg compile-fails errorlevel
+#   ARG      EXPECT-specific argument (single field; rdfgrep handles internal spaces)
+#   MEMBER   optional .om member to inspect for RDF predicates.  Empty = use the
+#            first uppercase .RDF extracted from the .om.  Set to e.g. MAIN.RDF
+#            to inspect a specific member when the .om contains several .rdfs.
+#
+# After compile, the produced <base>.om is unpacked into the row's workdir.
+#
+# NAME	FIXTURE	CMD	EXPECT	ARG	MEMBER
+init/1a-empty-bare-retf	EMPTY.MOD		code-starts	CB
+init/1b-empty-init-global	EMPTY.MOD		has-global	Empty__init
+init/1c-empty-no-init-deps	EMPTY.MOD		init-imports-empty
+init/1d-hasbody-guard-cmp	HASBODY.MOD		code-starts	0000 2E 83 3E
+init/1h-hasbody-no-sysinit	HASBODY.MOD		no-import	SYSTEM__init
+init/1i-empty-no-sysinit	EMPTY.MOD		no-import	SYSTEM__init
+init/1e-unused-a-not-imported	MODAB.MOD+A.OM+B.OM		no-import	a__init
+init/1f-unused-b-not-imported	MODAB.MOD+A.OM+B.OM		no-import	b__init
+init/1g-no-system-init	MODAB.MOD+A.OM+B.OM		no-import	SYSTEM__init
+init/1e2-used-hello-init-imported	USEHELLO.MOD+HELLO.OM		has-import	Hello__init
+init/1e2-used-hello-main-imported	USEHELLO.MOD+HELLO.OM		has-import	Hello_Main
+sanitize/import-only-no-init	SANIONLY.MOD+HELLO.OM		no-import	Hello__init
+sanitize/nops-where-call-was	SANIONLY.MOD+HELLO.OM		code-contains	90 90 90 90 90
+dead/var-global-unused	DEAD1.MOD		stderr-contains	unused' declared but never used
+dead/var-global-used-no-warn	DEAD1.MOD		stderr-no-contains	'used' declared
+dead/var-local-unused	DEAD2.MOD		stderr-contains	'tmp' declared but never used
+dead/var-local-used-no-warn	DEAD2.MOD		stderr-no-contains	'i' declared
+dead/param-unused	DEAD3.MOD		stderr-contains	parameter 'y' declared but never used
+dead/proc-unused	DEAD4.MOD		stderr-contains	procedure 'NeverCalled' declared but never used
+dead/var-param-write-only-no-warn	DEAD5.MOD		stderr-no-contains	'x' declared
+dead/exported-no-warn	DEAD6.MOD		stderr-no-contains	'ExpVar' declared
+dead/return-counts-as-read	DEAD7.MOD		stderr-no-contains	'used' declared
+dead/case-label-counts-as-read	DEAD8.MOD		stderr-no-contains	'K' declared
+dead/system-adr-counts-as-read	DEAD9.MOD	/SYSTEM	stderr-no-contains	declared but never used
+coerce/real-from-int-rejected	INTREAL1.MOD	fails	compile-fails
+coerce/int-from-real-rejected	INTREAL2.MOD	fails	compile-fails
+coerce/longreal-from-longint-rejected	INTREAL3.MOD	fails	compile-fails
+coerce/explicit-cast-ok	INTREALK.MOD		file-in-workdir	Intrealk.om
+paramtype/real-to-int-formal-rejected	PARMTYP1.MOD	fails	compile-fails
+paramtype/int-to-real-formal-rejected	PARMTYP2.MOD	fails	compile-fails
+paramtype/open-array-accepts-fixed	PARMTYPK.MOD		file-in-workdir	Parmtypk.om
+paramtype/byval-aggr-and-var-runtime	ASGNPARM.MOD	/ENTRY=Run	errorlevel	0
+paramtype/pass-records-byval-byvar	PASSREC.MOD	/ENTRY=Run	errorlevel	0
+paramtype/pass-fixed-arrays-byval-byvar	PASSARR.MOD	/ENTRY=Run	errorlevel	0
+paramtype/pass-open-arrays	PASSOPEN.MOD	/ENTRY=Run	errorlevel	0
+ret/array-return-rejected	RETARR.MOD	fails	compile-fails
+ret/record-return-rejected	RETREC.MOD	fails	compile-fails
+leak/no-leak-on-compile-error	RETARR.MOD		stderr-no-contains	WARNING: heap leak
+system/upstr-balanced-and-correct	UPSTR.MOD	/ENTRY=Run	errorlevel	0
+init/1j-explicit-sys-rejected	EXPLSYS.MOD	fails	compile-fails
+init/1k-system-in-error-msg	EXPLSYS.MOD		stderr-contains	SYSTEM
+symbols/2b-sysaccess-compiles	SYSACCES.MOD		has-global	Sysacces__init
+symbols/2a-system-no-undef-warning	SYSACCES.MOD		stderr-no-contains	undefined identifier
+symbols/2c-sysaccess-pop-ax-dx	SYSACCES.MOD		code-contains	58 5A
+symbols/2d-multiple-system-syms	SYSMULTI.MOD		has-global	Sysmulti__init
+naming/3a-prefix-foo-global	PREFIX.MOD		has-global	Prefix_Foo
+naming/3b-prefix-no-bare-foo	PREFIX.MOD		no-global	Foo
+naming/3c-validmod-compiles	VALIDMOD.MOD		has-global	Validmod__init
+naming/53a-lowercase-filename	casemod53.mod		file-in-workdir	CaseMod53.om
+naming/53b-output-uses-module-name	casemod53.mod		has-global	CaseMod53__init
+naming/53c-rdf-uppercase	casemod53.mod		om-has-file	CASEMOD53.RDF
+naming/53c-def-uppercase	casemod53.mod		om-has-file	CASEMOD53.DEF
+naming/53d-entry-lowercase-filename	entcas53.mod	/ENTRY=Run	file-in-workdir	EntCas53.om
+naming/53d-main-imports-mod-init	entcas53.mod	/ENTRY=Run	has-import	EntCas53__init	MAIN.RDF
+qual/4a-hello-main-import	QUALTEST.MOD+HELLO.OM		has-import	Hello_Main
+qual/4b-hello-init-import	QUALTEST.MOD+HELLO.OM		has-import	Hello__init
+qual/4c-no-system-init	QUALTEST.MOD+HELLO.OM		no-import	SYSTEM__init
+om/5a-hasbody-rdf-in-archive	HASBODY.MOD		om-has-file	HASBODY.RDF
+om/5b-hasbody-def-in-archive	HASBODY.MOD		om-has-file	HASBODY.DEF
+cleanup/7a-om-after-compile	HCLEAN.MOD		file-in-workdir	Hclean.om
+cleanup/7b-rdf-cleaned	HCLEAN.MOD		no-file-in-workdir	Hclean.rdf
+cleanup/7c-def-cleaned	HCLEAN.MOD		no-file-in-workdir	Hclean.def
+cleanup/7g-broken-no-rdf	BROKEN.MOD		no-file-in-workdir	Broken.rdf
+cleanup/7h-broken-no-def	BROKEN.MOD		no-file-in-workdir	Broken.def
+no-int20h/8a-no-cd20-in-hasbody	HASBODY.MOD		no-code-contains	CD20
+far-near/9a-exported-retf	RETTEST.MOD		code-contains	CB
+far-near/9b-internal-ret	RETTEST.MOD		code-contains	C3
+cross-call/10a-far-9a	CROSSCAL.MOD+OTHERLIB.OM		code-contains	9A
+cross-call/10b-reloc-segreloc-pair	CROSSCAL.MOD+OTHERLIB.OM		has-reloc-and-segreloc
+cross-call/13f-imported-still-far	CROSSCAL.MOD+OTHERLIB.OM		code-contains	9A
+local-far/13a-push-cs-near	LOCALFAR.MOD		code-contains	0EE8
+local-far/13b-no-far-call	LOCALFAR.MOD		no-code-contains	9A
+local-far/13c-no-segreloc	LOCALFAR.MOD		no-segreloc
+local-far/13d-internal-near	NEAR13.MOD		code-contains	E8
+local-far/13e-no-pushcs	NEAR13.MOD		no-code-contains	0EE8
+entry/6a-system-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_INIT	MAIN.RDF
+entry/6b-system-done	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_DONE	MAIN.RDF
+entry/6c-entrymod-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	Entrymod__init	MAIN.RDF
+entry/6d-entrymod-main	ENTRYMOD.MOD	/ENTRY=Main	has-import	Entrymod_Main	MAIN.RDF
+entry/6e-start-global	ENTRYMOD.MOD	/ENTRY=Main	has-global	start	MAIN.RDF
+entry/6f-missing-proc-rejected	ENTRYM2.MOD	/ENTRY=Missing	stderr-contains	procedure not found
+entry/6g-private-proc-rejected	ENTRYM3.MOD	/ENTRY=Hidden	stderr-contains	not exported
+system/12a-fzero-compiles	TSTCONST.MOD		has-global	Tstconst__init
+system/12b-fzero-mov-ax-64	TSTCONST.MOD		code-contains	B84000
+system/12c-registers-compiles	TSTREGS.MOD		has-global	Tstregs__init
+system/12d-new-compiles	TSTNEW.MOD		has-global	Tstnew__init
+system/12e-new-far-call	TSTNEW.MOD		code-contains	9A
+system/12f-new-alloc-import	TSTNEW.MOD		has-import	SYSTEM_Alloc
+system/12g-new-reloc-segreloc	TSTNEW.MOD		has-reloc-and-segreloc
+system/12h-new-tag-alloc-size	TSTNEW.MOD		code-contains	B8 02 00 83 C0 02 50
+system/12i-dispose-compiles	TSTDISP.MOD		has-global	Tstdisp__init
+system/12j-dispose-alloc-import	TSTDISP.MOD		has-import	SYSTEM_Alloc
+system/12k-dispose-free-import	TSTDISP.MOD		has-import	SYSTEM_Free
+system/12l-dispose-two-far-calls	TSTDISP.MOD		code-count	9A 2
+system/12m-intr-compiles	TSTINTR.MOD		has-global	Tstintr__init
+system/12n-intr-import	TSTINTR.MOD		has-import	SYSTEM_Intr
+system/12o-newsize-compiles	TNEWSIZE.MOD		has-global	Tnewsize__init
+system/12p-newsize-alloc-import	TNEWSIZE.MOD		has-import	SYSTEM_Alloc
+system/12q-newaddr-compiles	TNEWADDR.MOD		has-global	Tnewaddr__init
+system/12r-newaddr-alloc-import	TNEWADDR.MOD		has-import	SYSTEM_Alloc
+system/12s-dispaddr-compiles	TDISPADR.MOD		has-global	Tdispadr__init
+system/12t-dispaddr-free-import	TDISPADR.MOD		has-import	SYSTEM_Free
+external/38a-extnear-import	EXTNEAR.MOD		has-import	Extnear_abc
+external/38b-extnear-no-far-call	EXTNEAR.MOD		no-code-contains	9A
+external/38b2-extnear-near-call	EXTNEAR.MOD		code-contains	E8
+external/38c-extnear-no-global	EXTNEAR.MOD		no-global	Extnear_abc
+external/38d-extfar-import	EXTFAR.MOD		has-import	Extfar_xyz
+external/38d2-extfar-far-call	EXTFAR.MOD		code-contains	9A
+external/38e-extfar-def	EXTFAR.MOD		om-member-contains	EXTFAR.DEF Extfar_xyz
+external/38f-extfar-reloc	EXTFAR.MOD		has-reloc-for	Extfar_xyz
+external/38g-far-external-combo	EXTFAREX.MOD		has-global	Extfarex__init
+sysmode/39a-compiles	SYSMOD.MOD	/SYSTEM	has-global	Sysmod__init
+sysmode/39c-import-system-rejected	BADIMP.MOD	fails	compile-fails
+import/unresolved-import-fails	NOIMPORT.MOD	fails	compile-fails
+sysmode/39d-import-system-allowed	SYSWIMP.MOD	/SYSTEM	has-global	Syswimp__init
+sysmode/39e-no-system-init-dep	SYSWIMP.MOD	/SYSTEM	no-import	SYSTEM__init
+sysmode/39f1-no-alloc-import	SYSMOD.MOD	/SYSTEM	no-import	SYSTEM_Alloc
+sysmode/39f2-no-free-import	SYSMOD.MOD	/SYSTEM	no-import	SYSTEM_Free
+sysmode/39f3-no-s32mul-import	SYSMOD.MOD	/SYSTEM	no-import	SYSTEM_S32MUL
+assert/42a-halt-import	ASSRTDEF.MOD		has-import	SYSTEM_Halt
+assert/42b-no-int3	ASSRTDEF.MOD		no-code-contains	CD 03
+assert/42c-default-errcode-1	ASSRTDEF.MOD		code-contains	B8 01 00 50
+assert/42d-halt-import-with-code	ASSRTCD.MOD		has-import	SYSTEM_Halt
+assert/42e-errcode-5	ASSRTCD.MOD		code-contains	B8 05 00 50
+assert/44e-assert-false-halts	ASSRTFL.MOD	/ENTRY=Run	errorlevel	1
+is/57a-compiles	IS57A.MOD		has-global	Is57a__init
+is/57b-runtime	IS57B.MOD		has-global	Is57b__init
+is/57c-unrelated	IS57C.MOD		has-global	Is57c__init
+fwd/58a-simple	FWD58A.MOD		has-global	Fwd58a__init
+fwd/58b-mutual	FWD58B.MOD		has-global	Fwd58b__init
+bounds/59a-default-off	BND59A.MOD		has-global	Bnd59a__init
+bounds/59b-const-over-rejected	BND59B.MOD	fails	compile-fails
+bounds/59c-const-negative-rejected	BND59C.MOD	fails	compile-fails
+bounds/59d-in-bounds	BND59D.MOD		has-global	Bnd59d__init
+bounds/59e-r-after-r+	BND59E.MOD		has-global	Bnd59e__init
+bounds/59k-neg-index-traps	BNDNEG.MOD	/ENTRY=Run	errorlevel	201
+bounds/59l-over-index-traps	BNDOVER.MOD	/ENTRY=Run	errorlevel	201
+intr/T1-pointer-nil	T1.MOD		has-global	T1__init
+intr/T2-adr-global-compiles	T2.MOD		has-global	T2__init
+intr/T2-adr-global-pattern	T2.MOD		code-contains	1E 50 58 5A
+intr/T2b-adr-proc-compiles	T2B.MOD		has-global	T2b__init
+intr/T2b-adr-proc-pattern	T2B.MOD		code-contains	0E B8
+intr/T3-deref-write	T3.MOD		has-global	T3__init
+intr/T4-deref-read	T4.MOD		has-global	T4__init
+intr/T7-move-compiles	T7.MOD		has-global	T7__init
+intr/T7-move-rep-movsb	T7.MOD		code-contains	F3 A4
+intr/T8-ptr-compiles	T8.MOD		has-global	T8__init
+intr/T8-ptr-pop-dx	T8.MOD		code-contains	5A
+intr/T9-seg-ofs-compiles	T9.MOD		has-global	T9__init
+intr/T9-seg-pattern	T9.MOD		code-contains	1E 50 58 58
+intr/T10-fill-compiles	T10.MOD		has-global	T10__init
+intr/T10-fill-rep-stosb	T10.MOD		code-contains	F3 AA
+intr/T11-adr-const-rejected	INTRT11.MOD	fails	compile-fails
+intr/T12-missing-cannot-find	INTRT12.MOD		stderr-contains	cannot find module
+intr/T12-missing-names-mod	INTRT12.MOD		stderr-contains	missingmodule
+intr/T12-no-output	INTRT12.MOD		no-file-in-workdir	Intrt12.om
+intr/T14-cld-rep-movsb	T14.MOD		code-contains	FC F3 A4
+intr/T15-cld-rep-stosb	T15.MOD		code-contains	FC F3 AA
+intr/T16-seg-local-compiles	T16.MOD		has-global	T16__init
+intr/T16-seg-local-pattern	T16.MOD		code-contains	16 50 58 58
+intr/T17-bare-lsl-rejected	T17.MOD	fails	compile-fails
+intr/T17b-system-lsl-compiles	T17B.MOD		has-global	T17b__init
+arr/47a-single-dim	ARR47A.MOD		has-global	Arr47a__init
+arr/47b-multi-dim	ARR47B.MOD		has-global	Arr47b__init
+arr/47c-5-elems	ARR47C.MOD		has-global	Arr47c__init
+arr/47d-non-int-rejected	ARR47D.MOD	fails	compile-fails
+syn/48a-float-var	SYN48A.MOD		has-global	Syn48a__init
+syn/48b-entier-var	SYN48B.MOD		has-global	Syn48b__init
+syn/48c-float-fild	SYN48CF.MOD		code-contains	DF 07
+syn/48d-entier-fstcw	SYN48DE.MOD		code-contains	D9 3F
+syn/48d-entier-fistp	SYN48DE.MOD		code-contains	DF 1F
+syn/48e-float-literal	SYN48E.MOD		has-global	Syn48e__init
+syn/48f-entier-longreal	SYN48F.MOD		has-global	Syn48f__init
+coe/49a-real-mul-int	COE49A.MOD		has-global	Coe49a__init
+coe/49b-int-mul-real	COE49B.MOD		has-global	Coe49b__init
+coe/49c-real-add-int	COE49C.MOD		has-global	Coe49c__init
+coe/49d-real-lt-int	COE49D.MOD		has-global	Coe49d__init
+coe/49e-real-eq-int	COE49E.MOD		has-global	Coe49e__init
+coe/49f-real-mul-fild	COE49F.MOD		code-contains	DF 07
+coe/49g-int-add-real-fild	COE49G.MOD		code-contains	DF 07
+coe/49h-real-lt-fild	COE49H.MOD		code-contains	DF 07
+coe/49i-longreal-mul	COE49I.MOD		has-global	Coe49i__init
+coe/49j-int-div-real	COE49J.MOD		has-global	Coe49j__init
+set/50a-empty-literal	SET50A.MOD		has-global	Set50a__init
+set/50b-literal-elements	SET50B.MOD		has-global	Set50b__init
+set/50c-in-operator	SET50C.MOD		has-global	Set50c__init
+set/50d-operators	SET50D.MOD		has-global	Set50d__init
+cex/52a-basic-arith	CEX52A.MOD		has-global	Cex52a__init
+cex/52b-parens	CEX52B.MOD		has-global	Cex52b__init
+cex/52c-neg-divmod	CEX52C.MOD		has-global	Cex52c__init
+cex/52d-longint-promote	CEX52D.MOD		has-global	Cex52d__init
+cex/52e-chained	CEX52E.MOD		has-global	Cex52e__init
+cex/52f-array-dim	CEX52F.MOD		has-global	Cex52f__init
+size/67a-primitives	SIZE67A.MOD		has-global	Size67a__init
+size/67b-user-types	SIZE67B.MOD		has-global	Size67b__init
+size/67c-array-dim	SIZE67C.MOD		has-global	Size67c__init
+size/67d-undecl-rejected	SIZE67D.MOD	fails	compile-fails
+size/67e-var-rejected	SIZE67E.MOD	fails	compile-fails
+len/68a-const-init	LEN68A.MOD		has-global	Len68a__init
+len/68b-array-dim	LEN68B.MOD		has-global	Len68b__init
+len/68c-case-label	LEN68C.MOD		has-global	Len68c__init
+error/11a-underscore-rejected	BADNAME.MOD	fails	compile-fails
+error/11c-missing-import-rejected	NEEDSMIS.MOD	fails	compile-fails
+error/11d-missing-no-output	NEEDSMIS.MOD		no-file-in-workdir	Needsmis.om
+typeless/46e-no-type-no-var	NOTYPENV.MOD	fails	compile-fails
+typeless/46f-typeless-var-ok	TYPLSSOK.MOD		has-global	Typlssok__init
+stack/55c-65536-sp-65534	STK55A.MOD	/ENTRY=Run	mz-sp	65534
+stack/55f-default-sp-8190	STK55D.MOD	/ENTRY=Run	mz-sp	8190
+stack/55i-32768-sp-32766	STK55G.MOD	/ENTRY=Run	mz-sp	32766
+mz/min-alloc-default-8192-stack	STK55D.MOD	/ENTRY=Run	mz-min-alloc	512
+mz/max-alloc-default-8192-stack	STK55D.MOD	/ENTRY=Run	mz-max-alloc	512
+mz/min-alloc-65536-stack	STK55A.MOD	/ENTRY=Run	mz-min-alloc	4096
+mz/max-alloc-65536-stack	STK55A.MOD	/ENTRY=Run	mz-max-alloc	4096
+mz/min-alloc-32768-stack	STK55G.MOD	/ENTRY=Run	mz-min-alloc	2048
+mz/max-alloc-32768-stack	STK55G.MOD	/ENTRY=Run	mz-max-alloc	2048
+dos/paramstr0-not-truncated	DOSARG.MOD	/ENTRY=Run	errorlevel	0
+constexp/40a-pub-in-def	CSTEXP.MOD		om-member-contains	CSTEXP.DEF Cstexp_Pub
+constexp/40b-priv-not-in-def	CSTEXP.MOD		om-member-no-contains	CSTEXP.DEF Priv
+syscom/41a-paren-form	SYSCOML.MOD+EXTRA1.RDF		om-has-file	SYSCOML/EXTRA1.RDF
+syscom/41b-slash-form	SYSCOMLL.MOD+EXTRA1.RDF		om-has-file	SYSCOMLL/EXTRA1.RDF
+syscom/41c-spaces-trimmed	SYSCOMLT.MOD+EXTRA1.RDF		om-has-file	SYSCOMLT/EXTRA1.RDF
+syscom/41d-unknown-directive-warns	SYSCOMUN.MOD		stderr-contains	unknown
+stack/54a-65536-compiles	STK54A.MOD	/ENTRY=Run	has-global	Stk54a__init	STK54A.RDF
+stack/54b-stack-txt-present	STK54A.MOD	/ENTRY=Run	om-has-file	META-INF/STACK.TXT
+stack/54c-stack-txt-65536	STK54A.MOD	/ENTRY=Run	om-member-equals	META-INF/STACK.TXT 65536
+stack/54d-mid-body-compiles	STK54D.MOD	/ENTRY=Run	has-global	Stk54d__init	STK54D.RDF
+stack/54e-mid-body-32768	STK54D.MOD	/ENTRY=Run	om-member-equals	META-INF/STACK.TXT 32768
+stack/54f-multi-compiles	STK54F.MOD	/ENTRY=Run	has-global	Stk54f__init	STK54F.RDF
+stack/54g-multi-last-wins	STK54F.MOD	/ENTRY=Run	om-member-equals	META-INF/STACK.TXT 24576
+stack/54h-no-entry-compiles	STK54H.MOD		has-global	Stk54h__init
+stack/54i-no-stack-txt-without-entry	STK54H.MOD		om-no-file	META-INF/STACK.TXT
+stack/54j-malformed-rejected	STKBAD54.MOD	/ENTRY=Run	stderr-contains	$M
+stack/54k-malformed-no-om	STKBAD54.MOD	/ENTRY=Run	no-file-in-workdir	Stkbad54.om
+inline/56a-compiles	INL56A.MOD		has-global	Inl56a__init
+inline/56b-def-has-nop-proc	INL56A.MOD		om-member-contains	INL56A.DEF Inl56a_Nop
+inline/56b-def-has-trap-proc	INL56A.MOD		om-member-contains	INL56A.DEF Inl56a_Trap
+inline/56b-def-has-bytes-keyword	INL56A.MOD		om-member-contains	INL56A.DEF BYTES
+inline/56c-no-global-nop	INL56A.MOD		no-global	Inl56a_Nop	INL56A.RDF
+inline/56c-no-global-trap	INL56A.MOD		no-global	Inl56a_Trap	INL56A.RDF
+inline/56d-call-compiles	INL56D.MOD		has-global	Inl56d__init
+inline/56e-nop-byte-emitted	INL56D.MOD		code-contains	90	INL56D.RDF
+inline/56f-param-ref-compiles	INL56F.MOD		has-global	Inl56f__init
+inline/56g-data-reloc	INL56F.MOD		has-reloc-to-seg	1	INL56F.RDF
+inline/56k-multi-procs-compile	INL56K.MOD		has-global	Inl56k__init
+inline/56l-balanced-compiles	INL56L.MOD		has-global	Inl56l__init
+inline/56l-pushpop-pattern	INL56L.MOD		code-contains	50 58	INL56L.RDF
+inline/56l-const-pattern	INL56L.MOD		code-contains	B8 63 00	INL56L.RDF
+inline/56h-cross-import-compiles	INLUSE56.MOD+INLLIB56.OM		has-global	Inluse56__init
+inline/56i-no-cross-import-record	INLUSE56.MOD+INLLIB56.OM		no-import	Inllib56_Get7
+inline/56i-inlined-bytes	INLUSE56.MOD+INLLIB56.OM		code-contains	B8 07 00
+inline/56m-stmt-bytes-present	INLSTMT.MOD		code-contains	FA FB
+inline/56m-stmt-compiles	INLSTMT.MOD		has-global	Inlstmt_Run
+inline/56n-stmt-runtime-nops-exit0	INLEXIT.MOD	/ENTRY=Run	errorlevel	0
+inc-long/carries-into-hi-word	INCLONG.MOD	/ENTRY=Run	errorlevel	0
+near-far/37l-near-exported-rejected	NEAREXP.MOD	fails	compile-fails
+intr/T13-def-alone-not-enough	INTRT13.MOD+CORRUPT.DEF	fails	compile-fails
+opt/A-mul8-shl	OPTMUL.MOD		code-contains	B1 03 D3 E0
+opt/A-mul8-no-imul	OPTMUL.MOD		no-code-contains	F7 E9
+opt/B-div4-sar	OPTMUL.MOD		code-contains	B1 02 D3 F8
+opt/B-div4-no-idiv	OPTMUL.MOD		no-code-contains	F7 F9
+opt/C-mod16-and	OPTMUL.MOD		code-contains	25 0F 00
+opt/E-idx-longint-shl	OPTIDX.MOD		code-contains	B1 02 D3 E0
+opt/E-idx-longint-no-imul	OPTIDX.MOD		no-code-contains	F7 E9
+opt/D-mul3-shiftadd	OPTMUL3.MOD		code-contains	89 C1 D1 E0 D1 E0 2B C1
+opt/D-mul3-no-imul	OPTMUL3.MOD		no-code-contains	F7 E9
+datazero/guard-counted-string-present	DATAZERO.MOD		om-member-contains	DATAZERO.RDF HELLO WORLD
+datazero/guard-string-at-ofs2	DATAZERO.MOD		code-contains	8D 06 02 00
+procvar/nil-compare-4byte	PROCNIL.MOD	/ENTRY=Run	errorlevel	0
+dbg/om-has-dbg-member	DBGINFO.MOD		om-has-file	DBGINFO.DBG
+dbg/dbg-member-modname	DBGINFO.MOD		om-member-contains	DBGINFO.DBG DbgInfo
+dbg/link-g-runs	DBGINFO.MOD	/G /ENTRY=Run	errorlevel	0
+dbg/off-dbg-member-empty	DBGOFF.MOD		om-no-file	DBGOFF.DBG

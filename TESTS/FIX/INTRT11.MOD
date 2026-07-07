@@ -1,0 +1,5 @@
+MODULE Intrt11;
+VAR x: INTEGER;
+BEGIN
+  x := SYSTEM.ADR(42)
+END Intrt11.

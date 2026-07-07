@@ -1,0 +1,5 @@
+MODULE Tstnew;
+TYPE Node = RECORD x: INTEGER END;
+TYPE PNode = POINTER TO Node;
+VAR p: PNode;
+BEGIN NEW(p) END Tstnew.

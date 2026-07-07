@@ -1,0 +1,4 @@
+MODULE Broken;
+BEGIN
+  THIS IS NOT VALID SYNTAX !!!
+END Broken.

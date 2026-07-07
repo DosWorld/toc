@@ -1,0 +1,5 @@
+MODULE T7;
+VAR s, d: ARRAY 4 OF BYTE; n: INTEGER;
+BEGIN
+  SYSTEM.MOVE(s, d, n)
+END T7.

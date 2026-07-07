@@ -1,0 +1,8 @@
+MODULE Extfar;
+PROCEDURE xyz*(a: INTEGER; b: INTEGER): INTEGER; EXTERNAL;
+PROCEDURE Run*;
+  VAR r: INTEGER;
+BEGIN
+  r := xyz(1, 2)
+END Run;
+END Extfar.

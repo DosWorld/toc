@@ -1,0 +1,9 @@
+MODULE Is57c;
+TYPE
+  A = RECORD x: INTEGER END;
+  B = RECORD y: INTEGER END;
+  PA = POINTER TO A;
+VAR p: PA; b: BOOLEAN;
+BEGIN
+  b := p IS B;
+END Is57c.

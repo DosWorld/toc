@@ -1,0 +1,7 @@
+MODULE T1;
+TYPE P = POINTER TO INTEGER;
+VAR a: INTEGER; p: P;
+BEGIN
+  p := NIL;
+  a := 0
+END T1.

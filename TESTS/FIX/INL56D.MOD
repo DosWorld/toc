@@ -1,0 +1,8 @@
+MODULE Inl56d;
+PROCEDURE Nop*;
+  INLINE(090H);
+PROCEDURE UseNop*;
+BEGIN
+  Nop();
+END UseNop;
+END Inl56d.

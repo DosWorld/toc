@@ -1,0 +1,3 @@
+MODULE Badimp;
+IMPORT SYSTEM;
+END Badimp.

@@ -1,0 +1,5 @@
+MODULE Entrym2;
+PROCEDURE Run*;
+BEGIN
+END Run;
+END Entrym2.

@@ -1,0 +1,5 @@
+MODULE T4;
+VAR x, y: INTEGER; p: POINTER TO INTEGER;
+BEGIN
+  p := SYSTEM.ADR(x); y := p^
+END T4.

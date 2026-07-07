@@ -1,0 +1,11 @@
+MODULE Dead3;
+PROCEDURE Helper(x, y: INTEGER): INTEGER;
+BEGIN
+  RETURN x
+END Helper;
+
+PROCEDURE Run*(): INTEGER;
+BEGIN
+  RETURN Helper(1, 2)
+END Run;
+END Dead3.

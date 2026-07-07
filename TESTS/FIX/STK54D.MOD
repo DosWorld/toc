@@ -1,0 +1,6 @@
+MODULE Stk54d;
+(*$M 32768, 0, 0*)
+PROCEDURE Run*;
+BEGIN
+END Run;
+END Stk54d.

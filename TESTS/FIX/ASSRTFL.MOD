@@ -1,0 +1,6 @@
+MODULE Assrtfl;
+PROCEDURE Run*;
+BEGIN
+  ASSERT(FALSE)
+END Run;
+END Assrtfl.

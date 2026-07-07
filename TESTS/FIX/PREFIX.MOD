@@ -1,0 +1,5 @@
+MODULE Prefix;
+PROCEDURE Foo*;
+BEGIN
+END Foo;
+END Prefix.

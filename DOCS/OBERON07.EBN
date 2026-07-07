@@ -1,0 +1,543 @@
+(* ============================================================
+   Oberon-07 EBNF — dialect implemented by oberonc
+   Target: MS-DOS real mode 16-bit (large model, CS≠DS≠SS)
+   Last updated: sync with SRC/TOC/SCAN.MOD + SRC/TOC/PARSER.MOD
+   ============================================================
+
+   Notation:
+     { x }   zero or more
+     [ x ]   optional
+     x | y   alternative
+     "text"  literal terminal
+     (* *)   comment
+   ============================================================ *)
+
+
+(* ---- LEXICAL ---- *)
+
+letter      = "A" | "B" | ... | "Z" | "a" | "b" | ... | "z" .
+digit       = "0" | "1" | ... | "9" .
+hexDigit    = digit | "A" | "B" | "C" | "D" | "E" | "F" .
+
+ident       = letter { letter | digit } .
+(* Identifiers are CASE-SENSITIVE: "Foo", "foo", and "FOO" are three distinct names.
+   Keywords are all uppercase and reserved; lowercase/mixed-case variants are valid identifiers.
+   Max 32 significant characters; module names must not contain '_'. *)
+
+integer     = digit { digit }               (* decimal *)
+            | digit { hexDigit } "H"        (* hexadecimal *)
+            .
+
+real        = digit { digit } "." { digit } [ ("E" | "e") ["+" | "-"] digit { digit } ] .
+(* "1..10" does NOT scan as real: if digits are followed by "..", the integer is returned *)
+
+charLiteral = digit { hexDigit } "X" .     (* 0X..FFX; single character as integer *)
+
+string      = '"' { char } '"' | "'" { char } "'" .
+(* no escape sequences; strings are NUL-terminated in the data segment *)
+
+comment     = "(*" { any | comment } "*)" (* nested comments allowed *)
+            | "//" { any } newline     (* extension: single-line comment *)
+            | syscomment .
+
+(* System comments — body starts with '$'; treated as compiler directives,
+   not as documentation. Multiple directives may be combined in a single comment,
+   separated by commas (e.g. (*$A+,B-,R+*)). Each directive is an uppercase letter
+   followed by a value. For most directives the value is trimmed of surrounding
+   whitespace; exceptions: $M and $L consume the remainder of the comment as their
+   value (not split by commas). Unknown directives produce a warning. Invalid or
+   unreadable values for $L or $M are fatal compiler errors. *)
+syscomment  = "(*$" directive_list "*)"
+            | "//$" directive_list newline .
+
+directive_list = directive { "," directive } .
+
+directive   = "L" filepath    (* $L<path> — include <path>.rdf in the output .om;
+                                   the file is stored under USER/<BASENAME>.RDF inside the .om.
+                                   If the path cannot be opened or read, the compiler reports
+                                   an error and compilation fails. *)
+            | "M" mem_spec  (* $M <stack>,<min>,<max> — memory triple.
+                                   <stack> bytes (1..65536) is the stack-size hint; with /ENTRY=
+                                   the value is written as META-INF/STACK.TXT in the .om and
+                                   becomes the MZ-EXE SP at link time.  <min>, <max> bytes
+                                   (0..640*1024) bound the heap and are rounded UP to 16-byte
+                                   paragraphs by the compiler (4 bytes -> 1 paragraph; 0 -> 0).
+                                   The MAIN.RDF stub emits MOV AX,<min_para>; MOV BX,<max_para>
+                                   before the CALL FAR SYSTEM_INIT so the runtime sizes the
+                                   heap from these values.  Requirements: min <= max; all three
+                                   values must be present (single-value $M is rejected).
+                                   Multiple $M directives: last one wins.  Defaults when no $M
+                                   is given: stack=8192, min=128*1024, max=256*1024.  Example:
+                                   (*$M 10240, 128000, 650000*) *)
+mem_spec    = integer "," integer "," integer .
+            | "R" ("+" | "-") (* $R+ enable array bounds checks; $R- disable (default).
+                                   When enabled: constant out-of-bounds index is a compile
+                                   error; variable index emits a runtime check that calls
+                                   SYSTEM_ErrIndexOutOfBounds (FAR, no args) on violation,
+                                   which prints "Array index out of bounds" and halts.
+                                   Directive takes effect immediately and applies to all
+                                   array subscripts that follow it in the source file.
+                                   $R- may appear anywhere to turn checks off again. *)
+            | "D" ("+" | "-") (* $D+ enable collection of TDS/TDINFO debug info for this
+                                   module; $D- disable (default).  Like $R/$A, the last
+                                   toggle before codegen wins ($D may NOT be combined with
+                                   ',' — single-directive comment only).  Every compiled
+                                   module's .om carries a MODNAME.DBG member: non-empty
+                                   ($D+ — module/source/symbol/line records) or 0-byte
+                                   ($D- — no debug info).  At link time `oc /G /ENTRY=...`
+                                   merges the non-empty .DBG members into a Borland
+                                   TDS v2.08 block appended to the .exe (see dbg.md). *) .
+
+(* Keywords (all uppercase, not valid identifiers) *)
+keyword     = "ARRAY" | "BEGIN" | "BY" | "CASE" | "CONST" | "DIV" | "DO"
+            | "ELSE" | "ELSIF" | "END" | "FALSE" | "FOR" | "IF" | "IMPORT"
+            | "IN" | "IS" | "MOD" | "MODULE" | "NIL" | "OF" | "OR"
+            | "POINTER" | "PROCEDURE" | "RECORD" | "REPEAT" | "RETURN"
+            | "THEN" | "TO" | "TRUE" | "TYPE" | "UNTIL" | "VAR" | "WHILE" .
+
+(* "FAR" and "NEAR" are NOT keywords; they are context-sensitive identifiers used in
+   PROCEDURE declarations (after ";") and PROCEDURE types (before "("). *)
+
+
+(* ---- TYPES ---- *)
+
+qualident   = ident [ "." ident ] .
+(* Alias.SymName; Alias must be a module imported in IMPORT list.
+   SYSTEM.ADDRESS, SYSTEM.xxx are handled specially (implicitly imported). *)
+
+type        = qualident
+            | ArrayType
+            | RecordType
+            | PointerType
+            | ProcedureType
+            .
+
+ArrayType   = "ARRAY" [ length { "," length } ] "OF" type .
+(* Open array: "ARRAY OF type" (len omitted) — only valid as formal parameter type.
+   Multi-dim: "ARRAY m, n OF T" is sugar for "ARRAY m OF ARRAY n OF T" (up to 7 dims). *)
+
+length      = integer | ident .
+(* integer literal or named INTEGER constant; must be > 0.
+   Open-array dimensions (no length) are not affected by this rule. *)
+
+RecordType  = "RECORD" [ "(" qualident ")" ] { FieldList ";" } "END" .
+(* Optional (BaseType) enables record extension (single inheritance). *)
+
+FieldList   = ident { "," ident } [ "*" ] ":" type .
+(* "*" marks exported fields. Multiple names share the same type. *)
+
+PointerType = "POINTER" "TO" type .
+(* Forward reference within the same TYPE section is supported:
+   "POINTER TO Undeclared" captures the name and patches after the TYPE block.
+   Self-referential pointers (T = POINTER TO RECORD ... next: T END) work.
+   Mutual recursion via non-pointer fields is NOT supported. *)
+
+ProcedureType = "PROCEDURE" [ CallingConv ] [ FormalParams ] .
+(* CallingConv is an optional context-sensitive identifier: "FAR" or "NEAR".
+   Default (no modifier) is FAR.
+   FAR  procedural type: 4-byte far pointer {offset:2, segment:2}; only FAR procs assignable.
+   NEAR procedural type: 2-byte near offset; only NEAR procs assignable.
+   A NEAR proc var and a FAR proc var are not assignment-compatible with each other. *)
+
+CallingConv = "FAR" | "NEAR" .
+(* Context-sensitive identifier; not a keyword. Valid in:
+   - ProcedureType: "PROCEDURE FAR (...)" or "PROCEDURE NEAR (...)"
+   - ProcDecl header (after ";"):  "PROCEDURE name; FAR;" or "PROCEDURE name; NEAR;"
+   Exported procedures (*) are implicitly FAR and cannot be declared NEAR.
+   Nested procedures (inside another procedure) default to NEAR unless FAR is specified. *)
+
+(* "EXTERNAL" is also a context-sensitive identifier (not a keyword).
+   It appears after CallingConv (or after the first ";") and must be the LAST modifier.
+   PROCEDURE name [ ";" CallingConv ] ";" "EXTERNAL" ";"
+   No body, no DeclSeq, no BEGIN/END.  The procedure's implementation must be provided
+   by an external .rdf file at link time; the compiler emits an RDOFF IMPORT record for
+   the symbol "ModName_procname".
+   The call instruction emitted at call sites matches the calling convention:
+     FAR  external → CALL FAR  (9A + RELOC + SEGRELOC)
+     NEAR external → CALL NEAR (E8 + RELOC, no SEGRELOC)
+   Default convention: exported → FAR; non-exported → NEAR (same rules as normal procs). *)
+
+
+(* ---- DECLARATIONS ---- *)
+
+ConstDecl   = ident [ "*" ] "=" ConstExpr ";" .
+(* "*" exports the constant. ConstExpr must be a compile-time constant expression.
+   DEVIATION: ConstExpr must reduce to an INTEGER-family value (INTEGER, LONGINT,
+   WORD, or BYTE).  CHAR, BOOLEAN, REAL, LONGREAL, SET, and string/array/record/
+   pointer constants are rejected ("CONST must be an integer … value").  Use a
+   literal at the use site instead.  (Standard Oberon-07 allows CHAR/BOOLEAN/REAL/
+   string constants; this compiler does not.) *)
+
+ConstExpr   = expr .
+
+TypeDecl    = ident [ "*" ] "=" type ";" .
+
+VarDecl     = ident { "," ident } [ "*" ] ":" type ";" .
+
+ProcDecl    = "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
+              ";" [ CallingConv ";" ] [ "EXTERNAL" ";" ]
+            | "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
+              ";" "INLINE" "(" InlineEntry { "," InlineEntry } ")" ";"
+            | "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
+              ";" [ CallingConv ";" ] "FORWARD" ";"
+            | "PROCEDURE" ident ";"
+              DeclSeq
+              [ "BEGIN" StatSeq ]
+              "END" ident ";"
+            | "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
+              ";" [ CallingConv ";" ]
+              DeclSeq
+              [ "BEGIN" StatSeq ]
+              "END" ident ";" .
+
+InlineEntry = integer | ident .
+(* InlineEntry: either a hex/decimal byte literal (0..255) or a formal parameter name.
+   Two emission modes selected automatically by pe_emit_inline_call:
+
+   ADDRESS mode (pattern has at least one formal-parameter-name entry):
+     No args are pushed.  Each param-name entry emits a 2-byte little-endian address:
+     BP offset (signed 16-bit) for local/param actuals, or DS offset (unsigned 16-bit)
+     plus a DATA relocation entry for global variable actuals.
+     Example: PROCEDURE LoadWord*(VAR x: INTEGER): INTEGER; INLINE(08BH, 006H, x);
+
+   VALUE mode (pattern has only raw-byte entries, no param-name entries):
+     All actual arguments are pushed via parse_actual_params (ADDRESS=4 bytes, INTEGER=2).
+     The byte pattern uses POP instructions to consume them; must restore SP exactly.
+     Example: SYSTEM.MOVE and SYSTEM.FILL use POP CX/DI/ES/SI/AX sequences.
+
+   There is no CALL instruction; the byte sequence is emitted directly at the call site.
+   INLINE procs: no code body; no FAR/NEAR/EXTERNAL modifier allowed; can be exported (*).
+   Exported inline procs are stored in .def as INLINE/BYTES records for cross-module use.
+   STACK BALANCE RULE (mandatory): SP before the inline call MUST equal SP after.
+   Every PUSH in the byte pattern must be matched by a corresponding POP or ADD SP,n.
+   Unbalanced inline patterns corrupt the caller stack and cause undefined behavior. *)
+
+(* "*" exports the procedure (implicitly FAR; cannot be NEAR).
+   "FAR" or "NEAR" (context-sensitive idents, not keywords) declare calling convention.
+   Default: exported → FAR; non-exported → NEAR.
+   FAR procs: RETF epilogue; params start at [BP+6].
+   NEAR procs: RET epilogue; params start at [BP+4].
+
+   Nested PROCEDUREs are allowed syntactically.  Their visibility rule:
+     a procedure body can read/write only
+       (1) module-level (global) VAR / CONST / TYPE,
+       (2) names from imported modules,
+       (3) its own locals and formal parameters.
+     A nested procedure CANNOT read or write a variable or parameter declared
+     in an enclosing procedure.  Such accesses are rejected at compile time
+     with "uplevel access not allowed".  Calling an enclosing or sibling
+     procedure (by name) is still permitted.
+
+   The compiler therefore emits no static-link infrastructure: nested procs
+   compile to ordinary NEAR procedures with the same frame layout as
+   module-level ones.
+   Return type comes after FormalParams via ": type".
+   The result type MUST be scalar, pointer, or procedure — returning an array or
+   record is a fatal error (Parser.CheckResultType): they cannot be returned in
+   DX:AX and there is no hidden-result-pointer ABI.
+   Parameter passing: a by-value RECORD or fixed ARRAY is copied whole onto the
+   stack by the caller (2-byte aligned); an open array (ARRAY OF ...) is always
+   passed by reference (6-byte {ofs,seg,LEN} slot), VAR or not.
+   Procedure name must be repeated after END.
+   "EXTERNAL" (context-sensitive ident, must be LAST modifier): no body; implementation
+   is provided by an external .rdf file linked at link time. The compiler emits an RDOFF
+   IMPORT for "ModName_procname". EXTERNAL can be combined with FAR or NEAR.
+   Exported EXTERNAL procs appear in .def so other modules can call them.
+   "FORWARD" (context-sensitive ident): declares the procedure signature only; the body
+   must appear later in the same DeclSeq. The implementation line repeats only the
+   name: "PROCEDURE name;" (no parameters, no return type, no modifiers).
+   INLINE and EXTERNAL procedures may not be FORWARD.
+   Allowed modifiers for a FORWARD declaration: FAR, NEAR, and exported ("*").
+   All call sites emitted before the body is seen are backpatched when the body is defined.
+   An unresolved FORWARD (body never provided) is a compile error. *)
+
+FormalParams = "(" [ FPSection { ";" FPSection } ] ")" .
+
+FPSection   = [ "VAR" ] ident { "," ident } ":" type   (* typed VAR or value param *)
+            | "VAR" ident { "," ident }                (* typeless VAR: type omitted *)
+            .
+(* VAR parameters are passed as 4-byte far pointers {offset:2, segment:2}.
+   Open-array formals (ARRAY OF T) occupy 6 bytes: {offset:2, segment:2, LEN:2}.
+   The ACTUAL argument for a VAR parameter must be a VARIABLE (an l-value):
+   a local/global variable, a record field, an array element, or a pointer
+   dereference.  A string literal, a constant (scalar or array), an expression,
+   or a procedure value is NOT an l-value and is rejected at compile time
+   ("VAR parameter requires a variable …").  This includes "P(\"text\")" where
+   P has a VAR ARRAY OF CHAR formal — pass a CHAR-array variable instead.
+   Typeless VAR (no ": type"): callee receives the ADDRESS of the actual argument.
+     The parameter has type ADDRESS inside the procedure body.
+     Caller auto-computes the address (same as ADR(actual)).
+     SYSTEM.MOVE/FILL accept full ADDRESS (any segment); use SYSTEM.ADR(actual) to pass.
+     Use POINTER TO T and p^ to read/write memory through an ADDRESS.
+     Procedure names are also accepted: SYSTEM.ADR(P) pushes CS:code_offset of P.
+     Extension inspired by Turbo Pascal; not in standard Oberon-07. *)
+
+DeclSeq     = { ( "CONST" { ConstDecl } )
+              | ( "TYPE"  { TypeDecl  } )
+              | ( "VAR"   { VarDecl   } )
+              | ProcDecl
+              } .
+
+
+(* ---- MODULE ---- *)
+
+module      = "MODULE" ident ";"
+              [ ImportList ]
+              DeclSeq
+              [ "BEGIN" StatSeq ]
+              "END" ident "." .
+(* SYSTEM is implicitly imported in normal mode; it must NOT appear in the IMPORT list.
+   Exception: with compiler flag /SYSTEM (used only when compiling the SYSTEM module
+   itself), the implicit import is suppressed and IMPORT SYSTEM is allowed.
+   Module name must not contain '_'.
+   Module name must be repeated after END. *)
+
+ImportList  = "IMPORT" import { "," import } ";" .
+
+import      = ident [ ":=" ident ] .
+(* Plain "M": alias = module name = M.
+   "A := B": alias A refers to module B (B is looked up in lib/). *)
+
+
+(* ---- STATEMENTS ---- *)
+
+StatSeq     = statement { ";" statement } .
+
+statement   = [ assignment
+              | ProcCall
+              | IfStat
+              | CaseStat
+              | WhileStat
+              | RepeatStat
+              | ForStat
+              | InlineStat
+              | "RETURN" [ expr ]
+              ] .
+(* Empty statement is allowed (semicolon followed by END/ELSE/ELSIF/UNTIL). *)
+
+InlineStat  = "INLINE" "(" integer { "," integer } ")" .
+(* Emits the listed bytes verbatim at the call site (constants only — no Pn refs).
+   Used to inject inline assembly (CLI/STI, IN/OUT, OS-level fixups) inside a
+   regular procedure body.  No prologue/epilogue effects; SP must be balanced
+   by the emitted byte sequence.  The whole-body INLINE proc-declarator form
+   (see ProcDecl) is the only place where parameter-name (Pn-ref) entries
+   are accepted. *)
+
+assignment  = designator ":=" expr .
+(* Array-to-array assignment of fixed-size arrays (same or smaller RHS):
+   implemented as REP MOVSB; both sides must be M_GLOBAL or M_LOCAL.
+   Implicit INTEGER→LONGINT coercion at assignment boundary. *)
+
+ProcCall    = designator [ "(" [ ActualParams ] ")" ] .
+(* Call through a procedure variable or named procedure.
+   Parentheses are optional if the procedure has no parameters.
+   DEVIATION from Oberon-07: a call to a function procedure (one with a
+   result type) IS allowed as a statement — the returned value is simply
+   discarded.  Standard Oberon-07 forbids this (a function may only appear
+   in an expression).  Used throughout the toolchain, e.g.
+   `Files.Write(f, s)` where `Files.Write` returns a WORD byte count that
+   the caller ignores. *)
+
+ActualParams = expr { "," expr } .
+
+IfStat      = "IF" expr "THEN" StatSeq
+              { "ELSIF" expr "THEN" StatSeq }
+              [ "ELSE" StatSeq ]
+              "END" .
+
+CaseStat    = "CASE" expr "OF"
+              CaseArm { "|" CaseArm }
+              [ "ELSE" StatSeq ]
+              "END" .
+(* Case expression is stored in a hidden local ($case); linear scan of arms.
+   The case expression may be INTEGER or CHAR-typed. *)
+
+CaseArm     = LabelList ":" StatSeq .
+
+LabelList   = CaseLabel { "," CaseLabel } .
+
+CaseLabel   = constExpr [ ".." constExpr ] .
+(* Single value or inclusive range. constExpr must reduce to an INTEGER or
+   CHAR constant.  A single-character string literal "X" is treated as a
+   CHAR constant (Oberon-07: string of length 1 is compatible with CHAR). *)
+
+WhileStat   = "WHILE" expr "DO" StatSeq
+              { "ELSIF" expr "DO" StatSeq }
+              "END" .
+(* Oberon-07 extended WHILE: multiple guards evaluated from the top each iteration.
+   Any matching guard executes its body then restarts the guard chain. *)
+
+RepeatStat  = "REPEAT" StatSeq "UNTIL" expr .
+
+ForStat     = "FOR" ident ":=" expr "TO" expr [ "BY" integer ] "DO" StatSeq "END" .
+(* BY step: positive or negative integer constant (e.g. "BY -1").
+   Limit stored in hidden local ($lim) to avoid re-evaluation.
+   Loop variable is an INTEGER. *)
+
+
+(* ---- EXPRESSIONS ---- *)
+
+expr        = SimpleExpr [ relOp SimpleExpr ] .
+(* Implemented relOps: = # < <= > >= for INTEGER, BOOLEAN, CHAR, POINTER, WORD.
+   LONGINT: two-stage 32-bit signed comparison.
+   WORD: unsigned comparison (JB/JA/JBE/JAE); WORD wins over INTEGER when mixed.
+   REAL/LONGREAL: FPU FCOMPP + SAHF unsigned Jcc.
+   Mixed INTEGER/REAL: integer operand auto-coerced to REAL via FILD.
+   Pointer comparison: both segment and offset compared.
+   "IN": i IN s → BOOLEAN; i must be INTEGER/BYTE, s must be SET.
+   "IS": type test — LHS must be POINTER TO RECORD; RHS must be a RECORD type name.
+         Folds to TRUE if static type of LHS^ extends RHS, FALSE if unrelated.
+         Runtime tag check emitted when RHS extends LHS (requires heap allocation via NEW). *)
+
+relOp       = "=" | "#" | "<" | "<=" | ">" | ">=" | "IN" | "IS" .
+(* "IN": SET membership — implemented. i IN s: test bit i in set s.
+   Codegen: MOV BX,s; MOV CL,i; MOV AX,1; SHL AX,CL; TEST AX,BX → BOOLEAN.
+   "IS": type test with runtime tag check (see expr note above). *)
+
+SimpleExpr  = [ "+" | "-" ] term { addOp term } .
+
+addOp       = "+" | "-" | "OR" .
+(* "+" and "-" on INTEGER, LONGINT, REAL, LONGREAL.
+   Mixed INTEGER/REAL or INTEGER/LONGREAL: integer operand auto-coerced via FILD.
+   "OR" on BOOLEAN.
+   "+" on SET: union (OR); "-" on SET: difference (AND NOT). *)
+
+term        = factor { mulOp factor } .
+
+mulOp       = "*" | "/" | "DIV" | "MOD" | "&" .
+(* "*" "/" on INTEGER, LONGINT, REAL, LONGREAL.
+   Mixed INTEGER/REAL or INTEGER/LONGREAL: integer operand auto-coerced via FILD.
+   "DIV" "MOD" on INTEGER, LONGINT (signed; SYSTEM_S32DIV/SYSTEM_S32MOD for LONGINT).
+   "DIV" "MOD" on WORD: unsigned (XOR DX,DX; DIV CX).
+   "WORD wins" rule: if either operand is WORD, result is WORD (unsigned ops used).
+   "&" on BOOLEAN.
+   "*" on SET: intersection (AND); "/" on SET: symmetric difference (XOR). *)
+
+factor      = integer
+            | real
+            | charLiteral
+            | string
+            | "TRUE"
+            | "FALSE"
+            | "NIL"
+            | set
+            | "(" expr ")"
+            | "~" factor
+            | designator
+            | TypeCast
+            | BuiltinExpr
+            | ProcCallExpr
+            .
+
+set         = "{" [ element { "," element } ] "}" .
+element     = expr [ ".." expr ] .
+(* SET literal: each element sets the corresponding bit (0..15) in the 16-bit SET value.
+   Single element e: sets bit e.  Range lo .. hi: sets bits lo through hi inclusive.
+   Both "lo..hi" (no spaces) and "lo .. hi" (with spaces) are accepted. *)
+
+TypeCast    = ("INTEGER" | "BYTE" | "WORD" | "LONGINT" | "REAL" | "FLOAT" | "LONGREAL") "(" expr ")" .
+(* Type-cast built-ins produce a value of the target type.
+   INTEGER(x): truncate to 16-bit; if REAL/LONGREAL, FISTP word.
+   BYTE(x):    truncate to 8-bit (AND AX, 00FFh).
+   WORD(x):    reinterpret low 16 bits as unsigned; no codegen (AX already 16-bit).
+   LONGINT(x): sign-extend 16-bit (CWD) or FISTP dword for REAL/LONGREAL.
+   REAL(x):    FILD into ST(0); result is M_FREG.
+   FLOAT(x):   synonym for REAL(x) — identical codegen.
+   LONGREAL(x): FILD into ST(0); result is M_FREG. *)
+
+BuiltinExpr = ODD | ABS | ORD | CHR | FLOOR | ENTIER | LEN | SIZE | SysIntrinsicExpr .
+
+(* Standard built-in functions (used as expressions): *)
+(* ODD(x)    — INTEGER → BOOLEAN: AX & 1 *)
+(* ABS(x)    — INTEGER: negate if negative *)
+(* ORD(x)    — CHAR/BOOLEAN → INTEGER: identity in AX *)
+(* CHR(x)    — INTEGER → CHAR: identity in AX *)
+(* FLOOR(x)  — REAL/LONGREAL → INTEGER: round toward −∞ (saves/restores FPU CW) *)
+(* ENTIER(x) — synonym for FLOOR(x); identical codegen *)
+(* LEN(a)    — ARRAY → WORD (unsigned 16-bit).
+   - Fixed-size array: compile-time WORD constant (usable in CONST decls,
+     ARRAY dimensions, and CASE labels — same contexts as SIZE(T)).
+   - Open-array formal parameter: runtime load from the hidden LEN word
+     at [BP+adr+4]; result is M_REG, NOT a constant expression. *)
+(* SIZE(T)   — type → WORD: byte size of type T as a compile-time WORD constant.
+   Argument is a (possibly qualified) type NAME: INTEGER/BYTE/CHAR/BOOLEAN/SET/
+   WORD/LONGINT/REAL/LONGREAL or a user-defined RECORD/ARRAY/POINTER.  Errors
+   if the identifier is undeclared or denotes a variable/constant rather than
+   a type.  Usable in any constant-expression context — CONST decls, CASE
+   labels, ARRAY dimensions. *)
+
+ProcCallExpr = designator "(" [ ActualParams ] ")" .
+(* Function call as expression; result type is the procedure's return type.
+   Call through procedure variable: CALL FAR [BP+ofs] or CALL FAR [mem]. *)
+
+SysIntrinsicExpr = "SYSTEM" "." SysIdent "(" SysArgs ")" .
+(* SYSTEM intrinsics used as expressions — MUST use SYSTEM.xxx qualified name.
+   Bare LSL(x,n) etc. are NOT valid — compiler error "undefined identifier".
+   Rule: SYSTEM-specific intrinsics are NOT pre-declared with bare names; only
+   SYSTEM.Name form is accepted. *)
+
+SysIdent    = "LSL" | "LSR" | "ASR" | "ROR" | "AND" | "IOR" | "XOR" .
+(* LSL(x, n)  → same type: logical shift left.   Compiler built-in (INTEGER/LONGINT dispatch).
+   LSR(x, n)  → same type: logical shift right.  Compiler built-in.
+   ASR(x, n)  → same type: arithmetic shift right. Compiler built-in.
+   ROR(x, n)  → same type: rotate right.         Compiler built-in.
+   AND(x, y)  → INTEGER or LONGINT: bitwise AND. BYTE/INTEGER→INTEGER, LONGINT→LONGINT.
+   IOR(x, y)  → INTEGER or LONGINT: bitwise OR.  BYTE/INTEGER→INTEGER, LONGINT→LONGINT.
+   XOR(x, y)  → INTEGER or LONGINT: bitwise XOR. BYTE/INTEGER→INTEGER, LONGINT→LONGINT. *)
+
+(* The following are INLINE procedures in SYSTEM.MOD (typeless VAR, POP-based): *)
+(* ADR(VAR v): ADDRESS    — POP AX=offset, POP DX=segment; result DX:AX = far address of v.
+                            Works for locals, globals, VAR params, array elems, pointer derefs,
+                            and procedure names (SYSTEM.ADR(P) → CS:code_offset of P). *)
+(* SEG(VAR v): INTEGER    — POP AX (discard offset), POP AX=segment; result AX = segment of v. *)
+(* OFS(VAR v): INTEGER    — POP AX=offset, POP CX (discard segment); result AX = offset of v. *)
+(* PTR(s, o: INTEGER): ADDRESS — POP AX=o (offset), POP DX=s (segment); result DX:AX. *)
+(* MOVE(VAR src, dst; n: INTEGER) — POP-based inline: REP MOVSB copy (any segment). *)
+(* FILL(VAR dst; n: INTEGER; b: BYTE) — POP-based inline: REP STOSB fill (any segment). *)
+(* PORTOUT(port: INTEGER; val: BYTE) — POP-based inline: OUT DX, AL. *)
+(* PORTIN(port: INTEGER; VAR val: BYTE) — POP-based inline: IN AL, DX; MOV ES:[BX], AL. *)
+(* Note: SYSTEM.GET, SYSTEM.PUT, and SYSTEM.VAL are NOT available in this dialect.
+         Use POINTER TO T and p^ to read/write through an ADDRESS value.
+         Use standard type casts INTEGER(x), BYTE(x), CHR(x), ORD(x) instead of VAL. *)
+
+
+(* ---- DESIGNATOR ---- *)
+
+designator  = qualident { selector } .
+
+selector    = "." ident          (* record field access *)
+            | "[" expr "]"       (* array index *)
+            | "^"                (* pointer dereference — loads via ES:BX far ptr *)
+            .
+(* Qualified name "Alias.Name" resolves via def_read namespace (key "Alias.Name").
+   Pointer dereference: loads 4-byte far address into ES:BX; subsequent selectors
+   access via ES:[BX+offset].
+   Uplevel variable access from a nested procedure is rejected at compile time
+   (see ProcDecl notes above). *)
+
+
+(* ---- BUILT-IN PROCEDURES (statement context) ---- *)
+
+(* NEW(p)         — allocate sizeof(*p) bytes; store far pointer in p. *)
+(* NEW(p, n)      — allocate n bytes (runtime expression); store far pointer. *)
+(* DISPOSE(p)     — free far-pointer p; also accepts ADDRESS. *)
+(* INC(v [, n])   — v := v + 1 (or v + n). *)
+(* DEC(v [, n])   — v := v - 1 (or v - n). *)
+(* ASSERT(e [, n]) — if e is FALSE, call SYSTEM_Halt(n); default n=1. *)
+(* COPY(src, dst) — string copy (Strings library level; not REP MOVSB). *)
+
+
+(* ---- PREDECLARED IDENTIFIERS ---- *)
+
+(* Types:       INTEGER BOOLEAN CHAR BYTE SET ADDRESS LONGINT REAL LONGREAL *)
+(* Type synonyms: FLOAT = REAL *)
+(* Constants:   TRUE FALSE NIL *)
+(* Procedures:  NEW INC DEC LEN SIZE ODD ABS ASSERT COPY ORD CHR FLOOR ENTIER DISPOSE *)
+(*              ENTIER is a synonym for FLOOR *)
+(*              SIZE(T) returns byte size of type T as a WORD constant *)
+(* Type casts:  INTEGER(x) BYTE(x) LONGINT(x) REAL(x) LONGREAL(x) *)
+(* FLOAT(x) is a synonym for REAL(x); ENTIER(x) is a synonym for FLOOR(x). *)
+(* SET type and all operators (including IN) fully implemented. *)
+(* Implicit INTEGER→REAL/LONGREAL coercion: automatic in binary expressions (* / + - = # < > <= >=)
+   when one operand is REAL/LONGREAL and the other is INTEGER/BYTE/LONGINT.
+   Assignment still requires an explicit REAL(x)/LONGREAL(x) cast. *)

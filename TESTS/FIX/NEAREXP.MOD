@@ -1,0 +1,4 @@
+MODULE Nearexp;
+PROCEDURE Foo*; NEAR;
+BEGIN END Foo;
+END Nearexp.

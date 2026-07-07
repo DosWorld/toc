@@ -1,0 +1,4 @@
+MODULE Extfarex;
+PROCEDURE foo(x: INTEGER): INTEGER; FAR; EXTERNAL;
+PROCEDURE Run*; VAR r: INTEGER; BEGIN r := foo(1) END Run;
+END Extfarex.

@@ -1,0 +1,4 @@
+MODULE Dead6;
+VAR
+  ExpVar*: INTEGER;
+END Dead6.

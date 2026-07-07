@@ -1,0 +1,12 @@
+MODULE Prsr01;
+
+CONST K = 7;
+
+VAR g: INTEGER;
+
+PROCEDURE Add*(a, b: INTEGER): INTEGER;
+BEGIN RETURN a + b
+END Add;
+
+BEGIN g := K
+END Prsr01.

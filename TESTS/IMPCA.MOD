@@ -1,0 +1,6 @@
+MODULE IMPCA;
+
+CONST
+  N* = 4;
+
+END IMPCA.

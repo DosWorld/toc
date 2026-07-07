@@ -1,0 +1,41 @@
+all: OBERON.OM
+
+OBERON.OM: SYSTEM.om Out.om Out87.om In.om IO.o, Strings.om Files.om Crt.om Dos.om EMS.om
+        ,,\bin\olib merge OBERON.OM SYSTEM.om Out.om IO.om Out87.om In.om Strings.om Files.om Crt.om Dos.om EMS.om
+
+install: OBERON.OM
+        copy OBERON.OM ..\bin\
+
+SYSTEM.om: SYS.RDF SYSTEM.mod ..\src\oc
+        ..\bin\oc /SYSTEM SYSTEM.mod
+
+Out.om: Out.mod SYSTEM.om ..\src\oc
+        ..\bin\oc Out.mod
+
+Out87.om: Out87.mod Out.om SYSTEM.om ..\src\oc
+        ..\bin\oc Out87.mod
+
+In.om: In.mod SYSTEM.om ..\src\oc
+        ..\bin\oc In.mod
+
+IO.om: IO.mod SYSTEM.om ..\src\oc
+        ..\bin\oc IO.mod
+
+Files.om: Files.mod SYSTEM.om ..\src\oc
+        ..\bin\oc Files.mod
+
+Strings.om: Strings.mod SYSTEM.om ..\src\oc
+        ..\bin\oc Strings.mod
+
+Dos.om: Dos.mod SYSTEM.om ..\src\oc
+        ..\src\oc Dos.mod
+
+Crt.om: Crt.mod SYSTEM.om ..\src\oc
+        ..\bin\oc Crt.mod
+
+EMS.om: EMS.mod SYSTEM.om ..\src\oc
+        ..\bin\oc EMS.mod
+
+clean:
+        del *.om
+

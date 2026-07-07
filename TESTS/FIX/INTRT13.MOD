@@ -1,0 +1,3 @@
+MODULE T13;
+IMPORT corrupt;
+END T13.

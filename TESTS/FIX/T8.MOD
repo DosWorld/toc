@@ -1,0 +1,5 @@
+MODULE T8;
+VAR s, o, a: INTEGER;
+BEGIN
+  a := SYSTEM.PTR(s, o)
+END T8.

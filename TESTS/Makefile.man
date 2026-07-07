@@ -1,0 +1,146 @@
+# TESTS/Makefile.man — manifest-driven test runner.
+#
+# Reads TESTS/MANIFEST.TSV; for each non-comment row, compiles the
+# fixture under TESTS/FIX/ with BIN/TOC.EXE (via xt), and evaluates
+# the EXPECT predicate against the produced .rdf or .exe.
+#
+# Usage (POSIX host):
+#   make -f TESTS/Makefile.man test
+#
+# Required external tools: bash, awk, sed, tr, mktemp, tar, xt.
+# Required artefacts: BIN/TOC.EXE, BIN/RDFGREP.EXE, BIN/OBERON.OM.
+
+SHELL    := /bin/bash
+ROOT     := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+MANIFEST := $(ROOT)/TESTS/MANIFEST.TSV
+FIXDIR   := $(ROOT)/TESTS/FIX
+OC       := $(ROOT)/BIN/TOC.EXE
+RDFGREP  := $(ROOT)/BIN/RDFGREP.EXE
+XT       := $(shell command -v xt 2>/dev/null)
+# Per-test scratch dirs live under the project TMP/ (not the system tmpfs).
+TMPROOT  := $(ROOT)/TMP
+
+# Pull non-comment, non-blank NAME column from manifest.
+NAMES := $(shell grep -v '^\#' $(MANIFEST) | awk -F'\t' 'NF>0 {print $$1}')
+
+# Each test materialises as a phony target T.<sanitised-name>.
+SAFE   = $(subst /,.,$(1))
+TARGETS = $(foreach n,$(NAMES),T.$(call SAFE,$(n)))
+
+.PHONY: test $(TARGETS) check-prereqs
+
+test: check-prereqs $(TARGETS)
+	@printf 'Manifest tests: %d pass / 0 fail\n' $(words $(TARGETS))
+
+check-prereqs:
+	@test -f $(OC)       || { echo "missing $(OC) — run make"; exit 1; }
+	@test -f $(RDFGREP)  || { echo "missing $(RDFGREP) — run make"; exit 1; }
+	@test -n "$(XT)"     || { echo "xt not in PATH"; exit 1; }
+
+# Generate one explicit rule per row.
+define ROW_template
+T.$(subst /,.,$(1)):
+	@row_name='$(1)'; \
+	row=$$$$(grep -v '^\#' $(MANIFEST) | awk -F'\t' -v n="$$$$row_name" 'NF>0 && $$$$1==n {print $$$$2"|"$$$$3"|"$$$$4"|"$$$$5"|"$$$$6; exit}'); \
+	if [ -z "$$$$row" ]; then echo "FAIL: $$$$row_name — no manifest row"; exit 1; fi; \
+	fixture=$$$${row%%|*}; rest=$$$${row#*|}; \
+	cmd=$$$${rest%%|*};     rest=$$$${rest#*|}; \
+	expect=$$$${rest%%|*};  rest=$$$${rest#*|}; \
+	arg=$$$${rest%%|*};     member=$$$${rest#*|}; \
+	mkdir -p $(TMPROOT); wd=$$$$(mktemp -d "$(TMPROOT)/man.XXXXXX"); trap "rm -rf $$$$wd" EXIT; \
+	main_fix=$$$${fixture%%+*}; \
+	extras=$$$${fixture#*+}; \
+	cp $(FIXDIR)/$$$$main_fix $$$$wd/; \
+	if [ "$$$$extras" != "$$$$main_fix" ]; then \
+	    IFS=+; for ef in $$$$extras; do cp $(FIXDIR)/$$$$ef $$$$wd/; done; unset IFS; \
+	fi; \
+	fixture=$$$$main_fix; \
+	cp $(RDFGREP) $$$$wd/RDFGREP.EXE; \
+	cp $(OC) $$$$wd/TOC.EXE; \
+	cp $(ROOT)/BIN/OBERON.OM $$$$wd/OBERON.OM; \
+	compile_status=0; \
+	oc_flags=""; \
+	if [ -n "$$$$cmd" ] && [ "$$$$cmd" != "fails" ]; then oc_flags="$$$$cmd"; fi; \
+	stderr_file=$$$$wd/_stderr.txt; \
+	( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture >/dev/null 2>$$$$stderr_file ) || compile_status=$$$$?; \
+	base=$$$$(echo $$$$fixture | sed -E 's/\.[mM][oO][dD]$$$$//' | tr '[:lower:]' '[:upper:]'); \
+	diag_file=$$$$wd/output.log; \
+	[ -f $$$$diag_file ] || diag_file=$$$$stderr_file; \
+	case "$$$$expect" in \
+	    stderr-contains) \
+	        if grep -q -- "$$$$arg" $$$$diag_file; then \
+	            echo "PASS: $$$$row_name"; exit 0; \
+	        else \
+	            echo "FAIL: $$$$row_name (diagnostics lack '$$$$arg')"; exit 1; \
+	        fi ;; \
+	    stderr-no-contains) \
+	        if grep -q -- "$$$$arg" $$$$diag_file; then \
+	            echo "FAIL: $$$$row_name (diagnostics contain forbidden '$$$$arg')"; exit 1; \
+	        else \
+	            echo "PASS: $$$$row_name"; exit 0; \
+	        fi ;; \
+	    no-file-in-workdir) \
+	        if (cd $$$$wd && ls 2>/dev/null | grep -iqxF "$$$$arg"); then \
+	            echo "FAIL: $$$$row_name (unexpected file '$$$$arg' in workdir)"; exit 1; \
+	        else \
+	            echo "PASS: $$$$row_name"; exit 0; \
+	        fi ;; \
+	    file-in-workdir) \
+	        if (cd $$$$wd && ls 2>/dev/null | grep -iqxF "$$$$arg"); then \
+	            echo "PASS: $$$$row_name"; exit 0; \
+	        else \
+	            echo "FAIL: $$$$row_name (missing file '$$$$arg' in workdir)"; exit 1; \
+	        fi ;; \
+	esac; \
+	if [ "$$$$cmd" = "fails" ]; then \
+	    if [ "$$$$expect" = "compile-fails" ] && [ "$$$$compile_status" -ne 0 ]; then \
+	        echo "PASS: $$$$row_name"; exit 0; \
+	    else \
+	        echo "FAIL: $$$$row_name (compile exit=$$$$compile_status, expect compile-fails)"; exit 1; \
+	    fi; \
+	fi; \
+	if [ "$$$$compile_status" -ne 0 ]; then \
+	    echo "FAIL: $$$$row_name (compile failed: exit=$$$$compile_status)"; exit 1; \
+	fi; \
+	om=$$$$(cd $$$$wd && ls 2>/dev/null | grep -iE "^$$$$base\.om$$$$" | head -1); \
+	rc=0; \
+	case "$$$$expect" in \
+	    om-has-file|om-no-file) \
+	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$om "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	    om-member-contains|om-member-no-contains) \
+	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	    om-member-equals) \
+	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE om-member-equals $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	    errorlevel) \
+	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        actual=0; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 $$$$exe >/dev/null 2>&1 ) || actual=$$$$?; \
+	        if [ "$$$$actual" = "$$$$arg" ]; then rc=0; else echo "FAIL: $$$$row_name (errorlevel expected=$$$$arg actual=$$$$actual)"; exit 1; fi ;; \
+	    mz-sp|mz-min-alloc|mz-max-alloc) \
+	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	    *) \
+	        ( cd $$$$wd && tar xf $$$$om ) 2>/dev/null || true; \
+	        if [ -n "$$$$member" ]; then rdf=$$$$member; else rdf=$$$$(cd $$$$wd && ls *.RDF 2>/dev/null | head -1); fi; \
+	        if [ -z "$$$$rdf" ] || [ ! -f $$$$wd/$$$$rdf ]; then echo "FAIL: $$$$row_name (no $$$$rdf in $$$$om)"; exit 1; fi; \
+	        case "$$$$expect" in \
+	            init-imports-empty|has-segreloc|no-segreloc|has-reloc-and-segreloc) \
+	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	            no-import|has-import|no-global|has-global|code-starts|code-contains|no-code-contains|has-reloc-for|has-reloc-to-seg) \
+	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	            code-count|code-byte-at) \
+	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	            *) \
+	                echo "FAIL: $$$$row_name — unknown EXPECT '$$$$expect'"; exit 1 ;; \
+	        esac ;; \
+	esac; \
+	if [ "$$$$rc" -eq 0 ]; then \
+	    echo "PASS: $$$$row_name"; \
+	else \
+	    echo "FAIL: $$$$row_name ($$$$expect $$$$arg rc=$$$$rc)"; exit 1; \
+	fi
+endef
+
+$(foreach n,$(NAMES),$(eval $(call ROW_template,$(n))))
