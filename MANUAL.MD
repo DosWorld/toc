@@ -426,7 +426,7 @@ archive: a semicolon-separated list of `.om` files, searched after the
 current directory.
 
 ```
-SET OBERON_LIB=C:\BIN\OBERON.OM
+SET OBERON_LIB=C:\TOC\OBERON.OM
 ```
 
 `toc.exe` also looks for `OBERON.OM` next to its own binary automatically,
@@ -444,7 +444,7 @@ and runtime shutdown.
 
 ## Standard library reference
 
-Fourteen modules, merged into one `BIN/OBERON.OM` archive by `make`.
+Fourteen modules, merged into one `BIN\OBERON.OM` archive by `make`.
 Every procedure below is exported (`*`) and callable after `IMPORT`.
 
 ### `SYSTEM` — see [above](#system--low-level-access)
