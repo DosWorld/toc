@@ -40,7 +40,7 @@ Switches use the DOS `/` style and are case-insensitive (`/M`=`/m`, `/SYSTEM`=`/
 xt run --max=50000000 -c . bin/toc.exe /ENTRY=Run MyProg.Mod
 ```
 
-### 1.2 olib — archive manager
+### 1.2 tolib — archive manager
 
 ```
 tolib.exe list    File.om
