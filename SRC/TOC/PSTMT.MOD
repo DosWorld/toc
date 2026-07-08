@@ -175,11 +175,8 @@ BEGIN
   PExpr.Expect(Scan.TDo);
   loopTop := Cgen.CgPc();
   v.mode := dst.mode; v.adr := dst.adr; v.type := Syms.TypeInteger; v.isRef := FALSE;
-  Cgen.CgLoadItem(v); Cgen.Emit1(BYTE(Cgen.OpPushAx));
-  v.mode := Cgen.MLocal; v.adr := limSym.adr;
   Cgen.CgLoadItem(v);
-  Cgen.Emit1(BYTE(Cgen.OpPopCx));
-  Cgen.CgCmp();
+  Cgen.CgCmpAxBp(limSym.adr);
   IF step >= 0 THEN Cgen.CgCondNear(Cgen.OpJg, jend)
   ELSE Cgen.CgCondNear(Cgen.OpJl, jend) END;
   ParseStatementSequence(Syms.TypeNotype);
@@ -226,18 +223,17 @@ BEGIN
   WHILE (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TEnd) &
         (PExpr.sc.sym # Scan.TEof) DO
     bodyList := NIL; more := TRUE;
+    ReloadCase(caseLoad, caseSym);
     WHILE more DO
       lo := ParseConstLabel();
       IF PExpr.sc.sym = Scan.TDotdot THEN
         Scan.Next(PExpr.sc); hi := ParseConstLabel();
-        ReloadCase(caseLoad, caseSym);
         Cgen.CgCmpAxImm(lo);
         Cgen.CgCondNear(Cgen.OpJl, skipLo);
         Cgen.CgCmpAxImm(hi);
         n := BpPush(bodyList); Cgen.CgCondNear(Cgen.OpJle, n^.bp); bodyList := n;
         Cgen.CgPatchNear(skipLo)
       ELSE
-        ReloadCase(caseLoad, caseSym);
         Cgen.CgCmpAxImm(lo);
         n := BpPush(bodyList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); bodyList := n
       END;
@@ -283,7 +279,7 @@ PROCEDURE ParseSysprocCall(id: INTEGER);
       ok, bpNil: Cgen.Backpatch; isTaggedRec: BOOLEAN; sz: LONGINT;
       isLongV, isLongStep, isWordStep, needSaveAddr, saveEsbx: BOOLEAN;
       isAddrV, isByteV, isGlobalV, fastAddr, refFast: BOOLEAN;
-      ptt: Syms.TypeDesc;
+      ptt: Syms.TypeDesc; condConst: BOOLEAN;
 BEGIN
   PExpr.Expect(Scan.TLparen);
   CASE id OF
@@ -565,18 +561,30 @@ BEGIN
   | Syms.SpAssert:
       errCode := 1;
       haltId := PExpr.GetSystemImport("SYSTEM_Halt");
-      PExpr.ParseExpression(cond); Cgen.CgLoadItem(cond);
+      PExpr.ParseExpression(cond);
+      condConst := (cond.mode = Cgen.MConst) & (cond.type # Syms.NoType) &
+                   (cond.type.form = Syms.TFBoolean);
+      IF ~condConst THEN Cgen.CgLoadItem(cond) END;
       IF PExpr.sc.sym = Scan.TComma THEN
         Scan.Next(PExpr.sc);
         IF PExpr.sc.sym = Scan.TInt THEN errCode := PExpr.sc.ival; Scan.Next(PExpr.sc)
         ELSE PExpr.Error("integer constant expected") END
       END;
-      Cgen.CgTestAx();
-      Cgen.CgCondNear(Cgen.OpJnz, ok);
-      Cgen.CgLoadImm(INTEGER(errCode));
-      Cgen.Emit1(BYTE(Cgen.OpPushAx));
-      Cgen.CgCallFar(haltId);
-      Cgen.CgPatchNear(ok)
+      IF condConst & (cond.val # 0) THEN
+        (* compile-time TRUE — the assertion can never fail; emit nothing *)
+      ELSIF condConst THEN
+        (* compile-time FALSE — always halts; skip the runtime test *)
+        Cgen.CgLoadImm(INTEGER(errCode));
+        Cgen.Emit1(BYTE(Cgen.OpPushAx));
+        Cgen.CgCallFar(haltId)
+      ELSE
+        Cgen.CgTestAx();
+        Cgen.CgCondNear(Cgen.OpJnz, ok);
+        Cgen.CgLoadImm(INTEGER(errCode));
+        Cgen.Emit1(BYTE(Cgen.OpPushAx));
+        Cgen.CgCallFar(haltId);
+        Cgen.CgPatchNear(ok)
+      END
   ELSE
     PExpr.Error("unsupported built-in statement")
   END;

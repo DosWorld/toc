@@ -968,6 +968,7 @@ BEGIN
   EmitW(hi)
 END CgAddSubMemL;
 PROCEDURE CgCmp*()      ; BEGIN Emit2(03BH, 0C8H) END CgCmp;       (* CMP CX, AX *)
+PROCEDURE CgCmpAxBp*(ofs: LONGINT); BEGIN EmitRel(03BH, 006H, ofs) END CgCmpAxBp; (* CMP AX, [BP+ofs] *)
 PROCEDURE CgTestAx*()   ; BEGIN Emit2(085H, 0C0H) END CgTestAx;
 PROCEDURE CgBoolNot*()  ; BEGIN Emit3(083H, 0F0H, 001H) END CgBoolNot; (* XOR AX,1 *)
 PROCEDURE CgCmpAxImm*(val: INTEGER);
