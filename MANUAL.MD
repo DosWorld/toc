@@ -488,11 +488,16 @@ Every procedure below is exported (`*`) and callable after `IMPORT`.
 Also exports the raw runtime primitives that everything else is built on:
 
 ```oberon
+PROCEDURE GetExitProc*(): ADDRESS;
+PROCEDURE SetExitProc*(proc: ADDRESS);
 PROCEDURE Halt*(ErrCode: BYTE);                          EXTERNAL;
+
 PROCEDURE Alloc*(sizeInBytes: WORD): ADDRESS;             EXTERNAL;
 PROCEDURE Free*(p: ADDRESS);                              EXTERNAL;
 PROCEDURE MemAvail*(): WORD;                              EXTERNAL;  (* total free heap, paragraphs *)
 PROCEDURE MemMaxAvail*(): WORD;                           EXTERNAL;  (* largest free block, paragraphs *)
+
+PROCEDURE Intr*(IntNo: BYTE; VAR Regs: Registers);
 PROCEDURE CallFar*(ProcPtr: ADDRESS; VAR Regs: Registers); EXTERNAL;
 ```
 
