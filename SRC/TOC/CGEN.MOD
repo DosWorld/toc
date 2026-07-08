@@ -29,6 +29,10 @@ CONST
   OpJge*      = 07DH;
   OpJle*      = 07EH;
   OpJg*       = 07FH;
+  OpJb*       = 072H;   (* unsigned below *)
+  OpJae*      = 073H;   (* unsigned above-or-equal *)
+  OpJbe*      = 076H;   (* unsigned below-or-equal *)
+  OpJa*       = 077H;   (* unsigned above *)
   OpRet*      = 0C3H;
   OpRetN*     = 0C2H;
   OpRetf*     = 0CBH;
@@ -453,6 +457,61 @@ END CgLoadAddrMem;
 PROCEDURE CgLoadCodeAddr*(codeOfs: WORD); BEGIN EmitMemReloc(0B8H, codeOfs, Rdoff.SegCode)
 END CgLoadCodeAddr;
 
+(* CgEmitJumpTableEntry — emit one bare 16-bit code-offset word (no opcode
+   prefix) for a jump table slot, with a code-to-code relocation.  codeOfs is
+   the module-local code offset at the moment the target is known (typically
+   CgPc() taken right before an arm's body); the linker adds this module's
+   code-group base to it (see LINK.MOD OnReloc, rrefSeg=SegCode branch). *)
+PROCEDURE CgEmitJumpTableEntry*(codeOfs: WORD);
+  VAR patch: LONGINT;
+BEGIN
+  patch := CgPc(); EmitW(INTEGER(codeOfs));
+  Rdoff.RdfAddReloc(CgObj, Rdoff.SegCode, patch, 2, Rdoff.SegCode, FALSE)
+END CgEmitJumpTableEntry;
+
+(* CgPatchJumpTableEntry — retroactively fill a jump-table slot (emitted
+   earlier via CgEmitJumpTableEntry with a placeholder codeOfs, typically 0)
+   once the real target offset is known.  The reloc added at emit time is
+   unaffected — only the stored addend word (which IS the module-local code
+   offset the linker's relocator adds its group base to) needs updating. *)
+PROCEDURE CgPatchJumpTableEntry*(slotOfs: LONGINT; codeOfs: WORD);
+BEGIN
+  Rdoff.PatchCodeByte(CgObj, slotOfs,     BYTE(SYSTEM.AND(codeOfs, 0FFH)));
+  Rdoff.PatchCodeByte(CgObj, slotOfs + LONGINT(1), BYTE(SYSTEM.AND(SYSTEM.LSR(codeOfs, 8), 0FFH)))
+END CgPatchJumpTableEntry;
+
+(* CgSubAxImm — SUB AX, imm16 (always the full 16-bit form; no imm8 fast path
+   needed here — used only in the CASE jump-table dispatch prologue, where
+   this runs once per dispatch, not per element). *)
+PROCEDURE CgSubAxImm*(val: INTEGER);
+BEGIN
+  IF val # 0 THEN Emit1(02DH); EmitW(val) END
+END CgSubAxImm;
+
+(* CgCmpAxImmUnsignedAbove — CMP AX,imm16 followed by the caller emitting a
+   JA/JBE (unsigned) branch; this just does the compare (mirrors CgCmpAxImm
+   but documents that callers use the unsigned condition codes OpJa/OpJbe,
+   needed for the CASE jump-table bounds check: AX is (selector-lo), which is
+   never negative when in range, but IS a huge unsigned value when the true
+   selector was below lo — signed JG/JL would misclassify that case). *)
+PROCEDURE CgCmpAxImmUnsigned*(val: INTEGER);
+BEGIN
+  Emit1(03DH); EmitW(val)
+END CgCmpAxImmUnsigned;
+
+(* CgJmpTableCs — CS: JMP [BX+tableCodeOfs] — indexed near jump through a
+   jump table living in the code segment (hence the CS: override: DS points
+   at the data segment, not code, in this compiler's segment model).
+   tableCodeOfs is the module-local code offset of the table's first entry. *)
+PROCEDURE CgJmpTableCs*(tableCodeOfs: WORD);
+  VAR patch: LONGINT;
+BEGIN
+  Emit1(02EH);              (* CS: prefix *)
+  Emit2(0FFH, 0A7H);        (* FF /4, mod=10 rm=111(BX): JMP [BX+disp16] *)
+  patch := CgPc(); EmitW(INTEGER(tableCodeOfs));
+  Rdoff.RdfAddReloc(CgObj, Rdoff.SegCode, patch, 2, Rdoff.SegCode, FALSE)
+END CgJmpTableCs;
+
 (* ---- far-pointer helpers ---- *)
 
 PROCEDURE CgLesBxBp*(ofs: LONGINT); BEGIN EmitRel(BYTE(OpLes), 01EH, ofs) END CgLesBxBp;
@@ -504,17 +563,13 @@ END CgLoadFarAddrEsBx;
 
 PROCEDURE CgPushAggrValue*(evenSize: INTEGER);
 BEGIN
-  Emit2(08BH, 0F3H);                 (* MOV SI, BX        ; src ofs *)
-  Emit2(08CH, 0C1H);                 (* MOV CX, ES        ; src seg (saved) *)
+  EmitCodeStr("8B,F3,8C,C1");   (* MOV SI,BX ; src ofs / MOV CX,ES ; src seg (saved) *)
   Emit2(081H, 0ECH); EmitW(evenSize);(* SUB SP, evenSize  ; reserve dest slot *)
-  Emit2(08BH, 0FCH);                 (* MOV DI, SP        ; dest ofs = new top *)
-  Emit1(BYTE(OpPushDs));             (* PUSH DS           ; save DS *)
-  Emit2(08EH, 0D9H);                 (* MOV DS, CX        ; DS = src seg *)
-  Emit2(08CH, 0D0H);                 (* MOV AX, SS *)
-  Emit2(08EH, 0C0H);                 (* MOV ES, AX        ; ES = SS (dest seg) *)
+  (* MOV DI,SP ; dest ofs = new top / PUSH DS ; save DS / MOV DS,CX ; DS = src seg /
+     MOV AX,SS / MOV ES,AX ; ES = SS (dest seg) *)
+  EmitCodeStr("8B,FC,1E,8E,D9,8C,D0,8E,C0");
   CgLoadImm(evenSize); Emit2(08BH, 0C8H);  (* MOV CX, evenSize *)
-  Emit1(BYTE(OpCld));                (* CLD *)
-  Emit2(0F3H, 0A4H);                 (* REP MOVSB         ; DS:SI -> ES:DI *)
+  EmitCodeStr("FC,F3,A4");      (* CLD / REP MOVSB ; DS:SI -> ES:DI *)
   Emit1(01FH)                        (* POP DS            ; restore DS *)
 END CgPushAggrValue;
 
@@ -811,12 +866,12 @@ END CgCmp32Neq;
 (* ---- arithmetic ---- *)
 
 PROCEDURE CgAdd*()      ; BEGIN Emit2(003H, 0C1H) END CgAdd;       (* ADD AX, CX *)
-PROCEDURE CgSub*()      ; BEGIN Emit1(091H); Emit2(02BH,0C1H) END CgSub;
+PROCEDURE CgSub*()      ; BEGIN EmitCodeStr("91,2B,C1") END CgSub; (* XCHG AX,CX / SUB AX,CX *)
 PROCEDURE CgMul*()      ; BEGIN Emit2(0F7H, 0E9H) END CgMul;       (* IMUL CX *)
-PROCEDURE CgDiv*()      ; BEGIN Emit1(091H); Emit1(099H); Emit2(0F7H,0F9H) END CgDiv;
+PROCEDURE CgDiv*()      ; BEGIN EmitCodeStr("91,99,F7,F9") END CgDiv; (* XCHG AX,CX / CWD / IDIV CX *)
 PROCEDURE CgMod*()      ; BEGIN CgDiv(); Emit2(08BH,0C2H) END CgMod;
 PROCEDURE CgMulU*()     ; BEGIN Emit2(0F7H, 0E1H) END CgMulU;      (* MUL CX unsigned *)
-PROCEDURE CgDivU*()     ; BEGIN Emit1(091H); Emit2(031H,0D2H); Emit2(0F7H,0F1H) END CgDivU;
+PROCEDURE CgDivU*()     ; BEGIN EmitCodeStr("91,31,D2,F7,F1") END CgDivU; (* XCHG AX,CX / XOR DX,DX / DIV CX *)
 PROCEDURE CgModU*()     ; BEGIN CgDivU(); Emit2(08BH,0C2H) END CgModU;
 PROCEDURE CgNeg*()      ; BEGIN Emit2(0F7H, 0D8H) END CgNeg;
 PROCEDURE CgAnd*()      ; BEGIN Emit2(023H, 0C1H) END CgAnd;
@@ -1005,8 +1060,7 @@ BEGIN
   Emit1(03DH); EmitW(tagId);        (* CMP AX, tagId *)
   (* JE +9 -> true; ADD SI,2; JMP -16 -> loop; false: XOR AX,AX; JMP +3 -> POP SI *)
   EmitCodeStr("74,09,83,C6,02,EB,F0,33,C0,EB,03");
-  Emit1(0B8H); EmitW(1);            (* true: MOV AX,1 *)
-  Emit1(05EH)                       (* POP SI *)
+  EmitCodeStr("B8,01,00,5E");       (* true: MOV AX,1 / POP SI *)
 END CgIsTagScan;
 
 PROCEDURE CgIsTagCheck*(VAR item: Item; tagId: INTEGER);

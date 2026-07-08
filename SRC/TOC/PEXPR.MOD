@@ -274,24 +274,17 @@ END StrengthReduce;
 
 (* ---- FPU coerce helpers ---- *)
 
+(* SUB SP,2 / MOV BX,SP / SS: MOV [BX],AX / SS: FILD word [BX] / ADD SP,2 *)
 PROCEDURE CoerceAxToFpu;
 BEGIN
-  Cgen.Emit2(083H, 0ECH); Cgen.Emit1(002H);
-  Cgen.Emit2(089H, 0E3H);
-  Cgen.Emit3(036H, 089H, 007H);
-  Cgen.Emit3(036H, 0DFH, 007H);
-  Cgen.Emit2(083H, 0C4H); Cgen.Emit1(002H);
+  Cgen.EmitCodeStr("83,EC,02,89,E3,36,89,07,36,DF,07,83,C4,02");
   modUsesFpu := TRUE
 END CoerceAxToFpu;
 
+(* SUB SP,4 / MOV BX,SP / SS: MOV [BX],AX / SS: MOV [BX+2],DX / SS: FILD qword [BX] / ADD SP,4 *)
 PROCEDURE CoerceDxaxToFpu;
 BEGIN
-  Cgen.Emit2(083H, 0ECH); Cgen.Emit1(004H);
-  Cgen.Emit2(089H, 0E3H);
-  Cgen.Emit3(036H, 089H, 007H);
-  Cgen.Emit4(036H, 089H, 057H, 002H);
-  Cgen.Emit3(036H, 0DBH, 007H);
-  Cgen.Emit2(083H, 0C4H); Cgen.Emit1(004H);
+  Cgen.EmitCodeStr("83,EC,04,89,E3,36,89,07,36,89,57,02,36,DB,07,83,C4,04");
   modUsesFpu := TRUE
 END CoerceDxaxToFpu;
 
@@ -305,8 +298,7 @@ BEGIN
   IF len < 0 THEN
     Cgen.Emit1(050H);
     Cgen.CgLoadBp(openLenBpOfs);
-    Cgen.Emit2(089H, 0C1H);
-    Cgen.Emit1(058H)
+    Cgen.EmitCodeStr("89,C1,58")  (* MOV CX,AX; POP AX *)
   END;
   Cgen.CgTestAx();
   Cgen.CgCondShort(Cgen.OpJge, ok1);
@@ -1172,7 +1164,7 @@ BEGIN
   | Scan.TLbrace:
       (* SET literal *)
       Scan.Next(sc);
-      Cgen.Emit2(033H, 0C0H); Cgen.Emit1(BYTE(Cgen.OpPushAx));
+      Cgen.EmitCodeStr("33,C0,50");   (* XOR AX,AX; PUSH AX *)
       WHILE sc.sym # Scan.TRbrace DO
         IF sc.sym = Scan.TComma THEN Scan.Next(sc) END;
         ParseExpression(lo); Cgen.CgLoadItem(lo);
@@ -1273,14 +1265,8 @@ BEGIN
                 ELSE
                   Cgen.CgLoadItem(arg);
                   IF (srcForm = Syms.TFReal) OR (srcForm = Syms.TFLongreal) THEN
-                    Cgen.Emit2(083H, 0ECH); Cgen.Emit1(004H);
-                    Cgen.Emit2(089H, 0E3H);
-                    Cgen.Emit3(036H, 089H, 007H);
-                    Cgen.Emit4(036H, 089H, 057H, 002H);
-                    Cgen.Emit3(036H, 0DBH, 007H);
-                    Cgen.Emit3(036H, 08BH, 007H);
-                    Cgen.Emit4(036H, 08BH, 057H, 002H);
-                    Cgen.Emit2(083H, 0C4H); Cgen.Emit1(004H)
+                    (* SUB SP,4/MOV BX,SP/store AX,DX/FISTP qword[BX]/reload AX,DX/ADD SP,4 *)
+                    Cgen.EmitCodeStr("83,EC,04,89,E3,36,89,07,36,89,57,02,36,DB,07,36,8B,07,36,8B,57,02,83,C4,04")
                   ELSIF (srcForm = Syms.TFWord) OR (srcForm = Syms.TFByte)
                       OR (srcForm = Syms.TFChar) OR (srcForm = Syms.TFBoolean) THEN
                     Cgen.Emit2(033H, 0D2H)   (* XOR DX,DX — zero-extend unsigned source *)
@@ -1396,11 +1382,10 @@ BEGIN
               Cgen.Emit2(081H, 0C3H); Cgen.EmitW(INTEGER(SYSTEM.AND(pt.argSize, LONGINT(0FFFFH))))
             END
           END;
-          Cgen.Emit3(036H, 08BH, 00FH);
-          Cgen.Emit4(036H, 08BH, 05FH, 002H);
-          Cgen.Emit2(08EH, 0C1H);
+          (* SS: MOV CX,[BX] / SS: MOV BX,[BX+2] / MOV ES,CX *)
+          Cgen.EmitCodeStr("36,8B,0F,36,8B,5F,02,8E,C1");
           Cgen.CgCallProcVarEsbx();
-          Cgen.Emit2(083H, 0C4H); Cgen.Emit1(004H)
+          Cgen.EmitCodeStr("83,C4,04")  (* ADD SP,4 *)
         ELSE
           ParseActualParameters(pt);
           IF pt.isFar THEN
@@ -1486,9 +1471,7 @@ BEGIN
           ELSE
             Cgen.Emit1(BYTE(Cgen.OpPushAx));
             Cgen.CgLoadItem(item);
-            Cgen.Emit1(BYTE(Cgen.OpPopCx));
-            Cgen.Emit1(BYTE(Cgen.OpPushAx));
-            Cgen.Emit2(08BH, 0C1H)
+            Cgen.EmitCodeStr("59,50,8B,C1")  (* POP CX; PUSH AX; MOV AX,CX *)
           END;
           rhsLoaded := TRUE
         END
@@ -1655,9 +1638,7 @@ BEGIN
           ELSE
             Cgen.Emit1(BYTE(Cgen.OpPushAx));
             Cgen.CgLoadItem(item);
-            Cgen.Emit1(BYTE(Cgen.OpPopCx));
-            Cgen.Emit1(BYTE(Cgen.OpPushAx));
-            Cgen.Emit2(08BH, 0C1H)
+            Cgen.EmitCodeStr("59,50,8B,C1")  (* POP CX; PUSH AX; MOV AX,CX *)
           END;
           rhsLoaded := TRUE
         END
@@ -1879,9 +1860,7 @@ BEGIN
     Scan.Next(sc);
     Cgen.CgLoadItem(item); Cgen.Emit1(BYTE(Cgen.OpPushAx));
     ParseSimpleExpression(rhs); Cgen.CgLoadItem(rhs);
-    Cgen.Emit2(089H, 0C3H);
-    Cgen.Emit1(BYTE(Cgen.OpPopAx));
-    Cgen.Emit2(08AH, 0C8H);
+    Cgen.EmitCodeStr("89,C3,58,8A,C8");   (* MOV BX,AX; POP AX; MOV CL,AL *)
     Cgen.Emit1(0B8H); Cgen.EmitW(0001H);
     Cgen.CgShlCl();
     Cgen.Emit2(085H, 0C3H);

@@ -1,4 +1,4 @@
-# Trubo Oberon Compiler (TOC)
+# Trubo Oberon
 
 ### A self-hosting Oberon-07 compiler for 16-bit MS-DOS real mode
 
@@ -61,7 +61,7 @@ That means:
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
-- **294-row regression manifest** plus DOS-side executable and unit-test
+- **272-row regression manifest** plus DOS-side executable and unit-test
   suites — every codegen change is checked against real compiled/linked/run
   output, not just "it compiled."
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with

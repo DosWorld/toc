@@ -588,6 +588,29 @@ BEGIN
   s.sym := TEof
 END Close;
 
+(* Mark/Restore — save and rewind lexer position for a bounded lookahead
+   pre-scan (used by CASE's label-density pre-pass, see PStmt.MOD).  Restore
+   does NOT reuse the saved copy's `file` value (its buffer window has moved
+   on by the time Restore runs); it re-seeks the LIVE file to the saved byte
+   position instead, which reloads the buffer, then copies back every other
+   field verbatim.  The saved byte position is Files.Position at the moment
+   Mark is called: since s.ch already holds the next lookahead character (it
+   was read but not yet consumed as part of a token), position == "next byte
+   the file will read", so after Seek + field restore, resuming Next(s) or
+   ReadCh(s) behaves exactly as if no pre-scan had happened. *)
+PROCEDURE Mark*(VAR s: Scanner; VAR m: Scanner; VAR filePos: LONGINT);
+BEGIN
+  m := s;
+  filePos := Files.Position(s.file)
+END Mark;
+
+PROCEDURE Restore*(VAR s: Scanner; VAR m: Scanner; filePos: LONGINT);
+BEGIN
+  Files.Seek(s.file, filePos);
+  m.file := s.file;   (* keep the freshly-seeked file state; discard the stale copy *)
+  s := m
+END Restore;
+
 PROCEDURE Open*(VAR s: Scanner; filename: ARRAY OF CHAR);
 BEGIN
   s.sym      := TEof;

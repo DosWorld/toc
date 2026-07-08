@@ -203,10 +203,265 @@ BEGIN
   Cgen.CgLoadItem(item)
 END ReloadCase;
 
+(* ---- CASE jump-table pre-scan (G7) ----
+   Decides chain-vs-table BEFORE any codegen, using a bounded, side-effect-free
+   lookahead over the raw token stream (never invokes PExpr.ParseExpression,
+   so it cannot intern strings, allocate symbols, or report duplicate errors).
+   Only recognizes the common simple label shapes: an optional unary MINUS
+   followed by TInt/TChar, or a single-char TString.  Anything else (qualified
+   idents, arithmetic, ranges) makes the WHOLE case fall back to the safe
+   linear chain — never a correctness risk, only a missed optimization. *)
+
+CONST
+  ArmSlotChunk = 32;
+  MaxPreScanTokens = 20000;  (* hard safety net: abort pre-scan, not hang *)
+  MaxTableSlots = 1024;      (* cap on hi-lo+1; beyond this, fall back to chain *)
+
+(* PreScanLabel — recognize one simple constant label at the CURRENT token.
+   On success: consumes the token(s) via Scan.Next, sets val, returns TRUE.
+   On failure: does NOT consume anything meaningful for the caller to trust —
+   caller must treat FALSE as "abort the whole pre-scan", so leaving the
+   scanner mid-token here is fine (Restore rewinds everything regardless). *)
+PROCEDURE PreScanLabel(VAR ok: BOOLEAN): INTEGER;
+  VAR neg: BOOLEAN; v: INTEGER;
+BEGIN
+  neg := FALSE; v := 0; ok := TRUE;
+  IF PExpr.sc.sym = Scan.TMinus THEN neg := TRUE; Scan.Next(PExpr.sc) END;
+  IF PExpr.sc.sym = Scan.TInt THEN
+    v := INTEGER(PExpr.sc.ival); Scan.Next(PExpr.sc)
+  ELSIF (~neg) & (PExpr.sc.sym = Scan.TChar) THEN
+    v := INTEGER(PExpr.sc.ival); Scan.Next(PExpr.sc)
+  ELSIF (~neg) & (PExpr.sc.sym = Scan.TString) & (PExpr.sc.sval[0] # 0X) &
+        (PExpr.sc.sval[1] = 0X) THEN
+    v := ORD(PExpr.sc.sval[0]); Scan.Next(PExpr.sc)
+  ELSE
+    ok := FALSE; RETURN 0
+  END;
+  IF neg THEN v := -v END;
+  RETURN v
+END PreScanLabel;
+
+(* SkipArmBody — from the token right after this arm's label-list TColon,
+   advance past the arm's statement sequence to land exactly on the next
+   TBar, TElse, or TEnd that belongs to THIS CASE (not a nested one).  Tracks
+   nesting depth: IF/CASE/WHILE/FOR each need one matching TEnd; REPEAT needs
+   a matching TUNTIL instead.  Returns FALSE (abort pre-scan) if the token
+   budget is exhausted or TEof is reached before nesting resolves to zero —
+   never loops unbounded. *)
+PROCEDURE SkipArmBody(): BOOLEAN;
+  VAR depth, budget: INTEGER; done: BOOLEAN; result: BOOLEAN;
+BEGIN
+  depth := 0; budget := MaxPreScanTokens; done := FALSE; result := FALSE;
+  WHILE ~done DO
+    DEC(budget);
+    IF budget <= 0 THEN done := TRUE; result := FALSE
+    ELSIF PExpr.sc.sym = Scan.TEof THEN done := TRUE; result := FALSE
+    ELSIF (depth = 0) &
+       ((PExpr.sc.sym = Scan.TBar) OR (PExpr.sc.sym = Scan.TElse) OR
+        (PExpr.sc.sym = Scan.TEnd)) THEN
+      done := TRUE; result := TRUE
+    ELSIF (PExpr.sc.sym = Scan.TIf) OR (PExpr.sc.sym = Scan.TCase) OR
+       (PExpr.sc.sym = Scan.TWhile) OR (PExpr.sc.sym = Scan.TFor) OR
+       (PExpr.sc.sym = Scan.TRepeat) THEN
+      INC(depth); Scan.Next(PExpr.sc)
+    ELSIF PExpr.sc.sym = Scan.TUntil THEN
+      (* only valid at depth>0 belonging to a REPEAT; well-formed input
+         guarantees pairing, so just close one level like END does *)
+      DEC(depth); Scan.Next(PExpr.sc)
+    ELSIF PExpr.sc.sym = Scan.TEnd THEN
+      DEC(depth); Scan.Next(PExpr.sc)
+    ELSE
+      Scan.Next(PExpr.sc)
+    END
+  END;
+  RETURN result
+END SkipArmBody;
+
+(* PreScanCase — walk the CASE body once, checking that every label is a
+   single-value integer/CHAR literal (no ranges — those stay on the chain
+   path even if the case is otherwise dense) and computing count/lo/hi.
+   Called with PExpr.sc positioned right after TOf.  Returns FALSE if
+   anything unrecognized is seen (range label, non-simple label, malformed
+   input) — caller must then treat the whole CASE as chain-only.  Does not
+   retain any per-label data: the real pass re-derives which slot each label
+   claims from a second, legitimate parse (see ParseCaseTable). *)
+PROCEDURE PreScanCase(VAR count, lo, hi: INTEGER): BOOLEAN;
+  VAR ok, more: BOOLEAN; v: INTEGER; budget: INTEGER;
+BEGIN
+  count := 0; lo := 0; hi := 0;
+  budget := MaxPreScanTokens;
+  WHILE (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TEnd) &
+        (PExpr.sc.sym # Scan.TEof) DO
+    more := TRUE;
+    WHILE more DO
+      DEC(budget);
+      IF budget <= 0 THEN RETURN FALSE END;
+      v := PreScanLabel(ok);
+      IF ~ok THEN RETURN FALSE END;
+      IF PExpr.sc.sym = Scan.TDotdot THEN
+        RETURN FALSE  (* range label: table path only handles single values *)
+      END;
+      IF count = 0 THEN lo := v; hi := v
+      ELSE
+        IF v < lo THEN lo := v END;
+        IF v > hi THEN hi := v END
+      END;
+      INC(count);
+      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc)
+      ELSE more := FALSE
+      END
+    END;
+    IF PExpr.sc.sym # Scan.TColon THEN RETURN FALSE END;
+    Scan.Next(PExpr.sc);
+    IF ~SkipArmBody() THEN RETURN FALSE END;
+    IF PExpr.sc.sym = Scan.TBar THEN Scan.Next(PExpr.sc) END
+  END;
+  RETURN TRUE
+END PreScanCase;
+
+(* Slot i's code offset is always tableOfs + 2*i — a simple function of i and
+   the (known-once-emitted) table base, so no side array is needed to
+   remember per-slot positions; only tableOfs itself must be carried. *)
+PROCEDURE PatchSlot(tableOfs: LONGINT; i: INTEGER; codeOfs: WORD);
+BEGIN
+  Cgen.CgPatchJumpTableEntry(tableOfs + LONGINT(2) * LONGINT(i), codeOfs)
+END PatchSlot;
+
+(* Tiny chunked buffer of slot indexes claimed by the arm currently being
+   parsed; collected while its label list is walked, then all patched to
+   the same bodyStart once the body's position is known, and reset for the
+   next arm. *)
+TYPE
+  ArmSlotNode = POINTER TO ArmSlotNodeDesc;
+  ArmSlotNodeDesc = RECORD
+    idx:   ARRAY ArmSlotChunk OF INTEGER;
+    count: INTEGER;
+    next:  ArmSlotNode
+  END;
+
+PROCEDURE ArmSlotPush(VAR head, tail: ArmSlotNode; idx: INTEGER);
+  VAR r: ArmSlotNode;
+BEGIN
+  IF (tail = NIL) OR (tail^.count >= ArmSlotChunk) THEN
+    NEW(r); r^.count := 0; r^.next := NIL;
+    IF tail # NIL THEN tail^.next := r ELSE head := r END;
+    tail := r
+  END;
+  tail^.idx[tail^.count] := idx; INC(tail^.count)
+END ArmSlotPush;
+
+PROCEDURE ArmSlotFree(VAR head: ArmSlotNode);
+  VAR n, nx: ArmSlotNode;
+BEGIN
+  n := head;
+  WHILE n # NIL DO nx := n^.next; DISPOSE(n); n := nx END;
+  head := NIL
+END ArmSlotFree;
+
+PROCEDURE ParseCaseTable(retType: Syms.TypeDesc; lo, hi: INTEGER);
+  VAR endList: BpNode; n: BpNode; more: BOOLEAN;
+      tableOfs, bodyStart, defaultOfs: LONGINT;
+      nSlots, i, v: INTEGER;
+      defaultBp, defaultJmp: Cgen.Backpatch;
+      armHead, armTail, an, anx: ArmSlotNode; k: INTEGER;
+      claimed: ARRAY MaxTableSlots OF BOOLEAN;
+BEGIN
+  endList := NIL;
+  (* Caller (ParseCase) only takes this path when LONGINT(hi)-LONGINT(lo)+1
+     is already known to be <= MaxTableSlots, so the 16-bit INTEGER
+     subtraction below cannot wrap: the true mathematical difference fits,
+     and two's-complement subtraction is exact whenever the result fits. *)
+  nSlots := hi - lo + 1;
+  (* Track which slots a PRIOR arm already claimed: Oberon-07 CASE requires
+     distinct labels, but the existing chain path silently lets the FIRST
+     matching arm win on a duplicate (later compares are simply never
+     reached).  The table path must replicate that "first wins" rule instead
+     of "last patch wins", which is what would happen without this guard. *)
+  i := 0;
+  WHILE i < nSlots DO claimed[i] := FALSE; INC(i) END;
+  (* Dispatch prologue: AX already holds the case value (caller reloaded it). *)
+  Cgen.CgSubAxImm(lo);
+  Cgen.CgCmpAxImmUnsigned(nSlots - 1);
+  Cgen.CgCondNear(Cgen.OpJa, defaultBp);   (* out of [lo,hi]: fall to default *)
+  Cgen.Emit2(0D1H, 0E0H);                  (* SHL AX,1 — word-index scaling *)
+  Cgen.EmitCodeStr("8B,D8");               (* MOV BX,AX *)
+  (* JMP is 5 bytes (2E FF A7 xx xx); the table starts right after it. *)
+  Cgen.CgJmpTableCs(WORD(Cgen.CgPc() + LONGINT(5)));
+  tableOfs := Cgen.CgPc();
+  i := 0;
+  WHILE i < nSlots DO Cgen.CgEmitJumpTableEntry(0); INC(i) END;
+  Cgen.CgPatchNear(defaultBp);   (* out-of-range values land here *)
+  defaultOfs := Cgen.CgPc();
+  (* Every slot ALSO defaults to this same address, so an unclaimed slot
+     inside [lo,hi] behaves identically to an out-of-range value.  From here,
+     jump to the shared "no match" landing spot — patched later to right
+     before the ELSE clause, or right after END if there is none — mirroring
+     the chain path's "no match, no ELSE: fall through past the whole CASE"
+     behavior exactly.  Without this jump, the default path would silently
+     fall into whatever code is emitted next (the first arm's body). *)
+  Cgen.CgJmpNear(defaultJmp);
+  i := 0;
+  WHILE i < nSlots DO PatchSlot(tableOfs, i, WORD(defaultOfs)); INC(i) END;
+
+  (* Real pass: parse each arm's label list again (via the normal
+     ParseConstLabel — legitimate side effects this time) purely to stay in
+     sync with the token stream.  Slot indexes this arm claims are buffered
+     in armHead/armTail (NOT patched yet — bodyStart isn't known until the
+     label list ends), then all patched together once the body's start
+     offset is captured. *)
+  WHILE (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TEnd) &
+        (PExpr.sc.sym # Scan.TEof) DO
+    more := TRUE; armHead := NIL; armTail := NIL;
+    WHILE more DO
+      v := ParseConstLabel();
+      IF PExpr.sc.sym = Scan.TDotdot THEN
+        (* PreScanCase never lets a range label reach the table path —
+           unreachable in practice, but stay well-formed regardless. *)
+        Scan.Next(PExpr.sc); v := ParseConstLabel()
+      ELSE
+        i := v - lo;
+        IF (i >= 0) & (i < nSlots) THEN ArmSlotPush(armHead, armTail, i) END
+      END;
+      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc)
+      ELSE more := FALSE
+      END
+    END;
+    PExpr.Expect(Scan.TColon);
+    bodyStart := Cgen.CgPc();
+    an := armHead;
+    WHILE an # NIL DO
+      k := 0;
+      WHILE k < an^.count DO
+        IF ~claimed[an^.idx[k]] THEN
+          PatchSlot(tableOfs, an^.idx[k], WORD(bodyStart));
+          claimed[an^.idx[k]] := TRUE
+        END;
+        INC(k)
+      END;
+      anx := an^.next; an := anx
+    END;
+    ArmSlotFree(armHead);
+    ParseStatementSequence(retType);
+    n := BpPush(endList); Cgen.CgJmpNear(n^.bp); endList := n;
+    IF PExpr.sc.sym = Scan.TBar THEN Scan.Next(PExpr.sc) END
+  END;
+  (* The "no match" landing spot: right before the ELSE body if present,
+     otherwise right here (matches the chain path — no ELSE means an
+     unmatched value simply falls through past the whole CASE). *)
+  Cgen.CgPatchNear(defaultJmp);
+  IF PExpr.sc.sym = Scan.TElse THEN
+    Scan.Next(PExpr.sc); ParseStatementSequence(retType)
+  END;
+  PExpr.Expect(Scan.TEnd);
+  BpPatchFree(endList)
+END ParseCaseTable;
+
 PROCEDURE ParseCase(retType: Syms.TypeDesc);
   VAR caseSym: Syms.Symbol; caseLoad, expr: Cgen.Item; endList: BpNode;
       bodyList: BpNode; skipArm, skipLo: Cgen.Backpatch;
       lo, hi: INTEGER; n: BpNode; more: BOOLEAN;
+      preCount, preLo, preHi: INTEGER;
+      mark: Scan.Scanner; markPos: LONGINT; useTable: BOOLEAN;
 BEGIN
   Scan.Next(PExpr.sc);
   endList := NIL;
@@ -219,6 +474,21 @@ BEGIN
   Cgen.CgStoreItem(caseLoad);
   PatchFrameSize;
   PExpr.Expect(Scan.TOf);
+
+  (* G7: pre-scan for a dense, single-value label set BEFORE emitting any
+     dispatch code.  Mark/Restore brackets the pre-scan so it has zero effect
+     on the token stream position/state for the real parse that follows. *)
+  Scan.Mark(PExpr.sc, mark, markPos);
+  useTable := PreScanCase(preCount, preLo, preHi) & (preCount >= 6) &
+              (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(2 * preCount)) &
+              (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(MaxTableSlots));
+  Scan.Restore(PExpr.sc, mark, markPos);
+
+  IF useTable THEN
+    ReloadCase(caseLoad, caseSym);
+    ParseCaseTable(retType, preLo, preHi);
+    RETURN
+  END;
 
   WHILE (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TEnd) &
         (PExpr.sc.sym # Scan.TEof) DO
@@ -392,15 +662,12 @@ BEGIN
               isWordStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFWord);
               IF isWordStep THEN Cgen.Emit2(BYTE(031H), BYTE(0D2H))
               ELSIF ~isLongStep THEN Cgen.Emit1(BYTE(099H)) END;
-              Cgen.Emit2(BYTE(089H), BYTE(0C3H)); Cgen.Emit2(BYTE(089H), BYTE(0D1H));
-              Cgen.Emit1(BYTE(Cgen.OpPopAx)); Cgen.Emit1(BYTE(Cgen.OpPopDx));
-              IF id = Syms.SpInc THEN Cgen.Emit2(BYTE(003H), BYTE(0C3H)); Cgen.Emit2(BYTE(013H), BYTE(0D1H))
-              ELSE Cgen.Emit2(BYTE(02BH), BYTE(0C3H)); Cgen.Emit2(BYTE(01BH), BYTE(0D1H)) END;
+              Cgen.EmitCodeStr("89,C3,89,D1,58,5A");  (* MOV BX,AX; MOV CX,DX; POP AX; POP DX *)
+              IF id = Syms.SpInc THEN Cgen.EmitCodeStr("03,C3,13,D1")   (* ADD AX,BX; ADC DX,CX *)
+              ELSE Cgen.EmitCodeStr("2B,C3,1B,D1") END;                (* SUB AX,BX; SBB DX,CX *)
               Cgen.Emit1(BYTE(Cgen.OpPopBx)); Cgen.Emit1(BYTE(Cgen.OpPopEs))
             ELSE
-              Cgen.Emit1(BYTE(Cgen.OpPopCx));
-              Cgen.Emit1(BYTE(091H)); Cgen.Emit1(BYTE(Cgen.OpPopBx));
-              Cgen.Emit1(BYTE(Cgen.OpPopEs)); Cgen.Emit1(BYTE(091H));
+              Cgen.EmitCodeStr("59,91,5B,07,91");  (* POP CX; XCHG AX,CX; POP BX; POP ES; XCHG AX,CX *)
               IF id = Syms.SpInc THEN Cgen.CgAdd() ELSE Cgen.CgSub() END
             END;
             Cgen.CgStoreItem(vstore)
@@ -429,8 +696,7 @@ BEGIN
               isWordStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFWord);
               IF isWordStep THEN Cgen.Emit2(BYTE(031H), BYTE(0D2H))  (* XOR DX,DX *)
               ELSIF ~isLongStep THEN Cgen.Emit1(BYTE(099H)) END;     (* CWD *)
-              Cgen.Emit2(BYTE(089H), BYTE(0C3H));   (* MOV BX, AX *)
-              Cgen.Emit2(BYTE(089H), BYTE(0D1H));   (* MOV CX, DX *)
+              Cgen.EmitCodeStr("89,C3,89,D1");   (* MOV BX,AX; MOV CX,DX *)
               vitem := vstore; Cgen.CgLoadItem(vitem);  (* AX/DX:AX = old value *)
               IF id = Syms.SpInc THEN
                 Cgen.Emit2(BYTE(003H), BYTE(0C3H)); Cgen.Emit2(BYTE(013H), BYTE(0D1H))  (* ADD/ADC *)
@@ -474,9 +740,7 @@ BEGIN
              word (only the low 16 bits matter for an offset).  Restore the saved
              segment into DX and the old offset into AX, then ADD/SUB the step to
              the offset.  The segment word (DX) is never modified — no carry. *)
-          Cgen.Emit2(BYTE(089H), BYTE(0C3H));       (* MOV BX, AX  (step.lo) *)
-          Cgen.Emit1(BYTE(Cgen.OpPopAx));         (* AX = old.ofs *)
-          Cgen.Emit1(BYTE(Cgen.OpPopDx));         (* DX = saved seg *)
+          Cgen.EmitCodeStr("89,C3,58,5A");  (* MOV BX,AX (step.lo); POP AX (old.ofs); POP DX (saved seg) *)
           IF id = Syms.SpInc THEN
             Cgen.Emit2(BYTE(003H), BYTE(0C3H))      (* ADD AX, BX *)
           ELSE
@@ -498,16 +762,11 @@ BEGIN
           ELSIF ~isLongStep THEN
             Cgen.Emit1(BYTE(099H))                  (* CWD *)
           END;
-          Cgen.Emit2(BYTE(089H), BYTE(0C3H));       (* MOV BX, AX *)
-          Cgen.Emit2(BYTE(089H), BYTE(0D1H));       (* MOV CX, DX *)
-          Cgen.Emit1(BYTE(Cgen.OpPopAx));         (* AX = old.lo *)
-          Cgen.Emit1(BYTE(Cgen.OpPopDx));         (* DX = old.hi *)
+          Cgen.EmitCodeStr("89,C3,89,D1,58,5A");  (* MOV BX,AX; MOV CX,DX; POP AX (old.lo); POP DX (old.hi) *)
           IF id = Syms.SpInc THEN
-            Cgen.Emit2(BYTE(003H), BYTE(0C3H));     (* ADD AX, BX *)
-            Cgen.Emit2(BYTE(013H), BYTE(0D1H))      (* ADC DX, CX *)
+            Cgen.EmitCodeStr("03,C3,13,D1")     (* ADD AX,BX; ADC DX,CX *)
           ELSE
-            Cgen.Emit2(BYTE(02BH), BYTE(0C3H));     (* SUB AX, BX *)
-            Cgen.Emit2(BYTE(01BH), BYTE(0D1H))      (* SBB DX, CX *)
+            Cgen.EmitCodeStr("2B,C3,1B,D1")     (* SUB AX,BX; SBB DX,CX *)
           END;
           IF needSaveAddr THEN
             Cgen.Emit1(BYTE(Cgen.OpPopBx));       (* BX = addr.ofs *)
@@ -516,10 +775,7 @@ BEGIN
         ELSE
           Cgen.Emit1(BYTE(Cgen.OpPopCx));         (* CX = old value *)
           IF needSaveAddr THEN
-            Cgen.Emit1(BYTE(091H));                 (* XCHG AX, CX *)
-            Cgen.Emit1(BYTE(Cgen.OpPopBx));
-            Cgen.Emit1(BYTE(Cgen.OpPopEs));
-            Cgen.Emit1(BYTE(091H))                  (* XCHG AX, CX *)
+            Cgen.EmitCodeStr("91,5B,07,91")  (* XCHG AX,CX; POP BX; POP ES; XCHG AX,CX *)
           END;
           IF id = Syms.SpInc THEN Cgen.CgAdd() ELSE Cgen.CgSub() END
         END;
@@ -545,11 +801,9 @@ BEGIN
           (* LONGINT INC/DEC by 1: must carry into DX.
              INC: ADD AX,1 / ADC DX,0; DEC: SUB AX,1 / SBB DX,0. *)
           IF id = Syms.SpInc THEN
-            Cgen.Emit1(005H); Cgen.Emit1(001H); Cgen.Emit1(000H);
-            Cgen.Emit1(083H); Cgen.Emit1(0D2H); Cgen.Emit1(000H)
+            Cgen.EmitCodeStr("05,01,00,83,D2,00")  (* ADD AX,1; ADC DX,0 *)
           ELSE
-            Cgen.Emit1(02DH); Cgen.Emit1(001H); Cgen.Emit1(000H);
-            Cgen.Emit1(083H); Cgen.Emit1(0DAH); Cgen.Emit1(000H)
+            Cgen.EmitCodeStr("2D,01,00,83,DA,00")  (* SUB AX,1; SBB DX,0 *)
           END
         ELSE
           IF id = Syms.SpInc THEN Cgen.CgIncAx() ELSE Cgen.CgDecAx() END
@@ -729,16 +983,9 @@ BEGIN
         Cgen.CgArrCount(item.type.size,
                         rhs.type.len < 0, rhs.adr, rhs.type.size);
         (* stack top->: srcOfs, srcSeg, dstOfs, dstSeg *)
-        Cgen.Emit1(05EH);            (* POP SI  (src ofs) *)
-        Cgen.Emit1(058H);            (* POP AX  (src seg) *)
-        Cgen.Emit1(05FH);            (* POP DI  (dst ofs) *)
-        Cgen.Emit1(05AH);            (* POP DX  (dst seg) *)
-        Cgen.Emit1(01EH);            (* PUSH DS *)
-        Cgen.EmitCodeStr("8E,D8");   (* MOV DS, AX   (DS = src seg) *)
-        Cgen.EmitCodeStr("8E,C2");   (* MOV ES, DX   (ES = dst seg) *)
-        Cgen.Emit1(BYTE(Cgen.OpCld));
-        Cgen.Emit2(0F3H, 0A4H);      (* REP MOVSB *)
-        Cgen.Emit1(01FH);            (* POP DS *)
+        (* POP SI/AX/DI/DX (src ofs, src seg, dst ofs, dst seg); PUSH DS;
+           MOV DS,AX (src seg); MOV ES,DX (dst seg); CLD; REP MOVSB; POP DS *)
+        Cgen.EmitCodeStr("5E,58,5F,5A,1E,8E,D8,8E,C2,FC,F3,A4,1F");
         RETURN
       END;
       (* Record assign: both sides plain (non-ref) local/global vars. *)
@@ -831,19 +1078,12 @@ BEGIN
           Cgen.CgLesBxItem(rhs.mode, rhs.adr)
         END;
         (* else rhs.mode = MReg/isRef: ES:BX already holds src addr. *)
-        Cgen.EmitCodeStr("8B,F3");                  (* MOV SI, BX *)
-        Cgen.EmitCodeStr("8C,C1");                  (* MOV CX, ES *)
-        Cgen.Emit1(05FH);                            (* POP DI (dst ofs) *)
-        Cgen.Emit1(05AH);                            (* POP DX (dst seg) *)
-        Cgen.Emit1(01EH);                            (* PUSH DS *)
-        Cgen.EmitCodeStr("8E,D9");                  (* MOV DS, CX *)
-        Cgen.EmitCodeStr("8E,C2");                  (* MOV ES, DX *)
-        Cgen.Emit1(0B9H);
+        (* MOV SI,BX; MOV CX,ES; POP DI (dst ofs); POP DX (dst seg); PUSH DS;
+           MOV DS,CX; MOV ES,DX; opcode of MOV CX,imm16 *)
+        Cgen.EmitCodeStr("8B,F3,8C,C1,5F,5A,1E,8E,D9,8E,C2,B9");
         Cgen.Emit1(BYTE(count MOD LONGINT(256)));
         Cgen.Emit1(BYTE((count DIV LONGINT(256)) MOD LONGINT(256)));
-        Cgen.Emit1(BYTE(Cgen.OpCld));
-        Cgen.Emit2(0F3H, 0A4H);                      (* REP MOVSB *)
-        Cgen.Emit1(01FH);                            (* POP DS *)
+        Cgen.EmitCodeStr("FC,F3,A4,1F");             (* CLD; REP MOVSB; POP DS *)
         RETURN
       END;
       IF (item.type # Syms.NoType) & (iform = Syms.TFLongint) &
@@ -879,11 +1119,10 @@ BEGIN
             Cgen.Emit2(081H, 0C3H); Cgen.EmitW(INTEGER(SYSTEM.AND(pt.argSize, LONGINT(0FFFFH))))
           END
         END;
-        Cgen.Emit3(036H, 08BH, 00FH);
-        Cgen.Emit4(036H, 08BH, 05FH, 002H);
-        Cgen.Emit2(08EH, 0C1H);
+        (* SS: MOV CX,[BX] / SS: MOV BX,[BX+2] / MOV ES,CX *)
+        Cgen.EmitCodeStr("36,8B,0F,36,8B,5F,02,8E,C1");
         Cgen.CgCallProcVarEsbx();
-        Cgen.Emit2(083H, 0C4H); Cgen.Emit1(004H)
+        Cgen.EmitCodeStr("83,C4,04")  (* ADD SP,4 *)
       ELSE
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;

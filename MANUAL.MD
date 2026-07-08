@@ -324,6 +324,42 @@ updated in place with the result. `Dos.MOD` and `Crt.MOD` are built entirely
 on top of this — reach for it directly only when you need an interrupt the
 stdlib doesn't already wrap.
 
+### `SYSTEM.SetExitProc` / `SYSTEM.GetExitProc`
+
+```oberon
+PROCEDURE SetExitProc*(proc: ADDRESS);
+PROCEDURE GetExitProc*(): ADDRESS;
+```
+
+A single global far-procedure hook, run automatically just before the
+program terminates (normal exit or `SYSTEM.Halt`). Semantics mirror Turbo
+Pascal's `ExitProc` variable: there is exactly **one** slot, not a list, so
+chaining multiple handlers is the caller's responsibility, done the same way
+Turbo Pascal programs do it — save the previous hook before installing a new
+one, and restore it as the *first* action inside the new handler:
+
+```oberon
+VAR prevExitProc: SYSTEM.ADDRESS;
+
+PROCEDURE MyExit;
+BEGIN
+  SYSTEM.SetExitProc(prevExitProc);  (* restore first — see below *)
+  (* ... actual cleanup ... *)
+END MyExit;
+
+(* installation, e.g. in the module body *)
+prevExitProc := SYSTEM.GetExitProc();
+SYSTEM.SetExitProc(SYSTEM.ADR(MyExit));
+```
+
+At program termination the runtime calls the installed hook in a loop,
+re-reading it after each call and stopping once it reads `NIL` — so a chain
+of handlers, each restoring its predecessor first, runs to completion one
+link at a time, most-recently-installed first, exactly like nested Turbo
+Pascal `ExitProc` chains. **The restore-first order is not optional**: a
+handler that does not restore the previous value before returning will be
+invoked repeatedly forever, since the runtime never sees the hook change.
+
 ---
 
 ## INLINE — embedding raw machine code

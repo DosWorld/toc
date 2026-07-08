@@ -371,6 +371,14 @@ Regressions of historical compiler bugs are preserved in the corresponding modul
 - **TFBUF.MOD** is the regression test for the buffered-I/O correctness bug
   (`Files.BlockRead`/`BlockWrite` used LONGINT MOD instead of a power-of-two
   AND bit mask), exercising reads/writes that cross the 8192-byte BUFSIZE boundary.
+- **TCASETBL.MOD** is the regression test for the CASE jump-table dispatch
+  codegen (G7, `DOCS/IMPLRULE.MD` §"CASE jump-table dispatch"); it caught a
+  real out-of-range-dispatch bug (values outside the label range fell into
+  arm 1's body instead of the `ELSE`/fall-through target) that `make test`'s
+  272-row manifest cannot catch, since the manifest only checks compile-time
+  byte/symbol patterns, not runtime dispatch correctness. Also runnable
+  standalone, bypassing `make testall`'s harness bugs:
+  `toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe`.
 
 
 ### Test framework (`SRC/LIB/TEST.MOD`)

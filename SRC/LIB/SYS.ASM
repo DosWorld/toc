@@ -5,6 +5,10 @@ cpu 8086
 section .data
 i87:
     dw 0
+ExitProc:
+    dw 0
+    dw 0
+
 section .text
 
 %ifdef IS_FAR
@@ -28,6 +32,7 @@ struc TRegisters
     ._Flags resw 1
 endstruc
 
+
 global SYSTEM_INIT, SYSTEM_DONE
 global SYSTEM_Intr, SYSTEM_CallFar
 global SYSTEM_Alloc, SYSTEM_Free
@@ -35,6 +40,7 @@ global SYSTEM_MemAvail, SYSTEM_MemMaxAvail
 global SYSTEM_S32DIV, SYSTEM_S32MOD, SYSTEM_S32MUL
 global SYSTEM_REQUIRE87
 global SYSTEM_Halt
+global SYSTEM_SetExitProc, SYSTEM_GetExitProc
 
 check_8087:
         FNINIT
@@ -79,6 +85,7 @@ ErrWithMsg:
         int  21h
         pop  ds
         jmp  SYSTEM_DONE
+
 SYSTEM_INIT:
         push ax
         push bx
@@ -124,6 +131,8 @@ SYSTEM_INIT:
         retf
 
 SYSTEM_DONE:
+        call RunExitProcChain
+
         push es
         mov  ax, [cs:MemStartSeg]
         mov  es, ax
@@ -136,6 +145,51 @@ SYSTEM_DONE:
 
 err_code: db 0
 
+SYSTEM_SetExitProc:
+        ; FAR proc, no prologue.  Param (ADDRESS, 4 bytes) was pushed by the
+        ; caller before CALL FAR, which then pushed CS:IP (2 words, RSIZE=4).
+        ; Stack: [SP+0]=ret IP [SP+2]=ret CS [SP+4]=proc_ofs [SP+6]=proc_seg
+        push bp
+        mov  bp, sp
+        push ds
+        push ax
+        mov  ax, seg ExitProc
+        mov  ds, ax
+        mov  ax, [bp+RSIZE+2]
+        mov  [ExitProc], ax
+        mov  ax, [bp+RSIZE+4]
+        mov  [ExitProc+2], ax
+        pop  ax
+        pop  ds
+        pop  bp
+        retf 4
+
+SYSTEM_GetExitProc:
+        push ds
+        mov  ax, seg ExitProc
+        mov  ds, ax
+        mov  ax, [ExitProc]
+        mov  dx, [ExitProc+2]
+        pop  ds
+        retf
+
+RunExitProcChain:
+        mov  ax, seg ExitProc
+        mov  ds, ax
+        mov  bx, ExitProc
+.cont:
+        mov  ax, [bx]
+        mov  dx, [bx+2]
+        or   ax, dx
+        jz   .end
+        push ds
+        push bx
+        call far [bx]
+        pop  bx
+        pop  ds
+        jmp  .cont
+.end:
+        retn
 ; SS:SP snapshot for SYSTEM_Intr.  Stored in the code segment so the save
 ; site doesn't touch the stack and the restore site doesn't need a valid
 ; SS (some DOS calls — notably INT 21h / 4B00h Exec — leave SS:SP

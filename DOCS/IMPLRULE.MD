@@ -128,12 +128,75 @@ verified `BIN/TOC.EXE` to make `oc1 == oc2` hold again.
 Regression test: `TESTS/TINCDEC.MOD` (Section 18) — runtime values across every
 type/mode/step/direction combination incl. LONGINT carry and ADDRESS offset.
 
+### CASE jump-table dispatch (G7)  ← codegen
+
+A `CASE` with **≥ 6 single-value INTEGER/CHAR labels** and a **dense span**
+(`hi−lo+1 ≤ 2×labelCount`) dispatches through an indexed jump table instead of
+the default linear `CMP`/`Jcc` chain. Range labels (`a..b`) anywhere in the
+`CASE`, or any label shape more complex than an optional unary minus plus an
+int/char/single-char-string literal, disqualify the *whole* `CASE` from the
+table path (falls back to the existing chain — never a correctness risk, only
+a missed optimization).
+
+**Why a pre-scan is required:** the compiler is single-pass with no AST, so
+the dense-vs-chain decision (which needs every label's value up front) must
+happen before any dispatch code is emitted, but labels are normally only
+known as each arm is parsed. `PSTMT.MOD`'s `PreScanCase` walks the token
+stream once via `Scan.Mark`/`Scan.Restore` (bracket save/rewind of the lexer
+position — SCAN.MOD) to compute `count`/`lo`/`hi` with zero side effects
+(it deliberately does NOT call `PExpr.ParseExpression`, only a narrow
+`PreScanLabel` recognizer, to avoid double-interning strings or double-
+allocating symbols on the real pass that follows), then rewinds and lets the
+ordinary parse proceed — either building the table (`ParseCaseTable`) or
+falling through unchanged to the existing chain.
+
+**Emitted dispatch** (`ParseCaseTable`, `PSTMT.MOD`):
+```
+SUB  AX, lo                  ; Cgen.CgSubAxImm
+CMP  AX, (hi-lo)             ; Cgen.CgCmpAxImmUnsigned
+JA   default                 ; unsigned: covers BOTH below-lo (huge wrap) and above-hi
+SHL  AX, 1                   ; word-index scaling
+MOV  BX, AX
+CS:  JMP [BX+table]          ; Cgen.CgJmpTableCs — table lives in the CODE segment,
+                              ; hence the CS: override (DS points at data, not code)
+table: dw <code-offset>, <code-offset>, ...   ; Cgen.CgEmitJumpTableEntry/CgPatchJumpTableEntry
+```
+Each table entry is a **module-local code offset with a code-to-code
+relocation** (`Rdoff.RdfAddReloc(..., Rdoff.SegCode, ..., Rdoff.SegCode, ...)`
+— the same mechanism `Cgen.CgLoadCodeAddr` already used for the `__init`
+guard word in `PARSER.MOD`; the linker's `OnReloc` adds this module's
+code-group base to whatever module-local offset is stored at the patch site).
+Unclaimed slots and the `JA` target both resolve to the same address: a
+`defaultJmp` backpatch, itself resolved at the very end to right before the
+`ELSE` body (or to the same "fall through past the whole CASE" point the
+chain path already uses when there is no `ELSE`).
+
+**Trap already hit once — do not regress it:** the "default" landing point
+MUST have an explicit unconditional jump (`CgJmpNear(defaultJmp)`) past every
+arm's body. Without it, out-of-range values silently fall into whatever code
+is emitted next (arm 1's body) — this was a real bug in the first
+implementation, caught by `TESTS/TCASETBL.MOD`'s `TDenseNoElse`/
+`TDenseWithElse` tests, not by `make test` (the 272-row manifest only checks
+compile-time byte/symbol patterns, not runtime dispatch correctness).
+
+**Duplicate labels:** Oberon-07 requires distinct `CASE` labels, but the
+existing chain path silently lets the *first* matching arm win if two arms
+share a label (later compares are simply never reached). The table path
+replicates this via a `claimed: ARRAY MaxTableSlots OF BOOLEAN` guard — only
+the first arm to claim a slot patches it; a later arm's claim on an
+already-claimed slot is a no-op.
+
+Regression test: `TESTS/TCASETBL.MOD` (Section 18) — 7 cases covering basic
+dispatch, `ELSE` handling, negative labels (stresses the subtract-then-
+unsigned-compare bounds check with `lo` itself negative), `CHAR` selector,
+a comma-list sharing one arm/slot, a range label forcing chain fallback, and
+nested `IF`/`WHILE`/`REPEAT` inside a table-dispatched arm's body. Also
+runnable standalone (bypassing `make testall`'s unrelated harness bugs):
+`toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe` directly.
+
 **Deferred optimizations** (not implemented — higher risk / lower payoff in a
 single-pass front end with no register allocation; documented so a future
 contributor knows the trade-off):
-- **INC/DEC memory-direct RMW** — `INC(x)` does load→AX→store; the 8086 has a
-  direct `INC word [mem]`/`ADD word [mem],imm`.  ~40 lines but touches the store
-  path (byte-stability risk).  Benefit MED-HIGH (loop bodies).
 - **Constant `SET` literal folding** — `{0,3,5}` is built with a runtime
   shift-OR loop; an all-constant set could fold to an immediate bitmask.  Needs
   element buffering in the single-pass SET parser.  Benefit MEDIUM (`IN {…}`).
@@ -529,10 +592,6 @@ single-process self-host's free heap (see [opt_meas.md](../opt_meas.md)).
   `PExpr.CheckParamCompat` rejects a non-l-value VAR actual at compile time
   ("VAR parameter requires a variable …").  Keep `VAR name` only where every
   caller passes an l-value (the hot `SymFind*`/`TypeAddField`/`PredeclType`).
-- Records reachable from a file-backed entry that hold **heap** sub-objects (an
-  `InlineNode`/`FwdNode` chunk chain) cannot be walked from the file to be freed,
-  so each such allocator registers its node on a module-global chain
-  (`allInline`/`allFwd`) that `SymsFree` releases wholesale.
 
 #### DEAD END — a mutable-record cache over `GetSym`/`GetType` (reverted 2026-07-03, do not retry this shape)
 
@@ -594,9 +653,10 @@ accessor call to avoid any more (see §"Symbol table: RAM pointer-record arena")
 
 `Files.ReWriteTemp` returns a temp file backed by EMS (`BkEms`, when an EMM
 driver is present) or by a hidden delete-on-close disk file (`BkDisk`,
-fallback).  All the file-backed machinery above (`Syms`, the `OC` module graph
-`gModFile`, the linker spill, TAR extraction) sits on top of it, so its
-correctness is load-bearing for the whole compiler.
+fallback).  The compiler's remaining file-backed machinery (the `OC` module
+graph `gModFile`, the linker spill, TAR extraction — `Syms` itself is now the
+RAM pointer-record arena described above, not file-backed) sits on top of it,
+so its correctness is load-bearing for the whole compiler.
 
 **STRONG RULE: there is exactly one read/write code path, and EMS rides it.**
 Both backends share the same 8 KB `F.buf` and the same `BufFetch`/`BufFlush`:

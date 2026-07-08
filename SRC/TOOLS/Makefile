@@ -22,7 +22,7 @@ XT      = xt
 # Mount oberonc/ root at C:\
 # OBERON_LIB: stdlib + compiler modules that tools import (Rdoff, Tar) plus
 # Err.OM (Rdoff/Tar now report through the shared Err module).
-XTRUN = $(XT) run --noems --max=200000000 -c ../../
+XTRUN = $(XT) run --max=200000000 -c ../../
 OBERON_LIB = BIN/OBERON.OM;SRC/TOC/RDOFF.OM;SRC/TOC/TAR.OM;SRC/TOC/ERR.OM
 
 TOOLS = $(BINDIR)/RDFGREP.EXE $(BINDIR)/TESTALL.EXE $(BINDIR)/TDINFO.EXE $(BINDIR)/TOSTRIP.EXE $(BINDIR)/TOLIB.EXE

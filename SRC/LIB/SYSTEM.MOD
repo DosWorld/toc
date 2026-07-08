@@ -18,7 +18,39 @@ END;
 
 PROCEDURE CallFar*(ProcPtr: ADDRESS; VAR Regs:Registers);EXTERNAL;
 PROCEDURE Intr*(IntNo: BYTE;VAR Regs : Registers);EXTERNAL;
+
+(* SetExitProc/GetExitProc: a single global far-proc hook, run automatically
+   by SYSTEM_DONE just before the program terminates (normal exit or Halt).
+   Semantics mirror Turbo Pascal's ExitProc variable: there is exactly one
+   slot, not a list, so a well-behaved handler that wants to chain to a
+   previously-installed one must save GetExitProc() BEFORE calling
+   SetExitProc() to install itself, and — critically — restore that saved
+   value as the FIRST action inside its own handler, before doing any other
+   cleanup work:
+
+     PROCEDURE MyExit;
+     BEGIN
+       SYSTEM.SetExitProc(prevExitProc);  (* restore first: prevents SYSTEM_DONE
+                                              from re-invoking this same handler,
+                                              and lets the previous handler run
+                                              next *)
+       ... actual cleanup ...
+     END MyExit;
+     ...
+     prevExitProc := SYSTEM.GetExitProc();
+     SYSTEM.SetExitProc(SYSTEM.ADR(MyExit));
+
+   SYSTEM_DONE calls the installed handler in a loop, re-reading the (now
+   possibly-updated) hook after each call and stopping when it reads NIL —
+   so a chain of handlers, each restoring its predecessor first, runs
+   outermost-installed-last-added first, exactly like nested Pascal
+   ExitProc chains. A handler that does NOT restore the previous value
+   first will be called repeatedly forever (SYSTEM_DONE never sees it
+   change), so this restore-first order is not optional. *)
+PROCEDURE SetExitProc*(proc : ADDRESS); EXTERNAL;
+PROCEDURE GetExitProc* : ADDRESS; EXTERNAL;
 PROCEDURE Halt*(ErrCode: BYTE); EXTERNAL;
+
 
 PROCEDURE Alloc*(sizeInBytes : WORD) : ADDRESS;EXTERNAL;
 PROCEDURE Free*(p : ADDRESS) ; EXTERNAL;
