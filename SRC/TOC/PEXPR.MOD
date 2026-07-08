@@ -309,17 +309,17 @@ BEGIN
     Cgen.Emit1(058H)
   END;
   Cgen.CgTestAx();
-  Cgen.CgCondNear(Cgen.OpJge, ok1);
+  Cgen.CgCondShort(Cgen.OpJge, ok1);
   Cgen.CgCallFar(errId);
-  Cgen.CgPatchNear(ok1);
+  Cgen.CgPatchShort(ok1);
   IF len >= 0 THEN
     Cgen.Emit1(03DH); Cgen.EmitW(INTEGER(len))
   ELSE
     Cgen.Emit2(03BH, 0C1H)
   END;
-  Cgen.CgCondNear(Cgen.OpJl, ok2);
+  Cgen.CgCondShort(Cgen.OpJl, ok2);
   Cgen.CgCallFar(errId);
-  Cgen.CgPatchNear(ok2)
+  Cgen.CgPatchShort(ok2)
 END EmitBoundsCheck;
 
 (* ---- forward call patch ---- *)
@@ -989,9 +989,8 @@ BEGIN
           Cgen.Emit1(BYTE(Cgen.OpPushBx));   (* PUSH BX *)
           ParseExpression(index);
           Cgen.CgLoadItem(index);
-          Cgen.Emit1(BYTE(Cgen.OpPopCx));    (* POP CX (base offset) *)
-          Cgen.Emit2(003H, 0C1H);            (* ADD AX, CX *)
-          Cgen.Emit2(08BH, 0D8H);            (* MOV BX, AX *)
+          Cgen.Emit1(05BH);                  (* POP BX (base offset) *)
+          Cgen.Emit2(003H, 0D8H);            (* ADD BX, AX *)
           Cgen.Emit1(007H);                  (* POP ES *)
           item.mode := Cgen.MReg; item.isRef := TRUE; item.type := Syms.TypeChar;
           item.addrDeref := FALSE;
@@ -1042,9 +1041,8 @@ BEGIN
             ELSIF elem.size > 2 THEN
               Cgen.CgLoadImmCx(INTEGER(elem.size)); Cgen.CgMul()
             END;
-            Cgen.Emit1(BYTE(Cgen.OpPopCx));  (* POP CX (base offset) *)
-            Cgen.Emit2(003H, 0C1H);            (* ADD AX, CX *)
-            Cgen.Emit2(08BH, 0D8H);            (* MOV BX, AX *)
+            Cgen.Emit1(05BH);                (* POP BX (base offset) *)
+            Cgen.Emit2(003H, 0D8H);            (* ADD BX, AX *)
             Cgen.Emit1(007H);                  (* POP ES *)
           ELSE
             (* Load array base into ES:BX *)
@@ -1081,9 +1079,8 @@ BEGIN
             ELSIF elem.size > 2 THEN
               Cgen.CgLoadImmCx(INTEGER(elem.size)); Cgen.CgMul()
             END;
-            Cgen.Emit1(059H);        (* POP CX (base offset) *)
-            Cgen.Emit2(003H, 0C1H);  (* ADD AX, CX *)
-            Cgen.Emit2(08BH, 0D8H);  (* MOV BX, AX *)
+            Cgen.Emit1(05BH);        (* POP BX (base offset) *)
+            Cgen.Emit2(003H, 0D8H);  (* ADD BX, AX *)
             Cgen.Emit1(007H);        (* POP ES *)
             item.mode := Cgen.MReg; item.isRef := TRUE
           END;
@@ -1362,9 +1359,9 @@ BEGIN
             item.type := Syms.TypeBoolean
         | Syms.SpAbs:
             Cgen.CgTestAx();
-            Cgen.CgCondNear(079H, skipBp);  (* JNS — skip NEG *)
+            Cgen.CgCondShort(079H, skipBp);  (* JNS — skip NEG *)
             Cgen.CgNeg();
-            Cgen.CgPatchNear(skipBp);
+            Cgen.CgPatchShort(skipBp);
             item.type := Syms.TypeInteger
         | Syms.SpOrd:  item.type := Syms.TypeInteger
         | Syms.SpChr:  item.type := Syms.TypeChar

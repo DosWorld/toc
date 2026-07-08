@@ -581,9 +581,9 @@ BEGIN
   IF srcOpen THEN
     CgLoadOpenLen(srcAdr);              (* AX = runtime LEN *)
     Emit1(03DH); EmitW(INTEGER(dstSize));  (* CMP AX, dstSize *)
-    CgCondNear(OpJle, ok);                 (* JLE keep (AX <= dstSize) *)
+    CgCondShort(OpJle, ok);                (* JLE keep (AX <= dstSize) *)
     CgLoadImm(INTEGER(dstSize));           (* MOV AX, dstSize *)
-    CgPatchNear(ok);
+    CgPatchShort(ok);
     Emit2(08BH, 0C8H)                      (* MOV CX, AX *)
   ELSE
     IF srcSize < dstSize THEN n := srcSize ELSE n := dstSize END;
@@ -811,12 +811,12 @@ END CgCmp32Neq;
 (* ---- arithmetic ---- *)
 
 PROCEDURE CgAdd*()      ; BEGIN Emit2(003H, 0C1H) END CgAdd;       (* ADD AX, CX *)
-PROCEDURE CgSub*()      ; BEGIN Emit2(087H,0C1H); Emit2(02BH,0C1H) END CgSub;
+PROCEDURE CgSub*()      ; BEGIN Emit1(091H); Emit2(02BH,0C1H) END CgSub;
 PROCEDURE CgMul*()      ; BEGIN Emit2(0F7H, 0E9H) END CgMul;       (* IMUL CX *)
-PROCEDURE CgDiv*()      ; BEGIN Emit2(087H,0C1H); Emit1(099H); Emit2(0F7H,0F9H) END CgDiv;
+PROCEDURE CgDiv*()      ; BEGIN Emit1(091H); Emit1(099H); Emit2(0F7H,0F9H) END CgDiv;
 PROCEDURE CgMod*()      ; BEGIN CgDiv(); Emit2(08BH,0C2H) END CgMod;
 PROCEDURE CgMulU*()     ; BEGIN Emit2(0F7H, 0E1H) END CgMulU;      (* MUL CX unsigned *)
-PROCEDURE CgDivU*()     ; BEGIN Emit2(087H,0C1H); Emit2(031H,0D2H); Emit2(0F7H,0F1H) END CgDivU;
+PROCEDURE CgDivU*()     ; BEGIN Emit1(091H); Emit2(031H,0D2H); Emit2(0F7H,0F1H) END CgDivU;
 PROCEDURE CgModU*()     ; BEGIN CgDivU(); Emit2(08BH,0C2H) END CgModU;
 PROCEDURE CgNeg*()      ; BEGIN Emit2(0F7H, 0D8H) END CgNeg;
 PROCEDURE CgAnd*()      ; BEGIN Emit2(023H, 0C1H) END CgAnd;

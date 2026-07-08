@@ -203,6 +203,20 @@ END FindSrc;
    holds the graph, so it cannot fragment the arena.  The record is serialized to
    a flat byte buffer first (so a single BlockRead/Write moves it). *)
 
+(* 16-bit value stored low-then-high at buf[p]/buf[p+1] *)
+PROCEDURE PutW(VAR buf: ARRAY OF BYTE; p: INTEGER; v: INTEGER);
+BEGIN
+  buf[p]   := BYTE(SYSTEM.AND(v, 0FFH));
+  buf[p+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(v, 8), 0FFH))
+END PutW;
+
+(* an all-ones value reads back as the signed INTEGER -1 (= NoMod), which is
+   exactly what we want for sortNext/deps. *)
+PROCEDURE GetW(VAR buf: ARRAY OF BYTE; p: INTEGER): INTEGER;
+BEGIN
+  RETURN INTEGER(buf[p]) + SYSTEM.LSL(INTEGER(buf[p+1]), 8)
+END GetW;
+
 PROCEDURE PackMod(VAR r: ModRec; VAR buf: ARRAY OF BYTE);
   VAR i, p: INTEGER;
 BEGIN
@@ -210,14 +224,12 @@ BEGIN
   i := 0; WHILE i < NameLen DO buf[1 + i] := ORD(r.name[i]); INC(i) END;
   i := 0; WHILE i < MaxPath DO buf[1 + NameLen + i] := ORD(r.srcPath[i]); INC(i) END;
   p := 1 + NameLen + MaxPath;
-  buf[p]   := BYTE(SYSTEM.AND(r.sortNext, 0FFH));
-  buf[p+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(r.sortNext, 8), 0FFH));
+  PutW(buf, p, r.sortNext);
   INC(p, 2);
   buf[p] := BYTE(r.nDeps); INC(p);
   i := 0;
   WHILE i < MaxDeps DO
-    buf[p]   := BYTE(SYSTEM.AND(r.deps[i], 0FFH));
-    buf[p+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(r.deps[i], 8), 0FFH));
+    PutW(buf, p, r.deps[i]);
     INC(p, 2); INC(i)
   END
 END PackMod;
@@ -229,14 +241,12 @@ BEGIN
   i := 0; WHILE i < NameLen DO r.name[i] := CHR(buf[1 + i]); INC(i) END;
   i := 0; WHILE i < MaxPath DO r.srcPath[i] := CHR(buf[1 + NameLen + i]); INC(i) END;
   p := 1 + NameLen + MaxPath;
-  (* 16-bit indices stored low-then-high; an all-ones value reads back as the
-     signed INTEGER -1 (= NoMod), which is exactly what we want. *)
-  r.sortNext := INTEGER(buf[p]) + SYSTEM.LSL(INTEGER(buf[p+1]), 8);
+  r.sortNext := GetW(buf, p);
   INC(p, 2);
   r.nDeps := INTEGER(buf[p]); INC(p);
   i := 0;
   WHILE i < MaxDeps DO
-    r.deps[i] := INTEGER(buf[p]) + SYSTEM.LSL(INTEGER(buf[p+1]), 8);
+    r.deps[i] := GetW(buf, p);
     INC(p, 2); INC(i)
   END
 END UnpackMod;

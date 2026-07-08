@@ -189,49 +189,36 @@ BEGIN
   END
 END EmitByte;
 
-PROCEDURE EmitByte2*(obj: ObjFile; seg: INTEGER; b1, b2: BYTE);
+PROCEDURE emitN(obj: ObjFile; seg: INTEGER; b1, b2, b3, b4: BYTE; n: INTEGER);
 BEGIN
   IF seg = SegCode THEN
     Files.WriteByte(obj^.codeFile, b1);
     Files.WriteByte(obj^.codeFile, b2);
-    INC(obj^.codeLen, 2)
+    IF n >= 3 THEN Files.WriteByte(obj^.codeFile, b3) END;
+    IF n >= 4 THEN Files.WriteByte(obj^.codeFile, b4) END;
+    INC(obj^.codeLen, n)
   ELSE
     Files.WriteByte(obj^.dataFile, b1);
     Files.WriteByte(obj^.dataFile, b2);
-    INC(obj^.dataLen, 2)
+    IF n >= 3 THEN Files.WriteByte(obj^.dataFile, b3) END;
+    IF n >= 4 THEN Files.WriteByte(obj^.dataFile, b4) END;
+    INC(obj^.dataLen, n)
   END
+END emitN;
+
+PROCEDURE EmitByte2*(obj: ObjFile; seg: INTEGER; b1, b2: BYTE);
+BEGIN
+  emitN(obj, seg, b1, b2, 0, 0, 2)
 END EmitByte2;
 
 PROCEDURE EmitByte3*(obj: ObjFile; seg: INTEGER; b1, b2, b3: BYTE);
 BEGIN
-  IF seg = SegCode THEN
-    Files.WriteByte(obj^.codeFile, b1);
-    Files.WriteByte(obj^.codeFile, b2);
-    Files.WriteByte(obj^.codeFile, b3);
-    INC(obj^.codeLen, 3)
-  ELSE
-    Files.WriteByte(obj^.dataFile, b1);
-    Files.WriteByte(obj^.dataFile, b2);
-    Files.WriteByte(obj^.dataFile, b3);
-    INC(obj^.dataLen, 3)
-  END
+  emitN(obj, seg, b1, b2, b3, 0, 3)
 END EmitByte3;
 
 PROCEDURE EmitByte4*(obj: ObjFile; seg: INTEGER; b1, b2, b3, b4: BYTE);
 BEGIN
-  IF seg = SegCode THEN
-    Files.WriteByte(obj^.codeFile, b1);
-    Files.WriteByte(obj^.codeFile, b2);
-    Files.WriteByte(obj^.codeFile, b3);
-    Files.WriteByte(obj^.codeFile, b4);
-    INC(obj^.codeLen, 4)
-  ELSE
-    Files.WriteByte(obj^.dataFile, b1);
-    Files.WriteByte(obj^.dataFile, b2);
-    Files.WriteByte(obj^.dataFile, b3);
-    Files.WriteByte(obj^.dataFile, b4);
-    INC(obj^.dataLen, 4)
-  END
+  emitN(obj, seg, b1, b2, b3, b4, 4)
 END EmitByte4;
 
 PROCEDURE EmitWord*(obj: ObjFile; seg: INTEGER; w: INTEGER);
@@ -400,13 +387,13 @@ BEGIN
   WHILE r # NIL DO INC(hlen, LONGINT(r^.count) * LONGINT(10)); r := r^.next END;
   imp := obj^.importHead;
   WHILE imp # NIL DO
-    nlen := 0; WHILE (nlen < MaxName) & (imp^.name[nlen] # 0X) DO INC(nlen) END;
+    nlen := Strings.Length(imp^.name);
     INC(hlen, LONGINT(5 + nlen + 1));
     imp := imp^.next
   END;
   g := obj^.globalHead;
   WHILE g # NIL DO
-    nlen := 0; WHILE (nlen < MaxName) & (g^.name[nlen] # 0X) DO INC(nlen) END;
+    nlen := Strings.Length(g^.name);
     INC(hlen, LONGINT(8 + nlen + 1));
     g := g^.next
   END;
@@ -445,7 +432,7 @@ BEGIN
 
   imp := obj^.importHead;
   WHILE imp # NIL DO
-    nlen := 0; WHILE (nlen < MaxName) & (imp^.name[nlen] # 0X) DO INC(nlen) END;
+    nlen := Strings.Length(imp^.name);
     Files.WriteByte(f, BYTE(RecImport));
     Files.WriteByte(f, BYTE(3 + nlen + 1));
     Files.WriteByte(f, imp^.flags);
@@ -456,7 +443,7 @@ BEGIN
 
   g := obj^.globalHead;
   WHILE g # NIL DO
-    nlen := 0; WHILE (nlen < MaxName) & (g^.name[nlen] # 0X) DO INC(nlen) END;
+    nlen := Strings.Length(g^.name);
     Files.WriteByte(f, BYTE(RecGlobal));
     Files.WriteByte(f, BYTE(6 + nlen + 1));
     Files.WriteByte(f, g^.flags);
@@ -772,10 +759,10 @@ BEGIN
 END ScanRelocs;
 
 (*
-  Read code segment bytes into buf at offset dstOfs.
+  Read segment bytes (wantType: 1=code, 2=data) into buf at offset dstOfs.
 *)
-PROCEDURE ReadCode*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
-                    buf: SegBuf; dstOfs, codeSize: WORD);
+PROCEDURE ReadSeg(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
+                  buf: SegBuf; dstOfs, size: WORD; wantType: INTEGER);
   VAR f: Files.File;
       dataStart: LONGINT;
       stype, dummy: INTEGER;
@@ -795,9 +782,9 @@ BEGIN
       Files.ReadWord(f, dummy);           (* reserved *)
       Files.ReadDWord(f, slen);           (* length *)
       segPos := segPos + LONGINT(10);
-      IF stype = 1 THEN
+      IF stype = wantType THEN
         Files.Seek(f, segPos);
-        IF Files.BlockRead(f, buf^[dstOfs], codeSize) # codeSize THEN
+        IF Files.BlockRead(f, buf^[dstOfs], size) # size THEN
           Files.Close(f); Err.Error2("Read error in ", path); RETURN
         END;
         done := TRUE
@@ -810,6 +797,15 @@ BEGIN
     END
   END;
   Files.Close(f)
+END ReadSeg;
+
+(*
+  Read code segment bytes into buf at offset dstOfs.
+*)
+PROCEDURE ReadCode*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
+                    buf: SegBuf; dstOfs, codeSize: WORD);
+BEGIN
+  ReadSeg(path, libOfs, hdrSize, buf, dstOfs, codeSize, 1)
 END ReadCode;
 
 (*
@@ -817,40 +813,8 @@ END ReadCode;
 *)
 PROCEDURE ReadData*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
                     buf: SegBuf; dstOfs, dataSize: WORD);
-  VAR f: Files.File;
-      dataStart: LONGINT;
-      stype, dummy: INTEGER;
-      slen: LONGINT;
-      done: BOOLEAN;
-      segPos: LONGINT;
 BEGIN
-  IF ~Files.Reset(f, path) THEN Err.Error2("Cannot open: ", path); RETURN END;
-  dataStart := libOfs + LONGINT(14) + hdrSize;
-  Files.Seek(f, dataStart);
-  done := FALSE; segPos := dataStart;
-  WHILE ~done DO
-    Files.ReadWord(f, stype);
-    IF stype <= 0 THEN done := TRUE
-    ELSE
-      Files.ReadWord(f, dummy);           (* num *)
-      Files.ReadWord(f, dummy);           (* reserved *)
-      Files.ReadDWord(f, slen);           (* length *)
-      segPos := segPos + LONGINT(10);
-      IF stype = 2 THEN
-        Files.Seek(f, segPos);
-        IF Files.BlockRead(f, buf^[dstOfs], dataSize) # dataSize THEN
-          Files.Close(f); Err.Error2("Read error in ", path); RETURN
-        END;
-        done := TRUE
-      ELSIF slen > LONGINT(0) THEN
-        segPos := segPos + slen;
-        Files.Seek(f, segPos)
-      ELSE
-        done := TRUE
-      END
-    END
-  END;
-  Files.Close(f)
+  ReadSeg(path, libOfs, hdrSize, buf, dstOfs, dataSize, 2)
 END ReadData;
 
 END Rdoff.

@@ -399,6 +399,21 @@ END AddReloc;
 
 (* ---- state init ---- *)
 
+(* Reset the dbg* scalar/head fields to their empty-state values.  Shared by
+   InitState (fresh state) and LinkFree (after disposing the dbg chains) —
+   callers that hold live chains must DISPOSE them before calling this. *)
+PROCEDURE ResetDebugState(ls: State);
+BEGIN
+  ls^.dbgPool      := NIL; ls^.dbgPoolTail := NIL;
+  ls^.dbgPoolBytes := LONGINT(0);
+  ls^.dbgNames     := 0;  ls^.dbgModCnt := 0;
+  ls^.dbgSymCnt    := 0;  ls^.dbgLineCnt := 0;
+  ls^.dbgTypeCnt   := 0;  ls^.dbgMembCnt := 0;
+  ls^.dbgScopeCnt  := 0;  ls^.dbgSymWritten := 0;
+  ls^.dbgScopeHead := NIL; ls^.dbgScopeTail := NIL;
+  ls^.dbgProcTop := -1; ls^.dbgLocalTotal := 0
+END ResetDebugState;
+
 PROCEDURE InitState*(ls: State);
   VAR i: INTEGER;
 BEGIN
@@ -420,14 +435,7 @@ BEGIN
   ls^.stackSize    := LONGINT(StackDef);
   ls^.nextGroupId  := 0;
   ls^.genDebug     := FALSE;
-  ls^.dbgPool      := NIL; ls^.dbgPoolTail := NIL;
-  ls^.dbgPoolBytes := LONGINT(0);
-  ls^.dbgNames     := 0;  ls^.dbgModCnt := 0;
-  ls^.dbgSymCnt    := 0;  ls^.dbgLineCnt := 0;
-  ls^.dbgTypeCnt   := 0;  ls^.dbgMembCnt := 0;
-  ls^.dbgScopeCnt  := 0;  ls^.dbgSymWritten := 0;
-  ls^.dbgScopeHead := NIL; ls^.dbgScopeTail := NIL;
-  ls^.dbgProcTop := -1; ls^.dbgLocalTotal := 0
+  ResetDebugState(ls)
 END InitState;
 
 (* Reserve the two large link buffers (data + one reusable per-group code
@@ -505,6 +513,7 @@ VAR
   scanGrp:  INTEGER;
   scanLs:   State;
 
+(* rawSize is unused but fixed by the Tar callback signature — do not remove. *)
 PROCEDURE OnMember(name: ARRAY OF CHAR; libOfs, rawSize: LONGINT); FAR;
 BEGIN
   ScanRdf(scanLs, scanPath, libOfs, scanGrp, name)
@@ -537,6 +546,7 @@ VAR
 
 PROCEDURE MarkModule(m: Module); FORWARD;
 
+(* flag is unused but fixed by the Import-scan callback signature — do not remove. *)
 PROCEDURE OnImportForMark(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
   VAR sym: Symbol;
 BEGIN
@@ -725,6 +735,7 @@ BEGIN
   END
 END PatchBuf;
 
+(* flag is unused but fixed by the Import-scan callback signature — do not remove. *)
 PROCEDURE OnImportForLink(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
   VAR sym: Symbol; node: ImportNode; k: INTEGER;
 BEGIN
@@ -739,6 +750,16 @@ BEGIN
   INC(lnkImports^.count)
 END OnImportForLink;
 
+(* buffer-relative patch address for a reloc at (rseg, rofs) inside module m *)
+PROCEDURE PatchAddrOf(m: Module; rseg: INTEGER; rofs: LONGINT): WORD;
+BEGIN
+  IF rseg = Rdoff.SegCode THEN
+    RETURN WORD(GroupOfs(m)) + WORD(rofs)
+  ELSE
+    RETURN WORD(m^.dataFinalOfs + rofs)
+  END
+END PatchAddrOf;
+
 PROCEDURE OnReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                   rrefSeg: INTEGER; rrel: INTEGER); FAR;
   VAR m, so: Module;
@@ -747,12 +768,7 @@ PROCEDURE OnReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
       patchAddr: WORD;  (* buffer offset — WORD to handle code offsets up to 64KB *)
 BEGIN
   m := lnkMod;
-  (* buffer-relative patch address *)
-  IF rseg = Rdoff.SegCode THEN
-    patchAddr := WORD(GroupOfs(m)) + WORD(rofs)
-  ELSE
-    patchAddr := WORD(m^.dataFinalOfs + rofs)
-  END;
+  patchAddr := PatchAddrOf(m, rseg, rofs);
 
   (* Compute fixup addend.  All segment offsets are absolute positions inside a
      <= 64 KB segment, so they are WORD (0..65535); carrying them as INTEGER
@@ -805,6 +821,8 @@ BEGIN
   PatchBuf(rseg, patchAddr, fixup, rwidth)
 END OnReloc;
 
+(* rwidth and rrel are unused but fixed by the reloc-scan callback signature
+   (shared with OnReloc) — do not remove. *)
 PROCEDURE OnSegReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                      rrefSeg: INTEGER; rrel: INTEGER); FAR;
   VAR m, so: Module;
@@ -814,11 +832,7 @@ PROCEDURE OnSegReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
       mzSeg, mzOfs: WORD;   (* MZ reloc seg:ofs — absolute values -> WORD *)
 BEGIN
   m := lnkMod;
-  IF rseg = Rdoff.SegCode THEN
-    patchAddr := WORD(GroupOfs(m)) + WORD(rofs)
-  ELSE
-    patchAddr := WORD(m^.dataFinalOfs + rofs)
-  END;
+  patchAddr := PatchAddrOf(m, rseg, rofs);
 
   fixup := 0;
   IF rrefSeg = Rdoff.SegCode THEN
@@ -1516,7 +1530,7 @@ PROCEDURE WriteExe*(ls: State; outPath: ARRAY OF CHAR);
       partPage, pageCnt: INTEGER;
       hdrBytes: LONGINT;
       gapBytes: LONGINT;
-      rel: MZReloc; k: INTEGER;
+      rel: MZReloc;
       dataInPara, bssGapPara, stackPara, minAlloc: LONGINT;
       summary: ARRAY 128 OF CHAR;
 BEGIN
@@ -1625,14 +1639,11 @@ PROCEDURE LinkFree*(ls: State);
 BEGIN
   p := ls^.dbgPool;
   WHILE p # NIL DO pNext := p^.next; DISPOSE(p); p := pNext END;
-  ls^.dbgPool := NIL; ls^.dbgPoolTail := NIL;
-  ls^.dbgPoolBytes := LONGINT(0);
-  ls^.dbgNames := 0; ls^.dbgModCnt := 0;
-  ls^.dbgSymCnt := 0; ls^.dbgLineCnt := 0;
 
   sc := ls^.dbgScopeHead;
   WHILE sc # NIL DO scNext := sc^.next; DISPOSE(sc); sc := scNext END;
-  ls^.dbgScopeHead := NIL; ls^.dbgScopeTail := NIL; ls^.dbgScopeCnt := 0;
+
+  ResetDebugState(ls);
 
   r := ls^.relocHead;
   WHILE r # NIL DO rNext := r^.next; DISPOSE(r); r := rNext END;

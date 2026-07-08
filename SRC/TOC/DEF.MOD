@@ -21,6 +21,12 @@ TYPE
 
 VAR
   curAlias: ARRAY NameLen OF CHAR;
+  (* primFormName[form] = keyword for a primitive scalar type form, or "" if
+     form is not a simple primitive (ARRAY/RECORD/POINTER/PROC/... need
+     structural handling in WriteType).  Filled in the module body below —
+     no CONST arrays. *)
+  primFormName: ARRAY 16 OF ARRAY 12 OF CHAR;
+  i: INTEGER;
 
 (* ---- write helpers ---- *)
 
@@ -38,6 +44,18 @@ BEGIN
   StrTab.Get(id, nm);
   Files.Write(f, nm)
 END WName;
+
+(* Write "modName_id" (qualified name), e.g. for CONST/VAR/PROC/INLINE lines. *)
+PROCEDURE WQualName(VAR f: Files.File; modName: ARRAY OF CHAR; id: WORD);
+BEGIN
+  Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, id)
+END WQualName;
+
+(* Write "TYPE modName_id" — the header common to every WriteOneType branch. *)
+PROCEDURE WTypeHdr(VAR f: Files.File; modName: ARRAY OF CHAR; id: WORD);
+BEGIN
+  Files.Write(f, "TYPE "); WQualName(f, modName, id)
+END WTypeHdr;
 
 (* ---- type name finder (writer side) ---- *)
 
@@ -57,17 +75,8 @@ END FindTypeName;
 PROCEDURE WriteType(VAR f: Files.File; t: Syms.TypeDesc);
   VAR nm: ARRAY NameLen OF CHAR;
 BEGIN
-  IF t = Syms.NoType             THEN Files.Write(f, "VOID");     RETURN END;
-  IF t.form = Syms.TFInteger     THEN Files.Write(f, "INTEGER");  RETURN END;
-  IF t.form = Syms.TFBoolean     THEN Files.Write(f, "BOOLEAN");  RETURN END;
-  IF t.form = Syms.TFChar        THEN Files.Write(f, "CHAR");     RETURN END;
-  IF t.form = Syms.TFByte        THEN Files.Write(f, "BYTE");     RETURN END;
-  IF t.form = Syms.TFWord        THEN Files.Write(f, "WORD");     RETURN END;
-  IF t.form = Syms.TFLongint     THEN Files.Write(f, "LONGINT");  RETURN END;
-  IF t.form = Syms.TFReal        THEN Files.Write(f, "REAL");     RETURN END;
-  IF t.form = Syms.TFLongreal    THEN Files.Write(f, "LONGREAL"); RETURN END;
-  IF t.form = Syms.TFSet         THEN Files.Write(f, "SET");      RETURN END;
-  IF t.form = Syms.TFAddress     THEN Files.Write(f, "ADDRESS");  RETURN END;
+  IF t = Syms.NoType THEN Files.Write(f, "VOID"); RETURN END;
+  IF primFormName[t.form][0] # 0X THEN Files.Write(f, primFormName[t.form]); RETURN END;
   IF t.form = Syms.TFArray THEN
     IF t.len >= LONGINT(0) THEN
       Files.Write(f, "ARRAY "); WInt(f, t.len); Files.Write(f, " OF ")
@@ -77,7 +86,6 @@ BEGIN
     WriteType(f, t.elem);
     RETURN
   END;
-  IF t.form = Syms.TFNotype      THEN Files.Write(f, "VOID");     RETURN END;
   IF t.form = Syms.TFPointer THEN
     Files.Write(f, "POINTER ");
     IF t.base # Syms.NoType THEN
@@ -126,7 +134,7 @@ BEGIN
        exported: importers need the size to lay out records that embed this one
        (e.g. Scan.Scanner has a private `file: Files.File`).  Only the FIELD lines
        are gated on `exported`. *)
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " RECORD "); WInt(f, td.size); Files.WriteLn(f);
     IF td.base # Syms.NoType THEN
       FindTypeName(td.base, bnm);
@@ -144,16 +152,16 @@ BEGIN
     END;
     Files.Write(f, "END"); Files.WriteLn(f)
   ELSIF (td # Syms.NoType) & (td.form = Syms.TFPointer) THEN
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " POINTER "); WriteType(f, td.base); Files.WriteLn(f)
   ELSIF (td # Syms.NoType) & (td.form = Syms.TFProc) THEN
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " PROC"); Files.WriteLn(f)
   ELSIF (td # Syms.NoType) & (td.form = Syms.TFAddress) THEN
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " ADDRESS"); Files.WriteLn(f)
   ELSIF (td # Syms.NoType) & (td.form = Syms.TFArray) THEN
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.WriteByte(f, ORD(' ')); WriteType(f, td); Files.WriteLn(f)
   ELSIF (td # Syms.NoType) &
         ((td.form = Syms.TFInteger) OR (td.form = Syms.TFBoolean) OR
@@ -166,16 +174,33 @@ BEGIN
        cannot see the form defaults it to INTEGER (2 bytes), silently
        truncating any 4-byte (LONGINT) or other-width value stored through a
        VAR parameter/global of the alias type. *)
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " PRIM "); WriteType(f, td); Files.WriteLn(f)
   ELSE
-    Files.Write(f, "TYPE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId); Files.WriteLn(f)
+    WTypeHdr(f, modName, sym.nameId); Files.WriteLn(f)
   END
 END WriteOneType;
 
+(* Write the "  PARAM ..." lines for a parameter chain starting at p. *)
+PROCEDURE WriteParams(VAR f: Files.File; p: Syms.Symbol);
+BEGIN
+  WHILE p # Syms.NoSym DO
+    IF (p.kind = Syms.KVarParam) & p.typeless THEN Files.Write(f, "  PARAM TYPELESSVAR ")
+    ELSIF p.kind = Syms.KVarParam THEN Files.Write(f, "  PARAM VAR ")
+    ELSE Files.Write(f, "  PARAM ")
+    END;
+    IF ~((p.kind = Syms.KVarParam) & p.typeless) THEN
+      WName(f, p.nameId); Files.WriteByte(f, ORD(' ')); WriteType(f, p.type); Files.WriteLn(f)
+    ELSE
+      WName(f, p.nameId); Files.WriteLn(f)
+    END;
+    p := p.next
+  END
+END WriteParams;
+
 PROCEDURE DefWrite*(VAR f: Files.File; modName: ARRAY OF CHAR);
   VAR sym: Syms.Symbol; scope: Syms.Scope;
-      pt: Syms.TypeDesc; p: Syms.Symbol; nd: Syms.InlineNode;
+      pt: Syms.TypeDesc; nd: Syms.InlineNode;
       ki: INTEGER;
 BEGIN
   scope := Syms.TopScope;
@@ -184,7 +209,7 @@ BEGIN
   sym := scope^.symbols;
   WHILE sym # Syms.NoSym DO
     IF sym.exported & ~HasDotId(sym.nameId) & (sym.kind = Syms.KConst) THEN
-      Files.Write(f, "CONST "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+      Files.Write(f, "CONST "); WQualName(f, modName, sym.nameId);
       Files.WriteByte(f, ORD(' ')); WInt(f, sym.val); Files.WriteLn(f)
     END;
     sym := sym.next
@@ -228,7 +253,7 @@ BEGIN
   WHILE sym # Syms.NoSym DO
     IF sym.exported & ~HasDotId(sym.nameId) & (sym.kind = Syms.KVar) THEN
       (* Format: VAR ModName_varname <type> seg offset *)
-      Files.Write(f, "VAR "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+      Files.Write(f, "VAR "); WQualName(f, modName, sym.nameId);
       Files.WriteByte(f, ORD(' ')); WriteType(f, sym.type); Files.WriteByte(f, ORD(' '));
       IF sym.level = 0 THEN Files.WriteByte(f, ORD('1')) ELSE Files.WriteByte(f, ORD('0')) END;
       Files.WriteByte(f, ORD(' ')); WInt(f, sym.adr); Files.WriteLn(f)
@@ -241,21 +266,9 @@ BEGIN
     IF sym.exported & ~HasDotId(sym.nameId) & (sym.kind = Syms.KProc) THEN
       pt := sym.type;
       IF (pt # Syms.NoType) & pt.isInline THEN
-        Files.Write(f, "INLINE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+        Files.Write(f, "INLINE "); WQualName(f, modName, sym.nameId);
         Files.WriteByte(f, ORD(' ')); WriteType(f, pt.retType); Files.WriteLn(f);
-        p := pt.params;
-        WHILE p # Syms.NoSym DO
-          IF (p.kind = Syms.KVarParam) & p.typeless THEN Files.Write(f, "  PARAM TYPELESSVAR ")
-          ELSIF p.kind = Syms.KVarParam THEN Files.Write(f, "  PARAM VAR ")
-          ELSE Files.Write(f, "  PARAM ")
-          END;
-          IF ~((p.kind = Syms.KVarParam) & p.typeless) THEN
-            WName(f, p.nameId); Files.WriteByte(f, ORD(' ')); WriteType(f, p.type); Files.WriteLn(f)
-          ELSE
-            WName(f, p.nameId); Files.WriteLn(f)
-          END;
-          p := p.next
-        END;
+        WriteParams(f, pt.params);
         Files.Write(f, "  BYTES");
         nd := pt.inlineList;
         WHILE nd # NIL DO
@@ -271,25 +284,11 @@ BEGIN
         END;
         Files.WriteLn(f); Files.Write(f, "END"); Files.WriteLn(f)
       ELSE
-        Files.Write(f, "PROC "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, sym.nameId);
+        Files.Write(f, "PROC "); WQualName(f, modName, sym.nameId);
         Files.WriteByte(f, ORD(' '));
         IF (pt # Syms.NoType) & pt.isFar THEN Files.Write(f, "FAR") ELSE Files.Write(f, "NEAR") END;
         Files.WriteByte(f, ORD(' ')); WriteType(f, pt.retType); Files.WriteLn(f);
-        IF pt # Syms.NoType THEN
-          p := pt.params;
-          WHILE p # Syms.NoSym DO
-            IF (p.kind = Syms.KVarParam) & p.typeless THEN Files.Write(f, "  PARAM TYPELESSVAR ")
-            ELSIF p.kind = Syms.KVarParam THEN Files.Write(f, "  PARAM VAR ")
-            ELSE Files.Write(f, "  PARAM ")
-            END;
-            IF ~((p.kind = Syms.KVarParam) & p.typeless) THEN
-              WName(f, p.nameId); Files.WriteByte(f, ORD(' ')); WriteType(f, p.type); Files.WriteLn(f)
-            ELSE
-              WName(f, p.nameId); Files.WriteLn(f)
-            END;
-            p := p.next
-          END
-        END;
+        IF pt # Syms.NoType THEN WriteParams(f, pt.params) END;
         Files.Write(f, "END"); Files.WriteLn(f)
       END
     END;
@@ -355,20 +354,47 @@ BEGIN
   RETURN FALSE
 END HasDotChar;
 
-PROCEDURE ResolveTypeName(VAR tname: ARRAY OF CHAR): Syms.TypeDesc;
-  VAR s: Syms.Symbol; qn: ARRAY QNameLen OF CHAR; rec: Syms.TypeDesc;
+(* Map a primitive-form index to its live TypeDesc singleton.  Syms.TypeXxx
+   are set by Syms.SymInit at compile-start (not at Def's module load time),
+   so this must read them live rather than caching into a table at init. *)
+PROCEDURE PrimTypeOf(form: INTEGER): Syms.TypeDesc;
 BEGIN
-  IF Strings.Equal(tname, "INTEGER")  THEN RETURN Syms.TypeInteger  END;
-  IF Strings.Equal(tname, "BOOLEAN")  THEN RETURN Syms.TypeBoolean  END;
-  IF Strings.Equal(tname, "CHAR")     THEN RETURN Syms.TypeChar     END;
-  IF Strings.Equal(tname, "BYTE")     THEN RETURN Syms.TypeByte     END;
-  IF Strings.Equal(tname, "WORD")     THEN RETURN Syms.TypeWord     END;
-  IF Strings.Equal(tname, "LONGINT")  THEN RETURN Syms.TypeLongint  END;
-  IF Strings.Equal(tname, "REAL")     THEN RETURN Syms.TypeReal     END;
-  IF Strings.Equal(tname, "LONGREAL") THEN RETURN Syms.TypeLongreal END;
-  IF Strings.Equal(tname, "SET")      THEN RETURN Syms.TypeSet      END;
-  IF Strings.Equal(tname, "ADDRESS")  THEN RETURN Syms.TypeAddress  END;
-  IF Strings.Equal(tname, "VOID")     THEN RETURN Syms.TypeNotype   END;
+  CASE form OF
+    Syms.TFInteger:  RETURN Syms.TypeInteger
+  | Syms.TFBoolean:  RETURN Syms.TypeBoolean
+  | Syms.TFChar:     RETURN Syms.TypeChar
+  | Syms.TFByte:     RETURN Syms.TypeByte
+  | Syms.TFWord:     RETURN Syms.TypeWord
+  | Syms.TFLongint:  RETURN Syms.TypeLongint
+  | Syms.TFReal:     RETURN Syms.TypeReal
+  | Syms.TFLongreal: RETURN Syms.TypeLongreal
+  | Syms.TFSet:      RETURN Syms.TypeSet
+  | Syms.TFAddress:  RETURN Syms.TypeAddress
+  | Syms.TFNotype:   RETURN Syms.TypeNotype
+  ELSE RETURN NIL
+  END
+END PrimTypeOf;
+
+(* Linear scan over the primitive-form-name table; returns NIL if tname is
+   not one of the primitive scalar keywords. *)
+PROCEDURE FindPrimType(VAR tname: ARRAY OF CHAR): Syms.TypeDesc;
+  VAR k: INTEGER;
+BEGIN
+  k := 0;
+  WHILE k < 16 DO
+    IF (primFormName[k][0] # 0X) & Strings.Equal(tname, primFormName[k]) THEN
+      RETURN PrimTypeOf(k)
+    END;
+    INC(k)
+  END;
+  RETURN NIL
+END FindPrimType;
+
+PROCEDURE ResolveTypeName(VAR tname: ARRAY OF CHAR): Syms.TypeDesc;
+  VAR s: Syms.Symbol; qn: ARRAY QNameLen OF CHAR; rec: Syms.TypeDesc; pt: Syms.TypeDesc;
+BEGIN
+  pt := FindPrimType(tname);
+  IF pt # NIL THEN RETURN pt END;
   IF Strings.Equal(tname, "ARRAY")    THEN
     RETURN Syms.TypeNewArray(Syms.TypeChar, LONGINT(-1))
   END;
@@ -706,4 +732,18 @@ BEGIN
   END
 END DefRead;
 
+BEGIN
+  i := 0;
+  WHILE i < 16 DO primFormName[i][0] := 0X; INC(i) END;
+  primFormName[Syms.TFInteger]  := "INTEGER";
+  primFormName[Syms.TFBoolean]  := "BOOLEAN";
+  primFormName[Syms.TFChar]     := "CHAR";
+  primFormName[Syms.TFByte]     := "BYTE";
+  primFormName[Syms.TFWord]     := "WORD";
+  primFormName[Syms.TFLongint]  := "LONGINT";
+  primFormName[Syms.TFReal]     := "REAL";
+  primFormName[Syms.TFLongreal] := "LONGREAL";
+  primFormName[Syms.TFSet]      := "SET";
+  primFormName[Syms.TFAddress]  := "ADDRESS";
+  primFormName[Syms.TFNotype]   := "VOID"
 END Def.

@@ -67,6 +67,10 @@ That means:
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
   `/G`, and get a Borland TDS/TDINFO v2.08 block appended straight onto the
   `.EXE` — inspect with the included `tdinfo.exe`.
+- **Linkable with external assembly.** The linker consumes standard RDOFF2
+  object files, so hand-written assembly modules assembled with NASM, YASM,
+  or MSA2 (`-f rdf`) can be linked directly alongside Oberon-compiled
+  `.rdf`/`.om` modules — no C shim required.
 
 ---
 
