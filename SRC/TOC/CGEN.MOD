@@ -223,9 +223,9 @@ BEGIN
   Rdoff.EmitWord(CgObj, Rdoff.SegData, w)
 END EmitDataWord;
 
-PROCEDURE EmitDataZero*(n: INTEGER);
+PROCEDURE EmitDataZero*(n: LONGINT);
 BEGIN
-  IF n > 0 THEN Rdoff.EmitZero(CgObj, n) END
+  IF n > LONGINT(0) THEN Rdoff.EmitZero(CgObj, n) END
 END EmitDataZero;
 
 (* Allocate a 4-byte far-pointer slot in the data segment patched by the

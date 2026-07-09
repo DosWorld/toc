@@ -147,13 +147,16 @@ BEGIN
   Scan.Next(PExpr.sc);
   IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("identifier expected"); RETURN END;
   varSym := Syms.SymFind(PExpr.sc.id); Scan.Next(PExpr.sc);
-  IF (varSym = Syms.NoSym) OR (varSym.type # Syms.TypeInteger) THEN
+  IF (varSym = Syms.NoSym) OR (varSym.type.form # Syms.TFInteger) THEN
+    PExpr.Error("INTEGER var expected"); RETURN
+  END;
+  IF (varSym.kind # Syms.KVar) & (varSym.kind # Syms.KParam) & (varSym.kind # Syms.KVarParam) THEN
     PExpr.Error("INTEGER var expected"); RETURN
   END;
   PExpr.Expect(Scan.TAssign);
   PExpr.ParseExpression(init); Cgen.CgLoadItem(init);
   IF varSym.level = 0 THEN dst.mode := Cgen.MGlobal ELSE dst.mode := Cgen.MLocal END;
-  dst.adr := varSym.adr; dst.type := Syms.TypeInteger; dst.isRef := FALSE;
+  dst.adr := varSym.adr; dst.type := Syms.TypeInteger; dst.isRef := varSym.kind = Syms.KVarParam;
   Cgen.CgStoreItem(dst);
   PExpr.Expect(Scan.TTo);
   limSym := Syms.SymNew("$lim", Syms.KVar);
@@ -168,19 +171,22 @@ BEGIN
     Scan.Next(PExpr.sc);
     IF PExpr.sc.sym = Scan.TMinus THEN neg := TRUE; Scan.Next(PExpr.sc) END;
     IF PExpr.sc.sym # Scan.TInt THEN PExpr.Error("constant expected")
-    ELSE step := PExpr.sc.ival; IF neg THEN step := -step END END;
+    ELSE
+      step := PExpr.sc.ival; IF neg THEN step := -step END;
+      IF step = 0 THEN PExpr.Error("FOR step must not be zero") END
+    END;
     Scan.Next(PExpr.sc)
   END;
   PatchFrameSize;
   PExpr.Expect(Scan.TDo);
   loopTop := Cgen.CgPc();
-  v.mode := dst.mode; v.adr := dst.adr; v.type := Syms.TypeInteger; v.isRef := FALSE;
+  v.mode := dst.mode; v.adr := dst.adr; v.type := Syms.TypeInteger; v.isRef := dst.isRef;
   Cgen.CgLoadItem(v);
   Cgen.CgCmpAxBp(limSym.adr);
   IF step >= 0 THEN Cgen.CgCondNear(Cgen.OpJg, jend)
   ELSE Cgen.CgCondNear(Cgen.OpJl, jend) END;
   ParseStatementSequence(Syms.TypeNotype);
-  v.mode := dst.mode; v.adr := dst.adr; v.isRef := FALSE;
+  v.mode := dst.mode; v.adr := dst.adr; v.isRef := dst.isRef;
   Cgen.CgLoadItem(v);
   IF step = 1 THEN Cgen.CgIncAx()
   ELSIF step = -1 THEN Cgen.CgDecAx()

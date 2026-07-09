@@ -366,6 +366,7 @@ PROCEDURE Reset*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   F.handle := -1;
   F.buf := NIL;
+  F.backend := BkDisk;
   CopyName(F, name);
   F.delOnClose := FALSE;
   r.Flags := 0; r.ES := 0;
@@ -405,6 +406,7 @@ PROCEDURE ReWrite*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   F.handle := -1;
   F.buf := NIL;
+  F.backend := BkDisk;
   CopyName(F, name);
   F.delOnClose := FALSE;
   r.Flags := 0; r.ES := 0;

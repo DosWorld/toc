@@ -235,7 +235,7 @@ PROCEDURE ScanTar*(archPath: ARRAY OF CHAR; onMember: MemberProc;
       ok: BOOLEAN;
 BEGIN
   NEW(hdr);
-  IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath) END;
+  IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);
 
@@ -323,7 +323,7 @@ PROCEDURE ListTar*(archPath: ARRAY OF CHAR; onMember: MemberProc);
       n: INTEGER;
 BEGIN
   NEW(hdr);
-  IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath) END;
+  IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);
 

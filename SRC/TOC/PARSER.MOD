@@ -529,7 +529,10 @@ BEGIN
       s.exported := it^.exported; s.type := t;
       s.declLine := PExpr.sc.line;
       IF Syms.TopScope^.level = 0 THEN
-        s.adr := Cgen.CgDpc(); Cgen.EmitDataZero(INTEGER(t.size));
+        IF t.size >= LONGINT(Rdoff.SegLimit) THEN
+          PExpr.Error2("global variable exceeds 64K data segment limit", it^.name)
+        END;
+        s.adr := Cgen.CgDpc(); Cgen.EmitDataZero(t.size);
         (* debug info: module-level VAR — all globals live in SegData ('D') *)
         TDbg.AddSymT("V", "D", WORD(s.adr), TDbg.TypeIndex(t), it^.name);
         IF s.exported THEN
@@ -1126,12 +1129,16 @@ BEGIN
     dfOpen := Files.ReWriteTemp(df);
     IF dfOpen THEN
       Def.DefWrite(df, modName)
+    ELSE
+      Err.Error("oc: cannot create .def temp")
     END;
     (* write .DBG into a temp — always present (0-byte when $D-); the writer
        emits nothing when collection was disabled. *)
     dgOpen := Files.ReWriteTemp(dg);
     IF dgOpen THEN
       TDbg.WriteDbg(dg)
+    ELSE
+      Err.Error("oc: cannot create .dbg temp")
     END;
     (* Symbol table is no longer needed: .def captures all exported info.
        Release it now to free DOS heap before the entry-stub generator
@@ -1196,12 +1203,14 @@ BEGIN
       END;
       Tar.TarEnd(lf);
       Files.Close(lf)
+    ELSE
+      Err.Error2("oc: cannot create ", libName)
     END;
     (* close (auto-delete) the .rdf/.def/.dbg temps *)
     Files.Close(rf);
     IF dfOpen THEN Files.Close(df) END;
     IF dgOpen THEN Files.Close(dg) END;
-    Err.Info2("wrote ", libName)
+    IF ~Err.HaveErr() THEN Err.Info2("wrote ", libName) END
     END   (* IF Err.HaveErr() *)
   END;
   (* On error, the failing diagnostic was already reported through Err; the

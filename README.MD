@@ -6,9 +6,22 @@
 [![platform](https://img.shields.io/badge/platform-MS--DOS%20%2F%208086%20real%20mode-blue)](DOCS/XT.MD)
 [![self-hosted](https://img.shields.io/badge/self--hosted-byte--stable-success)](TESTS/test_selfhost.sh)
 
+[Oberon](https://en.wikipedia.org/wiki/Oberon_(programming_language)) is
+Niklaus Wirth's successor to Pascal and Modula-2 — a small, strongly-typed
+systems language designed to be compilable by a single programmer in a
+single pass, with no preprocessor and (almost) no undefined behavior.
+Oberon-07 (2007) is Wirth's own later simplification of the language.
+
 > Wirth's Oberon-07, compiling itself, targeting a 1981 processor. Written
 > entirely in Oberon, running on real DOS hardware — no C, no assembler
 > front end, no host toolchain required at runtime.
+
+This project implements a **practical DOS dialect** of Oberon-07: the core
+language plus what real 16-bit systems programming needs — `SYSTEM`
+intrinsics for port I/O and inline machine code, `FAR`/`NEAR` procedures,
+typeless `VAR` parameters, and an `INLINE` mechanism for embedding raw
+opcodes. See [`DOCS/OBERON07.EBN`](DOCS/OBERON07.EBN) for the authoritative
+grammar and every deviation from the standard.
 
 ---
 
@@ -66,27 +79,10 @@ That means:
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
   `/G`, and get a Borland TDS/TDINFO v2.08 block appended straight onto the
   `.EXE` — inspect with the included `tdinfo.exe`.
-- **Linkable with external assembly.** The linker consumes standard RDOFF2
+- **Linkable with external object files.** The linker consumes standard RDOFF2
   object files, so hand-written assembly modules assembled with NASM, YASM,
   or MSA2 (`-f rdf`) can be linked directly alongside Oberon-compiled
   `.rdf`/`.om` modules — no C shim required.
-
----
-
-## What is Oberon, and why does this dialect matter?
-
-[Oberon](https://en.wikipedia.org/wiki/Oberon_(programming_language)) is
-Niklaus Wirth's successor to Pascal and Modula-2 — a small, strongly-typed
-systems language designed to be compilable by a single programmer in a
-single pass, with no preprocessor and (almost) no undefined behavior.
-Oberon-07 (2007) is Wirth's own later simplification of the language.
-
-This project implements a **practical DOS dialect** of Oberon-07: the core
-language plus what real 16-bit systems programming needs — `SYSTEM`
-intrinsics for port I/O and inline machine code, `FAR`/`NEAR` procedures,
-typeless `VAR` parameters, and an `INLINE` mechanism for embedding raw
-opcodes. See [`DOCS/OBERON07.EBN`](DOCS/OBERON07.EBN) for the authoritative
-grammar and every deviation from the standard.
 
 ---
 

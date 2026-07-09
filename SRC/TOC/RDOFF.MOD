@@ -467,7 +467,7 @@ BEGIN
     Files.WriteWord(f, 0);
     Files.WriteDWord(f, LONGINT(obj^.dataLen));
     Files.Seek(obj^.dataFile, LONGINT(0));
-    cpOk := Files.BlockCopy(obj^.dataFile, f, LONGINT(obj^.dataLen))
+    cpOk := cpOk & Files.BlockCopy(obj^.dataFile, f, LONGINT(obj^.dataLen))
   END;
 
   Files.WriteWord(f, 0);
