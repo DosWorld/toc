@@ -1100,7 +1100,12 @@ BEGIN
       Cgen.CgLoadItem(rhs);
       IF (item.type # Syms.NoType) & (item.type.form = Syms.TFLongint) &
          (rhs.type # Syms.NoType) & (rhs.type.form # Syms.TFLongint) THEN
-        Cgen.Emit1(099H)
+        IF (rhs.type.form = Syms.TFByte) OR (rhs.type.form = Syms.TFChar) OR
+           (rhs.type.form = Syms.TFBoolean) OR (rhs.type.form = Syms.TFWord) THEN
+          Cgen.Emit2(033H, 0D2H)  (* XOR DX,DX — zero-extend (WORD/BYTE/CHAR/BOOLEAN are unsigned) *)
+        ELSE
+          Cgen.Emit1(099H)        (* CWD — sign-extend INTEGER *)
+        END
       END;
       IF (item.mode = Cgen.MReg) & item.isRef THEN
         Cgen.EmitCodeStr("5B,07")  (* POP BX; POP ES *)

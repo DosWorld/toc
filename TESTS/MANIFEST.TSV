@@ -274,6 +274,7 @@ inline/56m-stmt-bytes-present	INLSTMT.MOD		code-contains	FA FB
 inline/56m-stmt-compiles	INLSTMT.MOD		has-global	Inlstmt_Run
 inline/56n-stmt-runtime-nops-exit0	INLEXIT.MOD	/ENTRY=Run	errorlevel	0
 inc-long/carries-into-hi-word	INCLONG.MOD	/ENTRY=Run	errorlevel	0
+asgn-widen/word-byte-char-zero-extend	ASGWIDEN.MOD	/ENTRY=Run	errorlevel	0
 near-far/37l-near-exported-rejected	NEAREXP.MOD	fails	compile-fails
 intr/T13-def-alone-not-enough	INTRT13.MOD+CORRUPT.DEF	fails	compile-fails
 opt/A-mul8-shl	OPTMUL.MOD		code-contains	B1 03 D3 E0

@@ -587,7 +587,8 @@ BEGIN
   RunExeTestKeep("18/TDEF",  "TDEF", "");
   RunExeTestKeep("18/TPRSR", "TPRSR", "PRSR01.MOD");
   RunExeTestKeep("18/TINCDEC", "TINCDEC", "");
-  RunExeTestKeep("18/TSYSMV", "TSYSMV", "")
+  RunExeTestKeep("18/TSYSMV", "TSYSMV", "");
+  RunExeTestKeep("18/TCASETBL", "TCASETBL", "")
 END RunSection18;
 
 (* ---- SYSTEM.DEF artefact checks (T5/T6) ----
