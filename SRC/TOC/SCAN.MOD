@@ -465,6 +465,7 @@ BEGIN
         ReadCh(s)
       END
     END;
+    ScanError(s, "unterminated comment");
     RETURN
   END;
   depth := 1;
@@ -504,7 +505,7 @@ END SkipLineComment;
 (* Next must be declared before Open because Open calls Next *)
 
 PROCEDURE Next*(VAR s: Scanner);
-  VAR c: INTEGER;
+  VAR c: INTEGER; again: BOOLEAN;
 BEGIN
   (* pending token from "n.." lookahead *)
   IF s.pendSym >= 0 THEN
@@ -512,70 +513,77 @@ BEGIN
     s.pendSym := -1;
     RETURN
   END;
-  (* skip whitespace (CR already filtered by ReadCh) *)
-  WHILE (s.ch = ChSp) OR (s.ch = ChTab) OR (s.ch = ChLf) DO
-    ReadCh(s)
-  END;
-  IF s.ch = ChEof THEN s.sym := TEof; RETURN END;
-
-  IF SYSTEM.ISALPHA(CHR(s.ch))      THEN ScanIdent(s);           RETURN END;
-  IF SYSTEM.ISDIGIT(CHR(s.ch))      THEN ScanNumber(s);          RETURN END;
-  IF (s.ch = ChDquote) OR (s.ch = ChSquote) THEN ScanString(s, s.ch); RETURN END;
-
-  c := s.ch; ReadCh(s);
-  CASE c OF
-    ChPlus:   s.sym := TPlus
-  | ChMinus:  s.sym := TMinus
-  | ChStar:   s.sym := TStar
-  | ChSlash:
-      IF s.ch = ChSlash THEN
-        ReadCh(s);  (* consume second '/' *)
-        IF s.ch = ChDollar THEN
-          ReadCh(s);  (* consume '$' *)
-          SkipLineComment(s, TRUE)
-        ELSE
-          SkipLineComment(s, FALSE)
-        END;
-        Next(s)
-      ELSE s.sym := TSlash
+  (* Loop instead of tail-recursing after a skipped comment: N consecutive
+     comments used to push N nested Next() frames, overflowing the stack on
+     8086 (SP wraps into the data segment, silent corruption).  'again' is
+     set when a comment was skipped and the token must be rescanned. *)
+  REPEAT
+    again := FALSE;
+    (* skip whitespace (CR already filtered by ReadCh) *)
+    WHILE (s.ch = ChSp) OR (s.ch = ChTab) OR (s.ch = ChLf) DO
+      ReadCh(s)
+    END;
+    IF s.ch = ChEof THEN s.sym := TEof
+    ELSIF SYSTEM.ISALPHA(CHR(s.ch)) THEN ScanIdent(s)
+    ELSIF SYSTEM.ISDIGIT(CHR(s.ch)) THEN ScanNumber(s)
+    ELSIF (s.ch = ChDquote) OR (s.ch = ChSquote) THEN ScanString(s, s.ch)
+    ELSE
+      c := s.ch; ReadCh(s);
+      CASE c OF
+        ChPlus:   s.sym := TPlus
+      | ChMinus:  s.sym := TMinus
+      | ChStar:   s.sym := TStar
+      | ChSlash:
+          IF s.ch = ChSlash THEN
+            ReadCh(s);  (* consume second '/' *)
+            IF s.ch = ChDollar THEN
+              ReadCh(s);  (* consume '$' *)
+              SkipLineComment(s, TRUE)
+            ELSE
+              SkipLineComment(s, FALSE)
+            END;
+            again := TRUE
+          ELSE s.sym := TSlash
+          END
+      | ChEq:    s.sym := TEql
+      | ChHash:  s.sym := TNeq
+      | ChAmp:   s.sym := TAnd
+      | ChTilde: s.sym := TNot
+      | ChCaret: s.sym := TArrow
+      | ChBar:   s.sym := TBar
+      | ChComma: s.sym := TComma
+      | ChSemi:  s.sym := TSemi
+      | ChLbrak: s.sym := TLbrak
+      | ChRbrak: s.sym := TRbrak
+      | ChLbrace: s.sym := TLbrace
+      | ChRbrace: s.sym := TRbrace
+      | ChRparen: s.sym := TRparen
+      | ChLt:
+          IF s.ch = ChEq THEN ReadCh(s); s.sym := TLeq
+          ELSE s.sym := TLss
+          END
+      | ChGt:
+          IF s.ch = ChEq THEN ReadCh(s); s.sym := TGeq
+          ELSE s.sym := TGtr
+          END
+      | ChColon:
+          IF s.ch = ChEq THEN ReadCh(s); s.sym := TAssign
+          ELSE s.sym := TColon
+          END
+      | ChDot:
+          IF s.ch = ChDot THEN ReadCh(s); s.sym := TDotdot
+          ELSE s.sym := TDot
+          END
+      | ChLparen:
+          IF s.ch = ChStar THEN ReadCh(s); SkipComment(s); again := TRUE
+          ELSE s.sym := TLparen
+          END
+      ELSE
+        ScanError(s, "illegal character");
+        s.sym := TError
       END
-  | ChEq:    s.sym := TEql
-  | ChHash:  s.sym := TNeq
-  | ChAmp:   s.sym := TAnd
-  | ChTilde: s.sym := TNot
-  | ChCaret: s.sym := TArrow
-  | ChBar:   s.sym := TBar
-  | ChComma: s.sym := TComma
-  | ChSemi:  s.sym := TSemi
-  | ChLbrak: s.sym := TLbrak
-  | ChRbrak: s.sym := TRbrak
-  | ChLbrace: s.sym := TLbrace
-  | ChRbrace: s.sym := TRbrace
-  | ChRparen: s.sym := TRparen
-  | ChLt:
-      IF s.ch = ChEq THEN ReadCh(s); s.sym := TLeq
-      ELSE s.sym := TLss
-      END
-  | ChGt:
-      IF s.ch = ChEq THEN ReadCh(s); s.sym := TGeq
-      ELSE s.sym := TGtr
-      END
-  | ChColon:
-      IF s.ch = ChEq THEN ReadCh(s); s.sym := TAssign
-      ELSE s.sym := TColon
-      END
-  | ChDot:
-      IF s.ch = ChDot THEN ReadCh(s); s.sym := TDotdot
-      ELSE s.sym := TDot
-      END
-  | ChLparen:
-      IF s.ch = ChStar THEN ReadCh(s); SkipComment(s); Next(s)
-      ELSE s.sym := TLparen
-      END
-  ELSE
-    ScanError(s, "illegal character");
-    s.sym := TError
-  END
+    END
+  UNTIL ~again
 END Next;
 
 PROCEDURE Close*(VAR s: Scanner);

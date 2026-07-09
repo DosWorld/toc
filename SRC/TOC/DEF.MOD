@@ -487,7 +487,7 @@ PROCEDURE DefRead*(VAR f: Files.File; alias: ARRAY OF CHAR);
       qname: ARRAY QNameLen OF CHAR;
       modname: ARRAY NameLen OF CHAR;
       pname: ARRAY NameLen OF CHAR;
-      i, seg: INTEGER;
+      i, seg, before: INTEGER;
       curRec:    Syms.TypeDesc;
       curRecSize: LONGINT;
       curProc:   Syms.TypeDesc;
@@ -529,14 +529,19 @@ BEGIN
       ndHead := curInline.inlineList; ndTail := curInline.inlineList;
       (* advance ndTail to the last chunk so InlineAppend appends in order *)
       IF ndTail # NIL THEN WHILE ndTail^.next # NIL DO ndTail := ndTail^.next END END;
-      WHILE line[i] # 0X DO
+      WHILE (line[i] # 0X) & ~Err.HaveErr() DO
         SkipWS(line, i);
         IF line[i] # 0X THEN
+          (* a malformed token (not 'P'/'p', not a digit/'-') makes ReadLong
+             consume nothing, leaving i unchanged and this loop spinning
+             forever on a corrupt .def; guard with a no-progress check. *)
+          before := i;
           IF (line[i] = 'P') OR (line[i] = 'p') THEN
             INC(i); Syms.InlineAppend(ndHead, ndTail, TRUE, BYTE(0), INTEGER(ReadLong(line, i)))
           ELSE
             Syms.InlineAppend(ndHead, ndTail, FALSE, BYTE(INTEGER(ReadLong(line, i)) MOD 256), 0)
           END;
+          IF i = before THEN Err.Error("malformed BYTES token in .def") END;
           curInline.inlineList := ndHead; INC(curInline.nInline)
         END
       END

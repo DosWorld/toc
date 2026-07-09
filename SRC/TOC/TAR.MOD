@@ -32,6 +32,9 @@ PROCEDURE ParseOctal(hdr: HdrBuf; offset, width: INTEGER): LONGINT;
 BEGIN
   res := LONGINT(0);
   i := offset;
+  (* some tar writers pad octal fields with leading spaces; skip them so the
+     digit scan below isn't short-circuited by the very first byte. *)
+  WHILE (i < offset + width) & (hdr^[i] = BYTE(ORD(" "))) DO INC(i) END;
   WHILE i < offset + width DO
     IF (hdr^[i] >= BYTE(ORD("0"))) & (hdr^[i] <= BYTE(ORD("7"))) THEN
       res := res * LONGINT(8) + LONGINT(INTEGER(hdr^[i]) - ORD("0"))
