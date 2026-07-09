@@ -728,6 +728,16 @@ SYSTEM_MemMaxAvail:
     pop  es
     RETMACRO 0
 
+; Oberon-07 DIV/MOD are floored (quotient rounds toward -infinity, remainder
+; takes the divisor's sign), not the div_kernel_32/8086 IDIV truncating
+; convention (quotient rounds toward zero, remainder takes the dividend's
+; sign).  di tracks "a (dividend) was negative", si tracks "b (divisor) was
+; negative" (each 0 or 1, independently -- NOT xored together as the old
+; truncating version did).  After the unsigned kernel call, dx:ax holds the
+; truncating |quotient| and cx:bx the truncating |remainder|.  Truncating and
+; floored results agree whenever the remainder is 0 or the two operand signs
+; match; otherwise floored_quotient = truncating_quotient - 1 and
+; floored_remainder = truncating_remainder_signed + b.
 SYSTEM_S32DIV:
     push bp
     mov bp, sp
@@ -743,30 +753,46 @@ SYSTEM_S32DIV:
     mov ax, [a_low]
     mov cx, [b_high]
     mov bx, [b_low]
+    xor di, di
     xor si, si
     test dx, dx
     jns .check_b
+    mov di, 1
     not dx
     not ax
     add ax, 1
     adc dx, 0
-    not si
 .check_b:
     test cx, cx
     jns .do_div
+    mov si, 1
     not cx
     not bx
     add bx, 1
     adc cx, 0
-    not si
 .do_div:
-    call div_kernel_32
-    test si, si
-    jz .end
+    push di
+    push si
+    call div_kernel_32          ; dx:ax = |quotient|, cx:bx = |remainder|
+    pop si
+    pop di
+    cmp di, si
+    je .same_sign               ; same sign (or a==0): truncating == floored
     not dx
     not ax
     add ax, 1
-    adc dx, 0
+    adc dx, 0                   ; dx:ax = -|quotient| (truncating quotient)
+    mov si, cx
+    or si, bx
+    jz .end                     ; remainder == 0: no floored fixup needed
+    sub ax, 1
+    sbb dx, 0                   ; floored quotient = truncating quotient - 1
+    jmp .end
+.same_sign:
+    ; a and b have the same sign (both >=0 or both negative): the quotient of
+    ; two same-signed values is always non-negative, and div_kernel_32 was
+    ; called on the two magnitudes, so dx:ax already holds the correct
+    ; positive quotient -- no negation needed either way.
 .end:
     pop di
     pop si
@@ -791,14 +817,15 @@ SYSTEM_S32MOD:
     push cx
     push si
     push di
+    xor di, di
+    xor si, si
     mov dx, [a_high]
     mov ax, [a_low]
     mov cx, [b_high]
     mov bx, [b_low]
-    xor si, si
     test dx, dx
     jns .check_b
-    mov si, 1
+    mov di, 1
     not dx
     not ax
     add ax, 1
@@ -806,20 +833,37 @@ SYSTEM_S32MOD:
 .check_b:
     test cx, cx
     jns .do_div
+    mov si, 1
     not cx
     not bx
     add bx, 1
     adc cx, 0
 .do_div:
-    call div_kernel_32
+    push di
+    push si
+    call div_kernel_32          ; cx:bx = |remainder| (unsigned kernel output)
+    pop si
+    pop di
     mov dx, cx
-    mov ax, bx
-    test si, si
-    jz .end
+    mov ax, bx                  ; dx:ax = |remainder|
+    test di, di
+    jz .have_mag                ; a >= 0: truncating remainder is +|remainder|
     not dx
     not ax
     add ax, 1
-    adc dx, 0
+    adc dx, 0                   ; a < 0: truncating remainder is -|remainder|
+.have_mag:
+    ; dx:ax = truncating remainder (dividend's sign, 0 if exact).
+    cmp di, si
+    je .end                     ; same sign or remainder 0-safe: no fixup
+    mov cx, dx
+    mov bx, ax
+    or cx, bx
+    jz .end                     ; remainder == 0: floored == truncating
+    mov cx, [b_high]
+    mov bx, [b_low]
+    add ax, bx
+    adc dx, cx                  ; floored remainder = truncating remainder + b
 .end:
     pop di
     pop si

@@ -858,7 +858,28 @@ END CgCmp32Neq;
 PROCEDURE CgAdd*()      ; BEGIN Emit2(003H, 0C1H) END CgAdd;       (* ADD AX, CX *)
 PROCEDURE CgSub*()      ; BEGIN EmitCodeStr("91,2B,C1") END CgSub; (* XCHG AX,CX / SUB AX,CX *)
 PROCEDURE CgMul*()      ; BEGIN Emit2(0F7H, 0E9H) END CgMul;       (* IMUL CX *)
-PROCEDURE CgDiv*()      ; BEGIN EmitCodeStr("91,99,F7,F9") END CgDiv; (* XCHG AX,CX / CWD / IDIV CX *)
+(* Oberon-07 DIV/MOD are floored (result has the divisor's sign; quotient
+   rounds toward -infinity), not the 8086 IDIV's truncating (toward zero).
+   After XCHG AX,CX / CWD / IDIV CX: AX=truncated quotient, DX=remainder
+   (dividend's sign), CX=divisor (unchanged by IDIV).  If the remainder is
+   nonzero and its sign differs from the divisor's, truncating and floored
+   disagree; fix up by decrementing the quotient and adding the divisor back
+   into the remainder (BX is free scratch here — not live across IDIV). *)
+PROCEDURE CgDivModFixup;
+  VAR doneBp1, doneBp2: Backpatch;
+BEGIN
+  Emit2(BYTE(085H), 0D2H);                 (* TEST DX,DX *)
+  CgCondShort(OpJz, doneBp1);
+  Emit2(BYTE(089H), 0D3H);                 (* MOV BX,DX *)
+  Emit2(BYTE(031H), 0CBH);                 (* XOR BX,CX *)
+  CgCondShort(0079H, doneBp2);             (* JNS done (signs equal) *)
+  Emit1(BYTE(048H));                       (* DEC AX *)
+  Emit2(BYTE(001H), 0CAH);                 (* ADD DX,CX *)
+  CgPatchShort(doneBp1);
+  CgPatchShort(doneBp2)
+END CgDivModFixup;
+
+PROCEDURE CgDiv*()      ; BEGIN EmitCodeStr("91,99,F7,F9"); CgDivModFixup() END CgDiv; (* XCHG AX,CX / CWD / IDIV CX *)
 PROCEDURE CgMod*()      ; BEGIN CgDiv(); Emit2(08BH,0C2H) END CgMod;
 PROCEDURE CgMulU*()     ; BEGIN Emit2(0F7H, 0E1H) END CgMulU;      (* MUL CX unsigned *)
 PROCEDURE CgDivU*()     ; BEGIN EmitCodeStr("91,31,D2,F7,F1") END CgDivU; (* XCHG AX,CX / XOR DX,DX / DIV CX *)

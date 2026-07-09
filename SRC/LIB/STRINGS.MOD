@@ -186,28 +186,40 @@ BEGIN
 END Copy;
 
 PROCEDURE Str*(src : LONGINT; VAR dst : ARRAY OF CHAR);
-  CONST MaxLen = 12;
+  CONST MaxLen = 12; MinLong = -2147483647 - 1;
   VAR buf : ARRAY MaxLen OF CHAR;
       i, j, len, digit : INTEGER;
       n : LONGINT;
       neg : BOOLEAN;
 BEGIN
   i := MaxLen;
-  n := src;
+  neg := src < 0;
 
-  IF n = 0 THEN
+  (* Work from the non-negative magnitude (negate up front) so the digit
+     loop's termination (n = 0) and each digit's sign don't depend on
+     whether DIV/MOD are truncating or floored -- both flavors agree once
+     n >= 0.  MinLong can't be negated (overflows LONGINT), so peel its
+     last digit off separately using its known decimal value. *)
+  IF src = 0 THEN
     DEC(i);
-    buf[i] := '0';
+    buf[i] := '0'
+  ELSIF src = MinLong THEN
+    DEC(i); buf[i] := '8';                (* ...2147483648, last digit 8 *)
+    n := 214748364;
+    WHILE n # 0 DO
+      DEC(i);
+      digit := n MOD 10;
+      buf[i] := CHR(ORD('0') + digit);
+      n := n DIV 10
+    END;
+    DEC(i); buf[i] := '-'
   ELSE
-    neg := n < 0;
+    IF neg THEN n := -src ELSE n := src END;
     REPEAT
       DEC(i);
       digit := n MOD 10;
-      IF digit < 0 THEN
-        digit := -digit;
-      END;
       buf[i] := CHR(ORD('0') + digit);
-      n := n DIV 10;
+      n := n DIV 10
     UNTIL n = 0;
     IF neg THEN
       DEC(i);

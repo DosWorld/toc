@@ -135,20 +135,19 @@ END ParseSizeArg;
 
 (* ---- const folding ---- *)
 
+(* The host compiler's own LONGINT DIV/MOD (via SYSTEM_S32DIV/S32MOD in
+   SYS.ASM) are already floored per Oberon-07 semantics, so no fixup is
+   needed here -- applying one would double-correct (see the DEC(q)/INC(r)
+   history this replaced: it corrected a truncating DIV/MOD that no longer
+   exists). *)
 PROCEDURE ConstDiv(a, b: LONGINT): LONGINT;
-  VAR q: LONGINT;
 BEGIN
-  q := a DIV b;
-  IF ((a < 0) # (b < 0)) & (q * b # a) THEN DEC(q) END;
-  RETURN q
+  RETURN a DIV b
 END ConstDiv;
 
 PROCEDURE ConstMod(a, b: LONGINT): LONGINT;
-  VAR r: LONGINT;
 BEGIN
-  r := a MOD b;
-  IF (r # 0) & ((r < 0) # (b < 0)) THEN INC(r, b) END;
-  RETURN r
+  RETURN a MOD b
 END ConstMod;
 
 PROCEDURE ConstFoldInt(VAR item: Cgen.Item; op: INTEGER; VAR rhs: Cgen.Item);
