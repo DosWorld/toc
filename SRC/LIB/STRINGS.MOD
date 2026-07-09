@@ -29,8 +29,14 @@ BEGIN
 END Pos;
 
 PROCEDURE Append*(s: ARRAY OF CHAR; VAR d: ARRAY OF CHAR);
+VAR dl, len: INTEGER;
 BEGIN
-  SYSTEM.MOVE(s[0], d[NearLength(d)], NearLength(s) + 1)
+  dl := NearLength(d);
+  len := SYSTEM.MIN(NearLength(s) + 1, LEN(d) - 1 - dl);
+  IF len > 0 THEN
+    SYSTEM.MOVE(s[0], d[dl], len);
+    d[dl + len - 1] := 0X
+  END
 END Append;
 
 PROCEDURE Insert*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
