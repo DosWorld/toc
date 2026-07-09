@@ -21,9 +21,8 @@ the natural place to look — has supported 16-bit `i8086` code generation
 since around 2014, but it was always the neglected back corner of the
 project: undermaintained, thin on runtime support, and never treated as a
 first-class target the way its 32/64-bit backends are. I had been waiting
-since the late 1990s for a serious free 16-bit target from the Pascal
-world (`i8086-msdos` in FreePascal was the closest anyone got, decades
-after the fact), and it never became something you could really build on.
+since the late 1990s for a serious support 16-bit target from the Free
+Pascal and it never statify my expectations.
 
 So this project doesn't try to be that. It picks Wirth's other, smaller
 language — Oberon-07, Pascal's own successor — and builds a compiler for
@@ -126,7 +125,7 @@ TYPE
   PNode = POINTER TO Node;
   Node  = RECORD val: INTEGER; next: PNode END;
 
-VAR head*: PNode;
+VAR head: PNode;
 
 PROCEDURE Push*(val: INTEGER);
   VAR n: PNode;

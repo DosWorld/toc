@@ -462,7 +462,7 @@ archive: a semicolon-separated list of `.om` files, searched after the
 current directory.
 
 ```
-SET OBERON_LIB=C:\TOC\OBERON.OM
+SET OBERON_LIB=C:\TOC\OBERON.OM;D:\OLIB\NET.OM;D:\OLIB\UI.OM
 ```
 
 `toc.exe` also looks for `OBERON.OM` next to its own binary automatically,

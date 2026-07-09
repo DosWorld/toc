@@ -5,6 +5,37 @@ See also: [Oberon language rules](OBERLANG.MD).
 
 ---
 
+## No-zero-init  ← CRITICAL, applies everywhere
+
+The DOS runtime does **not** zero-initialize `NEW`'d heap memory or module-
+level global variables at load — every field must be set explicitly before
+it's read, and there is no "it's probably 0/NIL/empty-string" assumption
+that's ever safe. Two concrete traps this has caused:
+
+- **A `NEW`'d chunk's fields are garbage until explicitly written.** Every
+  chunked-record allocator (`RelocNode`, `SymbolRec`/`TypeDescRec` in the RAM
+  arena, etc.) must fully initialize a fresh chunk's fields before the
+  pointer escapes — do not rely on a freshly-`NEW`'d array being zeroed.
+- **A module's global `VAR`s are garbage, not zero, right after module
+  load** — they only become defined values once that module's own `BEGIN`
+  block (or an explicit init procedure it calls) runs. This bit a real S8
+  draft: `Def.MOD` tried to cache `Syms.TypeInteger`/`TypeBoolean`/… (module
+  globals in `SYMS.MOD`) into a table filled inside `Def`'s own `BEGIN`
+  block — but those `Syms` globals are not set by `Syms`'s module body at
+  all; they're assigned by `Syms.SymInit` (called explicitly from
+  `PARSER.MOD`, once per compile), which runs long *after* every module has
+  already loaded. `Def`'s `BEGIN` block runs at module-*load* time, strictly
+  before `SymInit` ever executes, so the cached pointers would have captured
+  stale/garbage values. Fixed by not caching at all: read `Syms.TypeXxx`
+  live on every call instead (a `CASE`-dispatch helper,
+  `Def.PrimTypeOf(form)`), never at module-init time. **Rule: don't cache a
+  value that another module's explicit init procedure sets later, at a
+  point your own module's `BEGIN` block has already run** — this is a
+  cross-module ordering hazard, not just a "did I forget to init this field"
+  one, so it can't be fixed by more careful zeroing in your own module.
+
+---
+
 ## Emit-series rule  ← USE IT
 
 For a fixed byte sequence of length **3 or more**, prefer `EmitCodeStr("XX,YY,...")`
@@ -86,8 +117,9 @@ absent).
 no longer does the `LOAD → op → STORE` round-trip — it emits an op straight to
 memory.  Logic lives in the `Syms.SpInc, Syms.SpDec` case of `PSTMT.MOD`, using
 `Cgen.CgIncDecMem` / `CgAddSubMemW` / `CgAddSubMemB` / `CgAddSubMemL` (near, at
-`[disp16]` in DS or `[BP+disp]` in SS) and `CgIncDecEsbx` / `CgAddSubEsbxW/B/L`
-(far, `[ES:BX]` with a `26h` override).
+`[disp16]` in DS or `[BP+disp]` in SS) and `CgAddSubEsbxW/B/L`
+(far, `[ES:BX]` with a `26h` override — there is no dedicated far INC/DEC-by-1
+opcode; the far implicit-step-1 path reuses the ADD/SUB-imm helper with imm=1).
 
 Two gates decide which fast form applies (both from the destination Item, read
 **before** any `CgLoadItem`):
@@ -99,9 +131,10 @@ Two gates decide which fast form applies (both from the destination Item, read
 
 | Target / step | Emitted |
 |---------------|---------|
-| INTEGER/WORD, ±1 | `INC/DEC WORD [x]` = `FF 06`/`FF 0E …` (near), `26 FF 07`/`26 FF 0F` (far) |
-| BYTE/CHAR, ±1 | `FE 06`/`FE 0E`, far `26 FE 07`/`26 FE 0F` |
-| INTEGER/WORD/ADDRESS, const N | `ADD/SUB [x],N` (`83 /0,/5` imm8 if fits, else `81`); ADDRESS touches only the offset word (no carry into its segment) |
+| INTEGER/WORD, ±1 (near) | `INC/DEC WORD [x]` = `FF 06`/`FF 0E …` |
+| BYTE/CHAR, ±1 (near) | `FE 06`/`FE 0E` |
+| Any type, ±1 (far, `[ES:BX]`) | same as "const N" below with N=1 — no dedicated far INC/DEC opcode |
+| INTEGER/WORD/ADDRESS, const N | `ADD/SUB [x],N` (`83 /0,/5` imm8 if fits, else `81`, far: `26`-prefixed); ADDRESS touches only the offset word (no carry into its segment) |
 | BYTE/CHAR, const N | `80 /0,/5 [x], imm8` |
 | LONGINT, ±1 or const N | `ADD/SUB [lo]` then `ADC/SBB [hi]` — carry-correct 32-bit |
 
@@ -178,6 +211,12 @@ is emitted next (arm 1's body) — this was a real bug in the first
 implementation, caught by `TESTS/TCASETBL.MOD`'s `TDenseNoElse`/
 `TDenseWithElse` tests, not by `make test` (the 272-row manifest only checks
 compile-time byte/symbol patterns, not runtime dispatch correctness).
+
+**This dialect has no `LOOP`/`EXIT` statement at all** — `SkipArmBody`'s
+first draft used `LOOP ... END` (a compile error: "undefined identifier
+'LOOP'") and was rewritten as `WHILE ~done DO ... END` with an explicit
+`done`/`result` flag pair. Confirmed against `DOCS/OBERON07.EBN`: neither
+keyword is part of the grammar.
 
 **Duplicate labels:** Oberon-07 requires distinct `CASE` labels, but the
 existing chain path silently lets the *first* matching arm win if two arms
@@ -540,7 +579,7 @@ Applies across the **whole compiler AND linker**. Implemented chunk sizes:
 this is not rare). When chunking a record, grep for **all** readers of its fields
 (including `SRC/TOOLS/RDFGREP.MOD`) and convert them in the same change.
 
-### Symbol table: RAM pointer-record arena  ← current design (opt.md §12 final form)
+### Symbol table: RAM pointer-record arena  ← current design (final form, 2026-07-05)
 
 `Symbol` and `TypeDesc` are `POINTER TO` records (`SymbolRec`, `TypeDescRec`)
 that live inside chunked, bump-allocated RAM arenas (256 records/chunk, 32
@@ -561,8 +600,7 @@ single-process self-host's free heap (see [opt_meas.md](../opt_meas.md)).
   stays valid until `SymsFree` (which `DISPOSE`s whole chunks — zero-leak,
   no per-record heap headers, no record walking).  `NewSymRec`/`NewTypeDesc`
   fully initialise every field before the pointer escapes (the runtime does
-  **not** zero `NEW`'d chunks — see the "no-zero-init" note elsewhere in this
-  file).
+  **not** zero `NEW`'d chunks — see §"No-zero-init" at the top of this file).
 - **No accessor wrappers.**  `SYMS.MOD` used to export single-field readers
   (`FormOf`/`KindOf`/`BaseOf`/…) as a migration aid from the old handle API;
   they were pure `NIL`-guard pass-throughs once records became real pointers
@@ -648,6 +686,25 @@ and don't walk a param/field list twice re-reading each entry (see
 local array).  With the current RAM pointer-record arena this is just "read
 `t.form` into a local instead of writing `t.form` twice" — there is no
 accessor call to avoid any more (see §"Symbol table: RAM pointer-record arena").
+
+### `Files.File` is a value RECORD — never copy it, write through the original
+
+`Files.File` (`SRC/LIB/FILES.MOD`) is a plain `RECORD`, not a pointer, and
+`Files.WriteByte`/`ReadByte`/etc. all take `VAR F: File` to mutate its
+buffered state (`bufPos`, `bufTag`, dirty flag, …). A real bug from an
+`Rdoff.MOD` refactor (merging `EmitByte2/3/4` into one `emitN` helper):
+`f := obj^.codeFile` (or `dataFile`) followed by `Files.WriteByte(f, ...)`
+compiles cleanly but writes through the **local copy** `f`, never touching
+`obj^.codeFile` — the buffered bytes are silently dropped, and the bug does
+not show up as a compile error or an obvious crash (the `.rdf`/`.om` output
+is just quietly truncated). Caught by `make test` before landing, but only
+because the manifest's byte-pattern checks happened to notice missing
+output. **Rule: when branching on which `Files.File` field to write through
+(e.g. code vs. data segment), branch on the *destination of the call*, not
+by assigning the record into a local first** — call
+`Files.WriteByte(obj^.codeFile, b)` / `Files.WriteByte(obj^.dataFile, b)`
+directly in each arm of the `IF`, never `f := obj^.codeFile; ...
+Files.WriteByte(f, b)`.
 
 ### Files temp backend — one buffered path for disk AND EMS
 

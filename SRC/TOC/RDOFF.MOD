@@ -216,11 +216,6 @@ BEGIN
   emitN(obj, seg, b1, b2, b3, 0, 3)
 END EmitByte3;
 
-PROCEDURE EmitByte4*(obj: ObjFile; seg: INTEGER; b1, b2, b3, b4: BYTE);
-BEGIN
-  emitN(obj, seg, b1, b2, b3, b4, 4)
-END EmitByte4;
-
 PROCEDURE EmitWord*(obj: ObjFile; seg: INTEGER; w: INTEGER);
 BEGIN
   IF seg = SegCode THEN

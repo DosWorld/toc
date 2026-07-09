@@ -685,6 +685,29 @@ END EmitInlineCall;
 
 (* ---- SYSTEM intrinsic ---- *)
 
+(* SetIntResultType — the LSL/LSR/ASR/ROR and AND/IOR/XOR arms both finish by
+   picking the result type from the same isLong/isWord flags and setting mode
+   to MReg; factor that identical tail once. *)
+PROCEDURE SetIntResultType(VAR item: Cgen.Item; isLong, isWord: INTEGER);
+BEGIN
+  IF isLong = 1 THEN item.type := Syms.TypeLongint
+  ELSIF isWord = 1 THEN item.type := Syms.TypeWord
+  ELSE item.type := Syms.TypeInteger END;
+  item.mode := Cgen.MReg
+END SetIntResultType;
+
+(* ClassLongWord — widen isLong/isWord (already-set, e.g. from a prior
+   operand) to account for type t: LONGINT wins outright; WORD only applies
+   if not already LONGINT.  Called once per operand; the first call passes
+   isLong=isWord=0 to get a fresh classification, the second (for a
+   two-operand SYSTEM intrinsic like AND/IOR/XOR) accumulates onto the
+   first operand's result. *)
+PROCEDURE ClassLongWord(t: Syms.TypeDesc; VAR isLong, isWord: INTEGER);
+BEGIN
+  IF (isLong = 0) & (t # Syms.NoType) & (t.form = Syms.TFLongint) THEN isLong := 1 END;
+  IF (isLong = 0) & (isWord = 0) & (t # Syms.NoType) & (t.form = Syms.TFWord) THEN isWord := 1 END
+END ClassLongWord;
+
 PROCEDURE ParseSystemIntrinsic(VAR item: Cgen.Item; id: INTEGER);
   VAR arg, xItem: Cgen.Item; nConst: BOOLEAN; nVal, isLong, isWord: INTEGER;
 BEGIN
@@ -692,10 +715,8 @@ BEGIN
   CASE id OF
     Syms.SpLsl, Syms.SpLsr, Syms.SpAsr, Syms.SpRor:
       ParseExpression(xItem);
-      IF (xItem.type # NIL) & (xItem.type.form = Syms.TFLongint) THEN isLong := 1
-      ELSE isLong := 0 END;
-      IF (isLong = 0) & (xItem.type # NIL) & (xItem.type.form = Syms.TFWord) THEN isWord := 1
-      ELSE isWord := 0 END;
+      isLong := 0; isWord := 0;
+      ClassLongWord(xItem.type, isLong, isWord);
       Cgen.CgLoadItem(xItem);
       IF isLong = 1 THEN Cgen.CgPushDxax() ELSE Cgen.Emit1(BYTE(Cgen.OpPushAx)) END;
       Expect(Scan.TComma);
@@ -752,23 +773,17 @@ BEGIN
           END
         END
       END;
-      IF isLong = 1 THEN item.type := Syms.TypeLongint
-      ELSIF isWord = 1 THEN item.type := Syms.TypeWord
-      ELSE item.type := Syms.TypeInteger END;
-      item.mode := Cgen.MReg
+      SetIntResultType(item, isLong, isWord)
 
   | Syms.SpAnd, Syms.SpIor, Syms.SpXor:
       ParseExpression(xItem);
-      IF (xItem.type # NIL) & (xItem.type.form = Syms.TFLongint) THEN isLong := 1
-      ELSE isLong := 0 END;
-      IF (isLong = 0) & (xItem.type # NIL) & (xItem.type.form = Syms.TFWord) THEN isWord := 1
-      ELSE isWord := 0 END;
+      isLong := 0; isWord := 0;
+      ClassLongWord(xItem.type, isLong, isWord);
       Cgen.CgLoadItem(xItem);
       IF isLong = 1 THEN Cgen.CgPushDxax() ELSE Cgen.Emit1(BYTE(Cgen.OpPushAx)) END;
       Expect(Scan.TComma);
       ParseExpression(arg);
-      IF (isLong = 0) & (arg.type # Syms.NoType) & (arg.type.form = Syms.TFLongint) THEN isLong := 1 END;
-      IF (isLong = 0) & (isWord = 0) & (arg.type # Syms.NoType) & (arg.type.form = Syms.TFWord) THEN isWord := 1 END;
+      ClassLongWord(arg.type, isLong, isWord);
       Cgen.CgLoadItem(arg);
       IF isLong = 1 THEN
         Cgen.CgPopCxbx();
@@ -786,10 +801,7 @@ BEGIN
         ELSE Cgen.CgXor()
         END
       END;
-      IF isLong = 1 THEN item.type := Syms.TypeLongint
-      ELSIF isWord = 1 THEN item.type := Syms.TypeWord
-      ELSE item.type := Syms.TypeInteger END;
-      item.mode := Cgen.MReg
+      SetIntResultType(item, isLong, isWord)
   ELSE
     Error("SYSTEM intrinsic not usable as expression");
     item.type := Syms.TypeInteger; item.mode := Cgen.MConst; item.val := 0

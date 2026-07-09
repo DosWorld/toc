@@ -184,23 +184,6 @@ BEGIN
   END
 END ProcessSyscomment;
 
-(* ---- error helpers (delegate to PExpr) ---- *)
-
-PROCEDURE Error(msg: ARRAY OF CHAR);
-BEGIN
-  PExpr.Error(msg)
-END Error;
-
-PROCEDURE Error2(msg, name: ARRAY OF CHAR);
-BEGIN
-  PExpr.Error2(msg, name)
-END Error2;
-
-PROCEDURE Expect(t: INTEGER);
-BEGIN
-  PExpr.Expect(t)
-END Expect;
-
 (* A procedure result type must be a scalar, pointer, or procedure — Oberon-07
    forbids returning arrays or records (they cannot be returned in DX:AX, and
    this dialect does not implement a hidden result-pointer ABI).  Reject them
@@ -211,7 +194,7 @@ BEGIN
   IF t # Syms.NoType THEN
     f := t.form;
     IF (f = Syms.TFArray) OR (f = Syms.TFRecord) THEN
-      Error("procedure result type must be scalar, pointer, or procedure (cannot return an array or record)")
+      PExpr.Error("procedure result type must be scalar, pointer, or procedure (cannot return an array or record)")
     END
   END
 END CheckResultType;
@@ -237,6 +220,20 @@ BEGIN
   WHILE n # NIL DO nx := n^.next; DISPOSE(n); n := nx END;
   head := NIL
 END IdListFree;
+
+(* ParseExportedIdentList — the "ident [`*`] {, ident [`*`]}" loop shared by
+   record field lists and VAR declarations: append each identifier, mark it
+   exported if followed by `*`, and consume a trailing comma between names.
+   Stops at the first non-TIdent token (the caller then expects `:`). *)
+PROCEDURE ParseExportedIdentList(VAR head, tail: IdentNode);
+BEGIN
+  WHILE PExpr.sc.sym = Scan.TIdent DO
+    head := IdListAppend(head, tail, PExpr.sc.id, FALSE);
+    Scan.Next(PExpr.sc);
+    IF PExpr.sc.sym = Scan.TStar THEN tail^.exported := TRUE; Scan.Next(PExpr.sc) END;
+    IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+  END
+END ParseExportedIdentList;
 
 (* ---- type descriptor emitter ---- *)
 
@@ -267,7 +264,7 @@ BEGIN
   PExpr.ParseExpression(it);
   IF (it.mode # Cgen.MConst) OR (it.type = Syms.NoType) OR
      ((it.type.form # Syms.TFInteger) & (it.type.form # Syms.TFWord)) THEN
-    Error("integer constant expression expected as array dimension"); RETURN 1
+    PExpr.Error("integer constant expression expected as array dimension"); RETURN 1
   END;
   RETURN it.val
 END ParseArrayDim;
@@ -277,7 +274,7 @@ PROCEDURE ParseFormalPars(VAR pt: Syms.TypeDesc; genSyms: BOOLEAN);
       ptype: Syms.TypeDesc; p, s: Syms.Symbol;
       nm: ARRAY NameLen OF CHAR;
 BEGIN
-  Expect(Scan.TLparen);
+  PExpr.Expect(Scan.TLparen);
   WHILE (PExpr.sc.sym # Scan.TRparen) & (PExpr.sc.sym # Scan.TEof) DO
     head := NIL; tail := NIL; typelessVar := FALSE;
     isVar := (PExpr.sc.sym = Scan.TVar);
@@ -294,7 +291,7 @@ BEGIN
     IF PExpr.sc.sym = Scan.TColon THEN
       Scan.Next(PExpr.sc); ptype := Syms.TypeInteger; ParseType(ptype)
     ELSE
-      IF ~isVar THEN Error("parameter requires a type") END;
+      IF ~isVar THEN PExpr.Error("parameter requires a type") END;
       typelessVar := TRUE; ptype := Syms.TypeAddress
     END;
     pi := head;
@@ -313,7 +310,7 @@ BEGIN
     IdListFree(head);
     IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
   END;
-  Expect(Scan.TRparen)
+  PExpr.Expect(Scan.TRparen)
 END ParseFormalPars;
 
 PROCEDURE ParseType;
@@ -327,19 +324,19 @@ BEGIN
     IF (sym # Syms.NoSym) & (sym.kind = Syms.KImport) & (PExpr.sc.sym = Scan.TDot) THEN
       Scan.Next(PExpr.sc);
       IF PExpr.sc.sym # Scan.TIdent THEN
-        Error("type name expected after '.'"); out := Syms.TypeInteger; RETURN
+        PExpr.Error("type name expected after '.'"); out := Syms.TypeInteger; RETURN
       END;
       StrTab.Get(sym.nameId, tkey); Strings.Append(".", tkey); Strings.Append(PExpr.sc.id, tkey);
       tsym := Syms.SymFind(tkey);
       IF tsym = Syms.NoSym THEN tsym := Syms.SymFind(PExpr.sc.id) END;
       Scan.Next(PExpr.sc);
       IF (tsym = Syms.NoSym) OR (tsym.kind # Syms.KType) THEN
-        Error("type name expected"); out := Syms.TypeInteger; RETURN
+        PExpr.Error("type name expected"); out := Syms.TypeInteger; RETURN
       END;
       out := tsym.type; RETURN
     END;
     IF (sym = Syms.NoSym) OR (sym.kind # Syms.KType) THEN
-      Error("type name expected"); out := Syms.TypeInteger; RETURN
+      PExpr.Error("type name expected"); out := Syms.TypeInteger; RETURN
     END;
     out := sym.type;
     (* If a type symbol has NIL type, it is being defined — its own name appeared
@@ -359,33 +356,24 @@ BEGIN
       WHILE (PExpr.sc.sym = Scan.TComma) & (ndims < 7) DO
         Scan.Next(PExpr.sc); dims[ndims] := ParseArrayDim(); INC(ndims)
       END;
-      Expect(Scan.TOf); elem := Syms.TypeInteger; ParseType(elem);
+      PExpr.Expect(Scan.TOf); elem := Syms.TypeInteger; ParseType(elem);
       base := elem;
       WHILE ndims > 0 DO DEC(ndims); base := Syms.TypeNewArray(base, dims[ndims]) END;
       out := Syms.TypeNewArray(base, len)
     ELSE
-      Expect(Scan.TOf); elem := Syms.TypeInteger; ParseType(elem);
+      PExpr.Expect(Scan.TOf); elem := Syms.TypeInteger; ParseType(elem);
       out := Syms.TypeNewArray(elem, len)
     END
   ELSIF PExpr.sc.sym = Scan.TRecord THEN
     Scan.Next(PExpr.sc); base := NIL;
     IF PExpr.sc.sym = Scan.TLparen THEN
-      Scan.Next(PExpr.sc); ParseType(base); Expect(Scan.TRparen)
+      Scan.Next(PExpr.sc); ParseType(base); PExpr.Expect(Scan.TRparen)
     END;
     rec := Syms.TypeNewRecord(base);
     WHILE PExpr.sc.sym = Scan.TIdent DO
       fhead := NIL; ftail := NIL;
-      fhead := IdListAppend(fhead, ftail, PExpr.sc.id, FALSE);
-      Scan.Next(PExpr.sc);
-      IF PExpr.sc.sym = Scan.TStar THEN ftail^.exported := TRUE; Scan.Next(PExpr.sc) END;
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END;
-      WHILE PExpr.sc.sym = Scan.TIdent DO
-        fhead := IdListAppend(fhead, ftail, PExpr.sc.id, FALSE);
-        Scan.Next(PExpr.sc);
-        IF PExpr.sc.sym = Scan.TStar THEN ftail^.exported := TRUE; Scan.Next(PExpr.sc) END;
-        IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
-      END;
-      Expect(Scan.TColon); ft := Syms.TypeInteger; ParseType(ft);
+      ParseExportedIdentList(fhead, ftail);
+      PExpr.Expect(Scan.TColon); ft := Syms.TypeInteger; ParseType(ft);
       fi := fhead;
       WHILE fi # NIL DO
         fs := Syms.TypeAddField(rec, fi^.name, ft);
@@ -395,15 +383,15 @@ BEGIN
       IdListFree(fhead);
       IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
     END;
-    Expect(Scan.TEnd); EmitTypeDescriptor(rec); out := rec
+    PExpr.Expect(Scan.TEnd); EmitTypeDescriptor(rec); out := rec
   ELSIF PExpr.sc.sym = Scan.TPointer THEN
-    Scan.Next(PExpr.sc); Expect(Scan.TTo);
+    Scan.Next(PExpr.sc); PExpr.Expect(Scan.TTo);
     IF (PExpr.sc.sym = Scan.TIdent) & (Syms.SymFind(PExpr.sc.id) = Syms.NoSym) THEN
       out := Syms.TypeNewPointer(Syms.TypeNotype);
       IF nFwdRefs < MaxFwdRefs THEN
         Strings.Copy(PExpr.sc.id, fwdRefs[nFwdRefs].name);
         fwdRefs[nFwdRefs].ptr := out; INC(nFwdRefs)
-      ELSE Error("too many forward type references") END;
+      ELSE PExpr.Error("too many forward type references") END;
       Scan.Next(PExpr.sc)
     ELSE
       base := Syms.TypeInteger; ParseType(base); out := Syms.TypeNewPointer(base)
@@ -429,7 +417,7 @@ BEGIN
     END;
     Syms.TypeCalcArgSize(out)
   ELSE
-    Error("type expected"); out := Syms.TypeInteger
+    PExpr.Error("type expected"); out := Syms.TypeInteger
   END
 END ParseType;
 
@@ -440,10 +428,10 @@ PROCEDURE ParseConstDecl;
 BEGIN
   WHILE PExpr.sc.sym = Scan.TIdent DO
     Strings.Copy(PExpr.sc.id, name); Scan.Next(PExpr.sc);
-    IF Syms.SymFindLocal(name) # NIL THEN Error2("duplicate identifier", name) END;
+    IF Syms.SymFindLocal(name) # NIL THEN PExpr.Error2("duplicate identifier", name) END;
     exported := FALSE;
     IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
-    Expect(Scan.TEql); PExpr.ParseExpression(val);
+    PExpr.Expect(Scan.TEql); PExpr.ParseExpression(val);
     (* A CONST must be an integer-family compile-time value: INTEGER, LONGINT,
        WORD, or BYTE.  CHAR/BOOLEAN/REAL/LONGREAL/SET constants and string,
        array, record, or pointer constants are rejected — use a literal at the
@@ -451,7 +439,7 @@ BEGIN
     IF (val.type = Syms.NoType) OR
        ((val.type.form # Syms.TFInteger) & (val.type.form # Syms.TFLongint) &
         (val.type.form # Syms.TFWord) & (val.type.form # Syms.TFByte)) THEN
-      Error2("CONST must be an integer (INTEGER/LONGINT/WORD/BYTE) value", name)
+      PExpr.Error2("CONST must be an integer (INTEGER/LONGINT/WORD/BYTE) value", name)
     END;
     s := Syms.SymNew(name, Syms.KConst);
     s.exported := exported; s.type := val.type;
@@ -471,7 +459,7 @@ BEGIN
   nFwdRefs := 0;
   WHILE PExpr.sc.sym = Scan.TIdent DO
     Strings.Copy(PExpr.sc.id, name); Scan.Next(PExpr.sc);
-    IF Syms.SymFindLocal(name) # Syms.NoSym THEN Error2("duplicate identifier", name) END;
+    IF Syms.SymFindLocal(name) # Syms.NoSym THEN PExpr.Error2("duplicate identifier", name) END;
     exported := FALSE;
     IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
     (* Pre-register placeholder so self-referential pointers (POINTER TO T inside T)
@@ -480,7 +468,7 @@ BEGIN
     placeholder.size := 4; placeholder.align := 2;
     s := Syms.SymNew(name, Syms.KType);
     s.type := placeholder; s.exported := exported;
-    Expect(Scan.TEql); t := Syms.TypeInteger; ParseType(t);
+    PExpr.Expect(Scan.TEql); t := Syms.TypeInteger; ParseType(t);
     (* Self-referential alias (e.g. TYPE ADDRESS* = ADDRESS): ParseType sees the
        placeholder we just registered and returns it unchanged (still TFNotype).
        Resolve through the predeclared universe so the real built-in type is used. *)
@@ -517,7 +505,7 @@ BEGIN
   WHILE i < nFwdRefs DO
     fsym := Syms.SymFind(fwdRefs[i].name);
     IF (fsym = Syms.NoSym) OR (fsym.kind # Syms.KType) THEN
-      Error2("unresolved forward type reference", fwdRefs[i].name)
+      PExpr.Error2("unresolved forward type reference", fwdRefs[i].name)
     ELSE fwdRefs[i].ptr.base := fsym.type END;
     INC(i)
   END;
@@ -528,26 +516,15 @@ END ParseTypeDecl;
 
 PROCEDURE ParseVarDecl;
   VAR head, tail, it: IdentNode; t: Syms.TypeDesc; s: Syms.Symbol;
-      gname: ARRAY 66 OF CHAR; exported: BOOLEAN;
+      gname: ARRAY 66 OF CHAR;
 BEGIN
   WHILE PExpr.sc.sym = Scan.TIdent DO
     head := NIL; tail := NIL;
-    Strings.Copy(PExpr.sc.id, gname); Scan.Next(PExpr.sc);
-    exported := FALSE;
-    IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
-    head := IdListAppend(head, tail, gname, exported);
-    IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END;
-    WHILE PExpr.sc.sym = Scan.TIdent DO
-      Strings.Copy(PExpr.sc.id, gname); Scan.Next(PExpr.sc);
-      exported := FALSE;
-      IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
-      head := IdListAppend(head, tail, gname, exported);
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
-    END;
-    Expect(Scan.TColon); t := Syms.TypeInteger; ParseType(t);
+    ParseExportedIdentList(head, tail);
+    PExpr.Expect(Scan.TColon); t := Syms.TypeInteger; ParseType(t);
     it := head;
     WHILE it # NIL DO
-      IF Syms.SymFindLocal(it^.name) # Syms.NoSym THEN Error2("duplicate identifier", it^.name) END;
+      IF Syms.SymFindLocal(it^.name) # Syms.NoSym THEN PExpr.Error2("duplicate identifier", it^.name) END;
       s := Syms.SymNew(it^.name, Syms.KVar);
       s.exported := it^.exported; s.type := t;
       s.declLine := PExpr.sc.line;
@@ -584,13 +561,13 @@ PROCEDURE ParseProcDecl;
       rtmp: Syms.TypeDesc; nInl: INTEGER;
 BEGIN
   Scan.Next(PExpr.sc);  (* consume PROCEDURE *)
-  IF PExpr.sc.sym # Scan.TIdent THEN Error("procedure name expected"); RETURN END;
+  IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("procedure name expected"); RETURN END;
   Strings.Copy(PExpr.sc.id, name); Scan.Next(PExpr.sc);
 
   (* Implementation of forward-declared proc: "PROCEDURE name;" only *)
   existing := Syms.SymFindLocal(name);
   IF (existing # Syms.NoSym) & existing.fwdDecl THEN
-    Expect(Scan.TSemi);
+    PExpr.Expect(Scan.TSemi);
     sym := existing; pt := existing.type; exported := existing.exported;
     Syms.SymOpenScope();
     p := pt.params;
@@ -601,7 +578,7 @@ BEGIN
       p := p.next
     END
   ELSE
-    IF existing # Syms.NoSym THEN Error2("duplicate name", name) END;
+    IF existing # Syms.NoSym THEN PExpr.Error2("duplicate name", name) END;
     sym := Syms.SymNew(name, Syms.KProc);
     sym.declLine := PExpr.sc.line;
     exported := FALSE;
@@ -616,49 +593,37 @@ BEGIN
       CheckResultType(rtmp);
       pt.retType := rtmp END;
     IF exported THEN pt.isFar := TRUE END;
-    Expect(Scan.TSemi);
+    PExpr.Expect(Scan.TSemi);
 
     (* FAR/NEAR modifier *)
     wordA := "";
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, wordA);
       IF wordA = "FAR" THEN
-        pt.isFar := TRUE; Scan.Next(PExpr.sc); Expect(Scan.TSemi)
+        pt.isFar := TRUE; Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi)
       ELSIF wordA = "NEAR" THEN
-        IF exported THEN Error("exported procedure cannot be NEAR") END;
-        pt.isFar := FALSE; Scan.Next(PExpr.sc); Expect(Scan.TSemi)
+        IF exported THEN PExpr.Error("exported procedure cannot be NEAR") END;
+        pt.isFar := FALSE; Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi)
       END
     END;
 
-    (* FORWARD *)
+    (* FORWARD / EXTERNAL / INLINE — one token peek, one dispatch *)
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, wordA);
       IF wordA = "FORWARD" THEN
-        Scan.Next(PExpr.sc); Expect(Scan.TSemi);
+        Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi);
         Syms.TypeCalcArgSize(pt);
         sym.fwdDecl := TRUE;
         Syms.SymCloseScope(); RETURN
-      END
-    END;
-
-    (* EXTERNAL *)
-    IF PExpr.sc.sym = Scan.TIdent THEN
-      Strings.Copy(PExpr.sc.id, wordA);
-      IF wordA = "EXTERNAL" THEN
-        Scan.Next(PExpr.sc); Expect(Scan.TSemi);
+      ELSIF wordA = "EXTERNAL" THEN
+        Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi);
         Syms.TypeCalcArgSize(pt);
         Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname);
         sym.rdoffId := Rdoff.RdfAddImport(Cgen.CgObj, gname);
         sym.codeOfs := 0;
         Syms.SymCloseScope(); RETURN
-      END
-    END;
-
-    (* INLINE *)
-    IF PExpr.sc.sym = Scan.TIdent THEN
-      Strings.Copy(PExpr.sc.id, wordA);
-      IF wordA = "INLINE" THEN
-        Scan.Next(PExpr.sc); Expect(Scan.TLparen);
+      ELSIF wordA = "INLINE" THEN
+        Scan.Next(PExpr.sc); PExpr.Expect(Scan.TLparen);
         inlNode := NIL; inlTail := NIL; nInl := 0;
         WHILE (PExpr.sc.sym # Scan.TRparen) & (PExpr.sc.sym # Scan.TEof) DO
           IF PExpr.sc.sym = Scan.TInt THEN
@@ -671,13 +636,13 @@ BEGIN
               IF fp.nameId = wid THEN found := TRUE; fp := Syms.NoSym
               ELSE INC(idx); fp := fp.next END
             END;
-            IF ~found THEN Error("unknown parameter name in INLINE") END;
+            IF ~found THEN PExpr.Error("unknown parameter name in INLINE") END;
             Syms.InlineAppend(inlNode, inlTail, TRUE, BYTE(0), idx);
             INC(nInl); Scan.Next(PExpr.sc)
-          ELSE Error("byte literal or parameter name expected"); Scan.Next(PExpr.sc) END;
+          ELSE PExpr.Error("byte literal or parameter name expected"); Scan.Next(PExpr.sc) END;
           IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
         END;
-        Expect(Scan.TRparen); Expect(Scan.TSemi);
+        PExpr.Expect(Scan.TRparen); PExpr.Expect(Scan.TSemi);
         pt.isInline := TRUE; pt.inlineList := inlNode;
         pt.nInline := nInl;
         Syms.TypeCalcArgSize(pt);
@@ -726,9 +691,9 @@ BEGIN
   IF PExpr.sc.sym = Scan.TBegin THEN
     Scan.Next(PExpr.sc); ParseStatSeq(pt.retType)
   END;
-  Expect(Scan.TEnd);
+  PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
-    IF PExpr.sc.id # name THEN Error("procedure name mismatch") END;
+    IF PExpr.sc.id # name THEN PExpr.Error("procedure name mismatch") END;
     Scan.Next(PExpr.sc)
   END;
 
@@ -761,7 +726,7 @@ BEGIN
     PExpr.FwdPatchCalls(sym, sym.codeOfs);
     sym.fwdDecl := FALSE
   END;
-  Expect(Scan.TSemi)
+  PExpr.Expect(Scan.TSemi)
 END ParseProcDecl;
 
 (* ---- DeclSeq ---- *)
@@ -1000,9 +965,9 @@ BEGIN
   (* Handle any system comment that preceded the MODULE keyword
      (e.g. `(*$R+*)` at the top of a file enabling bounds checks). *)
   ProcessSyscomment(PExpr.sc);
-  Expect(Scan.TModule);
+  PExpr.Expect(Scan.TModule);
   ProcessSyscomment(PExpr.sc);
-  IF PExpr.sc.sym # Scan.TIdent THEN Error("module name expected"); RETURN END;
+  IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("module name expected"); RETURN END;
   Strings.Copy(PExpr.sc.id, modName); Scan.Next(PExpr.sc);
   Strings.Copy(modName, parserModName); Strings.Copy(modName, curModName);
   Strings.Copy(modName, PExpr.modName);
@@ -1027,9 +992,9 @@ BEGIN
   (* check no '_' in module name *)
   i := 0; badName := FALSE;
   WHILE modName[i] # 0X DO IF modName[i] = "_" THEN badName := TRUE END; INC(i) END;
-  IF badName THEN Error("module name must not contain '_'") END;
+  IF badName THEN PExpr.Error("module name must not contain '_'") END;
 
-  Expect(Scan.TSemi);
+  PExpr.Expect(Scan.TSemi);
 
   (* IMPORT list *)
   IF PExpr.sc.sym = Scan.TImport THEN
@@ -1042,7 +1007,7 @@ BEGIN
         Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc)
       END;
       IF ~parserSystemMode & (iname = "SYSTEM") THEN
-        Error("SYSTEM is implicitly imported")
+        PExpr.Error("SYSTEM is implicitly imported")
       ELSE
         isym := Syms.SymNew(alias, Syms.KImport);
         isym.modId := StrTab.Intern(iname);
@@ -1055,7 +1020,7 @@ BEGIN
       END;
       IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
     END;
-    Expect(Scan.TSemi)
+    PExpr.Expect(Scan.TSemi)
   END;
 
   (* parse declarations *)
@@ -1123,12 +1088,12 @@ BEGIN
     Cgen.Emit1(BYTE(Cgen.OpRetf))
   END;
 
-  Expect(Scan.TEnd);
+  PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
-    IF PExpr.sc.id # modName THEN Error("module name mismatch at END") END;
+    IF PExpr.sc.id # modName THEN PExpr.Error("module name mismatch at END") END;
     Scan.Next(PExpr.sc)
   END;
-  Expect(Scan.TDot);
+  PExpr.Expect(Scan.TDot);
 
   (* Dead-code/variable elimination: warn about unused module-level
      non-exported globals and procedures.  Per-procedure warnings

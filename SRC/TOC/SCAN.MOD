@@ -115,7 +115,6 @@ CONST
   ChSp     = 32;   (* space *)
   ChTab    =  9;   (* tab *)
   ChDollar = 36;   (* $ *)
-  ChStar2  = 42;   (* * same as ChStar *)
 
 TYPE
   Scanner* = RECORD

@@ -350,29 +350,14 @@ PROCEDURE NewModule(ls: State; path: ARRAY OF CHAR; libOfs: LONGINT;
   VAR m: Module;
 BEGIN
   NEW(m);
+  (* ModRec is a plain near-heap record (not a far SegBuf array — see the
+     "Reusing one shared code buffer" FILL hazard note, which is specific to
+     POINTER TO ARRAY 65000 OF BYTE far-heap buffers), so a bulk zero-fill is
+     safe here; only the non-zero fields need an explicit assignment after. *)
+  SYSTEM.FILL(m^, SIZE(ModRec), 0);
   Strings.Copy(path, m^.path);
-  m^.libOfs        := libOfs;
-  m^.rawSize       := LONGINT(0);
-  m^.hdrSize       := LONGINT(0);
-  m^.codeSize      := LONGINT(0);
-  m^.dataSize      := LONGINT(0);
-  m^.bssSize       := LONGINT(0);
-  m^.groupId       := groupId;
-  m^.codeFinalOfs  := LONGINT(0);
-  m^.groupCodePara := 0;
-  m^.groupCodeStart:= LONGINT(0);
-  m^.dataFinalOfs  := LONGINT(0);
-  m^.bssFinalOfs   := LONGINT(0);
-  m^.used          := FALSE;
-  m^.dup           := FALSE;
-  m^.nGlob         := 0;
-  m^.stem[0]       := 0X;
-  m^.hasDbg        := FALSE;
-  m^.dbgModName    := 0;
-  m^.dbgSrcName    := 0;
-  m^.dbgTypeBase   := 0;
-  m^.dbgMembBase   := 0;
-  m^.next          := NIL;
+  m^.libOfs  := libOfs;
+  m^.groupId := groupId;
   IF ls^.modTail = NIL THEN ls^.modHead := m
   ELSE ls^.modTail^.next := m
   END;
@@ -705,33 +690,20 @@ BEGIN
   RETURN m^.codeFinalOfs - m^.groupCodeStart
 END GroupOfs;
 
-PROCEDURE PatchU16(buf: Rdoff.SegBuf; ofs: LONGINT; addend: WORD);
-  VAR cur: WORD;
-BEGIN
-  cur := WORD(INTEGER(buf^[INTEGER(ofs)]) + SYSTEM.LSL(INTEGER(buf^[INTEGER(ofs)+1]), 8));
-  cur := cur + addend;   (* 16-bit WORD arithmetic wraps mod 65536 *)
-  buf^[INTEGER(ofs)]   := BYTE(SYSTEM.AND(cur, 0FFH));
-  buf^[INTEGER(ofs)+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH))
-END PatchU16;
-
-PROCEDURE PatchU8(buf: Rdoff.SegBuf; ofs: LONGINT; addend: WORD);
-  VAR cur: WORD;
-BEGIN
-  cur := WORD(SYSTEM.AND(INTEGER(buf^[INTEGER(ofs)]) + INTEGER(addend), 0FFH));
-  buf^[INTEGER(ofs)] := BYTE(cur)
-END PatchU8;
-
 (* Patch code or data buffer at group-relative/data offset. *)
 PROCEDURE PatchBuf(rseg: INTEGER; bufOfs: LONGINT; addend: WORD; width: INTEGER);
+  VAR buf: Rdoff.SegBuf; o: INTEGER; cur: WORD;
 BEGIN
+  IF rseg = Rdoff.SegCode THEN buf := lnkCodeBuf ELSE buf := lnkDataBuf END;
+  o := INTEGER(bufOfs);
   IF width = 2 THEN
-    IF rseg = Rdoff.SegCode THEN PatchU16(lnkCodeBuf, bufOfs, addend)
-    ELSE PatchU16(lnkDataBuf, bufOfs, addend)
-    END
+    cur := WORD(INTEGER(buf^[o]) + SYSTEM.LSL(INTEGER(buf^[o+1]), 8));
+    cur := cur + addend;   (* 16-bit WORD arithmetic wraps mod 65536 *)
+    buf^[o]   := BYTE(SYSTEM.AND(cur, 0FFH));
+    buf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH))
   ELSE
-    IF rseg = Rdoff.SegCode THEN PatchU8(lnkCodeBuf, bufOfs, addend)
-    ELSE PatchU8(lnkDataBuf, bufOfs, addend)
-    END
+    cur := WORD(SYSTEM.AND(INTEGER(buf^[o]) + INTEGER(addend), 0FFH));
+    buf^[o] := BYTE(cur)
   END
 END PatchBuf;
 

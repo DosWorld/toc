@@ -154,11 +154,6 @@ BEGIN
   Rdoff.EmitByte3(CgObj, Rdoff.SegCode, b0, b1, b2)
 END Emit3;
 
-PROCEDURE Emit4*(b0, b1, b2, b3: BYTE);
-BEGIN
-  Rdoff.EmitByte4(CgObj, Rdoff.SegCode, b0, b1, b2, b3)
-END Emit4;
-
 PROCEDURE EmitW*(w: INTEGER);
 BEGIN
   Rdoff.EmitWord(CgObj, Rdoff.SegCode, w)
@@ -619,13 +614,6 @@ BEGIN
   Emit1(053H)                 (* PUSH BX  (offset)  *)
 END CgPushFarAddrItem;
 
-(* CgLoadOpenLen — AX := runtime LEN of an open-array param.
-   The 6-byte slot {ofs:2, seg:2, LEN:2} lives at [BP+adr]; LEN is at +4. *)
-PROCEDURE CgLoadOpenLen(adr: LONGINT);
-BEGIN
-  CgLoadBp(adr + 4)
-END CgLoadOpenLen;
-
 (* CgArrCount — CX := number of bytes to copy for an array assignment.
    dstSize is the destination's fixed byte size.  When the source is an open
    array (srcOpen=TRUE, slot at [BP+srcAdr]) the count is min(dstSize, LEN);
@@ -634,7 +622,9 @@ PROCEDURE CgArrCount*(dstSize: LONGINT; srcOpen: BOOLEAN; srcAdr, srcSize: LONGI
   VAR n: LONGINT; ok: Backpatch;
 BEGIN
   IF srcOpen THEN
-    CgLoadOpenLen(srcAdr);              (* AX = runtime LEN *)
+    (* AX = runtime LEN: the 6-byte open-array slot {ofs:2, seg:2, LEN:2}
+       lives at [BP+srcAdr]; LEN is at +4. *)
+    CgLoadBp(srcAdr + 4);
     Emit1(03DH); EmitW(INTEGER(dstSize));  (* CMP AX, dstSize *)
     CgCondShort(OpJle, ok);                (* JLE keep (AX <= dstSize) *)
     CgLoadImm(INTEGER(dstSize));           (* MOV AX, dstSize *)
@@ -957,20 +947,14 @@ BEGIN
   Emit1(BYTE(SYSTEM.AND(imm, 0FFH)))
 END CgAddSubMemB;
 
-(* ---- far-ref memory-dest INC/DEC/ADD/SUB via ES:BX ----
-   Same fast path, but the destination is [ES:BX] (a dereferenced far pointer /
-   VAR param / far array element).  ES:BX must already be loaded (CgLesBxItem).
-   Every instruction gets a 26h ES-override prefix; the modrm rm=111 selects
-   [BX] (disp=0) — for the high word of a LONGINT we use [BX+2] (26 .. 47 02). *)
-
-(* INC/DEC by 1 on [ES:BX] (16- or 8-bit). *)
-PROCEDURE CgIncDecEsbx*(isInc, byteSz: BOOLEAN);
-  VAR opc: BYTE; ext: INTEGER;
-BEGIN
-  IF byteSz THEN opc := 0FEH ELSE opc := 0FFH END;
-  IF isInc THEN ext := 0 ELSE ext := 1 END;
-  Emit1(026H); Emit1(opc); Emit1(BYTE(007H + ext * 8))  (* 26 FF/FE  07|0F *)
-END CgIncDecEsbx;
+(* ---- far-ref memory-dest ADD/SUB via ES:BX ----
+   Same fast path as the near ADD/SUB-const helpers above, but the destination
+   is [ES:BX] (a dereferenced far pointer / VAR param / far array element).
+   ES:BX must already be loaded (CgLesBxItem).  Every instruction gets a 26h
+   ES-override prefix; the modrm rm=111 selects [BX] (disp=0) — for the high
+   word of a LONGINT we use [BX+2] (26 .. 47 02).  (There is no dedicated
+   INC/DEC-by-1 far opcode: the far implicit-step-1 path reuses these
+   ADD/SUB-imm helpers with imm=1 instead.) *)
 
 (* ADD/SUB imm16 to [ES:BX] (INTEGER/WORD/ADDRESS-offset). *)
 PROCEDURE CgAddSubEsbxW*(isInc: BOOLEAN; imm: INTEGER);

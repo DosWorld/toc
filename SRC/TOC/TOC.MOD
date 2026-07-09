@@ -674,11 +674,10 @@ END CompileModule;
 
 PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug: BOOLEAN);
   VAR ls: Link.State; m: ModEntry; mr: ModRec;
-      i, pos, dlen: INTEGER;
+      pos, dlen: INTEGER;
       omPath: ARRAY MaxPath OF CHAR;
       p: ARRAY 512 OF CHAR;
       dir: ARRAY MaxPath OF CHAR;
-      exePath2, exeDir2, n1b, n2b: ARRAY MaxPath OF CHAR;
       omExe: ARRAY MaxPath OF CHAR;
 BEGIN
   (* The module graph lives entirely in gModFile (never in the heap), so the
@@ -720,28 +719,13 @@ BEGIN
     END
   END;
 
-  (* Load OBERON.OM from CWD if present and valid *)
-  IF Files.FileExists("OBERON.OM") & Tar.IsOmFile("OBERON.OM") THEN
-    Link.ProcessFile(ls, "OBERON.OM")
-  ELSE
-    (* Fallback: OBERON.OM from exe directory *)
-    Dos.ParamStr(0, exePath2);
-    IF exePath2[0] # 0X THEN
-      Dos.FSplit(exePath2, exeDir2, n1b, n2b);
-      IF exeDir2[0] # 0X THEN
-        i := 0;
-        WHILE (i < MaxPath - 1) & (exeDir2[i] # 0X) DO omExe[i] := exeDir2[i]; INC(i) END;
-        IF (i > 0) & (omExe[i-1] # "\") & (omExe[i-1] # "/") & (i < MaxPath - 1) THEN
-          omExe[i] := "\"; INC(i)
-        END;
-        omExe[i] := "O"; omExe[i+1] := "B"; omExe[i+2] := "E"; omExe[i+3] := "R";
-        omExe[i+4] := "O"; omExe[i+5] := "N"; omExe[i+6] := ".";
-        omExe[i+7] := "O"; omExe[i+8] := "M"; omExe[i+9] := 0X;
-        IF Files.FileExists(omExe) & Tar.IsOmFile(omExe) THEN
-          Link.ProcessFile(ls, omExe)
-        END
-      END
-    END
+  (* Load OBERON.OM: Link.FindFile already searches CWD then the running
+     exe's directory (same two locations the old hand-assembled fallback
+     covered), returning whichever path exists (or the bare name if neither
+     does, in which case IsOmFile below correctly rejects it). *)
+  Link.FindFile("OBERON.OM", omExe);
+  IF Files.FileExists(omExe) & Tar.IsOmFile(omExe) THEN
+    Link.ProcessFile(ls, omExe)
   END;
 
   IF ~Err.HaveErr() THEN Link.SmartLink(ls) END;
