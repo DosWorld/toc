@@ -1,5 +1,7 @@
 # Trubo Oberon Compiler — Manual
 
+![Trubo Oberon](TRUBO1.JPG)
+
 ### Language reference · ABI · standard library · porting guide
 
 ---
