@@ -69,13 +69,14 @@ BEGIN
 END PrintHeader;
 
 PROCEDURE PrintMonth(y, m: WORD; startSunday: BOOLEAN);
-  VAR col, day, dim: INTEGER;
+  VAR i, col, day, dim: INTEGER;
 BEGIN
-  PrintMonthName(m); Out.Char(" "); Out.Int(y, 0); Out.Ln;
+  Out.String("     ");PrintMonthName(m); Out.Int(y, 6); Out.Ln;
   PrintHeader(startSunday);
 
   col := FirstDayColumn(y, m, startSunday);
-  WHILE col > 0 DO Out.String("   "); DEC(col) END;
+  i := col;
+  WHILE i > 0 DO Out.String("   "); DEC(i) END;
 
   dim := Time.DaysInMonth(y, m);
   day := 1;

@@ -35,7 +35,7 @@ VAR
 PROCEDURE Push(v: INTEGER);
 BEGIN
   IF sp >= MaxStack-1 THEN
-    Out.String("Stack overflow"); Out.Ln; SYSTEM.HALT(1)
+    Out.String("Stack overflow"); Out.Ln; SYSTEM.Halt(1)
   END;
   INC(sp); stack[sp] := v
 END Push;
@@ -43,7 +43,7 @@ END Push;
 PROCEDURE Pop(): INTEGER;
 BEGIN
   IF sp < 0 THEN
-    Out.String("Stack underflow"); Out.Ln; SYSTEM.HALT(1)
+    Out.String("Stack underflow"); Out.Ln; SYSTEM.Halt(1)
   END;
   DEC(sp); RETURN stack[sp+1]
 END Pop;
@@ -139,7 +139,6 @@ PROCEDURE PrimKey(w: ForthWord);FAR;
 BEGIN In.Char(ch); Push(ORD(ch))
 END PrimKey;
 
-(* ---------- Colon definition ---------- *)
 PROCEDURE Interpret(s: ARRAY OF CHAR); FORWARD;
 
 PROCEDURE ColonExec(w: ForthWord);FAR;
@@ -173,7 +172,6 @@ BEGIN
   compiling := FALSE
 END PrimSemicolon;
 
-(* ---------- Token and interpretation ---------- *)
 PROCEDURE IsInt(s: ARRAY OF CHAR): BOOLEAN;
   VAR i, len: INTEGER;
 BEGIN
@@ -245,7 +243,7 @@ BEGIN
   END
 END ProcessToken;
 
-PROCEDURE Interpret(s: ARRAY OF CHAR);
+PROCEDURE Interpret;
   VAR savedCompiling, savedExpecting: BOOLEAN;
       savedName: ARRAY MaxNameLen OF CHAR;
       savedDef: ARRAY MaxDefLen OF CHAR;
@@ -305,8 +303,8 @@ BEGIN
   In.Open;
   WHILE TRUE DO
     Out.String("> ");
-    In.Line(line);
-    IF ~In.Done THEN BREAK END;
+    In.String(line);
+    IF ~In.Done THEN RETURN END;
     i := 0;
     NextToken(line, i, token);
     WHILE token[0] # 0X DO
