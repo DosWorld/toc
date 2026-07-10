@@ -1,5 +1,7 @@
 # Trubo Oberon
 
+<img src="TRUBO.JPG" alt="Trubo Oberon" width="33%" align="right">
+
 ### A self-hosting Oberon-07 compiler for 16-bit MS-DOS real mode
 
 [![license](https://img.shields.io/badge/license-public%20domain-brightgreen)](LICENSE.TXT)
