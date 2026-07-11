@@ -21,7 +21,11 @@ TESTDIR = ../../TESTS
 BINDIR  = ../../BIN
 XT      = xt
 
-# Mount oberonc/ root at C:\
+# Mount oberonc/ root at C:  (trailing backslash removed from this comment --
+# a backslash at end of a Makefile comment line is STILL a line-continuation
+# to GNU Make, which was silently swallowing the XTRUN assignment below into
+# this comment, leaving XTRUN empty and producing the bogus `e 'OBERON_LIB=...'`
+# command seen when a stray leading `-` was lost along with the rest of XTRUN)
 XTRUN = $(XT) run --max=200000000 -c ../../
 OBERON_LIB = BIN/OBERON.OM
 
