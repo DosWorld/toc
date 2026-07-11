@@ -82,6 +82,10 @@ PROCEDURE Sound*(Hz: INTEGER);
 PROCEDURE NoSound*;
 *)
 
+(* KeyPressed: check whether a key is waiting in the keyboard buffer, via
+   INT 21h AH=0Bh (get input status), without removing it.
+   Parameters: none.
+   Result: TRUE if a key is available to be read. *)
 PROCEDURE KeyPressed*: BOOLEAN;
 VAR r : SYSTEM.Registers;
 BEGIN
@@ -90,6 +94,11 @@ BEGIN
     RETURN SYSTEM.AND(SYSTEM.LSR(r.AX, 8), 0FFH) = 0FFH;
 END KeyPressed;
 
+(* ReadKey: read one character from the keyboard, via INT 21h AH=08h
+   (read character without echo), blocking until a key is pressed.
+   Parameters: none.
+   Result: the character read (extended/function keys return a NUL-lead
+   scan code sequence via successive calls, per standard DOS behavior). *)
 PROCEDURE ReadKey*: CHAR;
 VAR r : SYSTEM.Registers;
 BEGIN
@@ -98,11 +107,20 @@ BEGIN
     RETURN CHR(SYSTEM.AND(r.AX, 0FFH))
 END ReadKey;
 
+(* TextMode: switch the video adapter into a BIOS text/graphics mode
+   (INT 10h AH=00h).
+   Parameters: Mode — a mode number, e.g. one of the BW40/CO40/BW80/CO80/
+   Mono constants (optionally combined with Font8x8).
+   Result: none. *)
 PROCEDURE TextMode*(Mode: BYTE);
 BEGIN
     SYSTEM.VIDEOMODE(Mode)
 END TextMode;
 
+(* GotoXY: move the text cursor to a specific screen location using an
+   ANSI escape sequence (ESC [ row ; col H).
+   Parameters: X — 1-based column; Y — 1-based row.
+   Result: none. *)
 PROCEDURE GotoXY*(X, Y: INTEGER);
 BEGIN
     Out.Char(1BX);
@@ -126,17 +144,30 @@ BEGIN
   Out.String(buf);
 END EscStr;
 
+(* ClrScr: clear the whole screen and home the cursor, via ANSI escape
+   sequences (ESC [2J then ESC [1;1H).
+   Parameters: none.
+   Result: none. *)
 PROCEDURE ClrScr*;
 BEGIN
   EscStr("[2J");
   EscStr("[1;1H");
 END ClrScr;
 
+(* ClrEol: clear from the cursor to the end of the current line, via the
+   ANSI escape sequence ESC [K.
+   Parameters: none.
+   Result: none. *)
 PROCEDURE ClrEol*;
 BEGIN
   EscStr("[K");
 END ClrEol;
 
+(* TextColor: set the foreground text color using an ANSI SGR escape
+   sequence (ESC [3<n>m).
+   Parameters: fg — color index 0..7 (see the color constants above; only
+   the low 3 bits are used).
+   Result: none. *)
 PROCEDURE TextColor*(fg : INTEGER);
 VAR buf : ARRAY 12 OF CHAR;
 BEGIN
@@ -148,6 +179,11 @@ BEGIN
   EscStr(buf)
 END TextColor;
 
+(* TextBackground: set the background text color using an ANSI SGR escape
+   sequence (ESC [4<n>m).
+   Parameters: bg — color index 0..7 (see the color constants above; only
+   the low 3 bits are used).
+   Result: none. *)
 PROCEDURE TextBackground*(bg : INTEGER);
 VAR buf : ARRAY 12 OF CHAR;
 BEGIN
@@ -159,6 +195,11 @@ BEGIN
   EscStr(buf)
 END TextBackground;
 
+(* Delay: pause execution for approximately the given duration, via
+   repeated INT 15h AH=86h (BIOS wait) calls in 65535-microsecond chunks.
+   Parameters: MS — delay duration in milliseconds; values <= 0 return
+   immediately.
+   Result: none. *)
 PROCEDURE Delay*(MS: INTEGER);
   VAR r: SYSTEM.Registers; us: LONGINT;
 BEGIN
@@ -179,6 +220,12 @@ BEGIN
   END
 END Delay;
 
+(* Sound: start the PC speaker beeping at a given frequency, by
+   programming PIT channel 2 (ports 43h/42h) and gating the speaker on
+   via port 61h.
+   Parameters: Hz — tone frequency in Hertz; values <= 0 return
+   immediately without changing the speaker state.
+   Result: none. *)
 PROCEDURE Sound*(Hz: INTEGER);
   VAR divisor: INTEGER;
 BEGIN
@@ -190,6 +237,9 @@ BEGIN
   SYSTEM.PORTOUT(61H, SYSTEM.IOR(SYSTEM.PORTIN(61H), 3))
 END Sound;
 
+(* NoSound: stop the PC speaker by gating it off via port 61h.
+   Parameters: none.
+   Result: none. *)
 PROCEDURE NoSound*;
 BEGIN
   SYSTEM.PORTOUT(61H, SYSTEM.AND(SYSTEM.PORTIN(61H), 0FCH))

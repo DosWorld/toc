@@ -115,6 +115,11 @@ BEGIN
   F.pos := pos
 END SeekTo;
 
+(* Seek: move the file's read/write cursor to an absolute byte position,
+   clamped to [0, current file size].
+   Parameters: F — the open file; pos — target byte offset from the start
+   of the file.
+   Result: none. *)
 PROCEDURE Seek*(VAR F: File; pos: LONGINT);
 BEGIN
   IF pos < 0 THEN pos := 0 END;
@@ -142,6 +147,12 @@ BEGIN
   RETURN len
 END ClampLen;
 
+(* BlockRead: read up to len bytes from F into x, advancing the cursor.
+   Works transparently for both disk-backed and EMS-backed files via the
+   shared 8 KB page buffer.
+   Parameters: F — the open file; x — destination buffer; len — requested
+   number of bytes.
+   Result: number of bytes actually read (less than len at end-of-file). *)
 PROCEDURE BlockRead*(VAR F: File; VAR x; len: WORD): WORD;
   VAR total, delta, avail: WORD; dest: SYSTEM.ADDRESS;
 BEGIN
@@ -166,6 +177,12 @@ BEGIN
   RETURN total
 END BlockRead;
 
+(* BlockWrite: write len bytes from x into F, advancing the cursor and
+   growing the file if the write extends past its current size.
+   Parameters: F — the open file; x — source buffer; len — number of bytes
+   to write.
+   Result: number of bytes actually written (equals len; only fails to
+   short-circuit on len=0). *)
 PROCEDURE BlockWrite*(VAR F: File; VAR x; len: WORD): WORD;
   VAR total, delta, room: WORD; src: SYSTEM.ADDRESS;
 BEGIN
@@ -191,6 +208,9 @@ BEGIN
   RETURN total
 END BlockWrite;
 
+(* WriteByte: write a single byte to F at the current cursor position.
+   Parameters: F — the open file; b — byte value to write.
+   Result: always 1 (bytes written). *)
 PROCEDURE WriteByte*(VAR F: File; b: BYTE) : WORD;
 BEGIN
   IF F.bufPos = WORD(BUFSIZE) THEN NextPage(F) END;
@@ -204,6 +224,9 @@ BEGIN
   RETURN 1
 END WriteByte;
 
+(* WriteWord: write a 16-bit value to F in little-endian byte order.
+   Parameters: F — the open file; w — value to write.
+   Result: always 2 (bytes written). *)
 PROCEDURE WriteWord*(VAR F: File; w: INTEGER) : WORD;
 BEGIN
   IF F.bufPos <= WORD(BUFSIZE - 2) THEN
@@ -223,6 +246,9 @@ BEGIN
   RETURN 2
 END WriteWord;
 
+(* WriteDWord: write a 32-bit value to F in little-endian byte order.
+   Parameters: F — the open file; w — value to write.
+   Result: always 4 (bytes written). *)
 PROCEDURE WriteDWord*(VAR F: File; w: LONGINT) : WORD;
 BEGIN
   IF F.bufPos <= WORD(BUFSIZE - 4) THEN
@@ -246,6 +272,9 @@ BEGIN
   RETURN 4
 END WriteDWord;
 
+(* ReadByte: read a single byte from F at the current cursor position.
+   Parameters: F — the open file; b — receives the byte read (0 at EOF).
+   Result: TRUE if a byte was read, FALSE at end-of-file. *)
 PROCEDURE ReadByte*(VAR F: File; VAR b: BYTE) : BOOLEAN;
 BEGIN
   IF F.bufPos >= F.bufSize THEN
@@ -257,6 +286,9 @@ BEGIN
   RETURN TRUE
 END ReadByte;
 
+(* ReadWord: read a 16-bit little-endian value from F.
+   Parameters: F — the open file; w — receives the value read.
+   Result: none. *)
 PROCEDURE ReadWord*(VAR F: File; VAR w: INTEGER);
   VAR lo, hi: BYTE;
 BEGIN
@@ -270,6 +302,9 @@ BEGIN
   END
 END ReadWord;
 
+(* ReadDWord: read a 32-bit little-endian value from F.
+   Parameters: F — the open file; w — receives the value read.
+   Result: none. *)
 PROCEDURE ReadDWord*(VAR F: File; VAR w: LONGINT);
   VAR w1, w2: INTEGER;
 BEGIN
@@ -285,6 +320,10 @@ BEGIN
   w := SYSTEM.IOR(LONGINT(WORD(w1)), SYSTEM.LSL(LONGINT(w2), 16))
 END ReadDWord;
 
+(* ReadAsciizString: read bytes from f until a NUL byte or end-of-file,
+   storing the result as a NUL-terminated string (truncated to fit dst).
+   Parameters: f — the open file; dst — receives the string read.
+   Result: none. *)
 PROCEDURE ReadAsciizString*(VAR f: File; VAR dst: ARRAY OF CHAR);
   VAR i: INTEGER; b: BYTE;
 BEGIN
@@ -295,6 +334,11 @@ BEGIN
   dst[i] := 0X
 END ReadAsciizString;
 
+(* ReadLine: read a single text line from f, stopping at CR, LF, or CRLF
+   (the line terminator itself is consumed but not stored) or end-of-file.
+   Parameters: f — the open file; buf — receives the line, NUL-terminated;
+   maxLen — size of buf (the line is truncated if longer).
+   Result: number of characters stored in buf (excluding the terminator). *)
 PROCEDURE ReadLine*(VAR f: File; VAR buf: ARRAY OF CHAR; maxLen: WORD): WORD;
   VAR b: BYTE; n, len: WORD;
 BEGIN
@@ -315,16 +359,25 @@ BEGIN
   RETURN len
 END ReadLine;
 
+(* WriteLn: write a CRLF line terminator to f.
+   Parameters: f — the open file.
+   Result: number of bytes written (2). *)
 PROCEDURE WriteLn*(VAR f: File) : WORD;
 BEGIN
   RETURN WriteWord(f, 0A0DH)
 END WriteLn;
 
+(* Write: write a string's characters to f (no terminator appended).
+   Parameters: f — the open file; line — the string to write.
+   Result: number of bytes written. *)
 PROCEDURE Write*(VAR f: File; line: ARRAY OF CHAR) : WORD;
 BEGIN
   RETURN BlockWrite(f, line, SYSTEM.LENGTH(line));
 END Write;
 
+(* WriteLine: write a string followed by a CRLF line terminator.
+   Parameters: f — the open file; line — the string to write.
+   Result: total number of bytes written (line + terminator). *)
 PROCEDURE WriteLine*(VAR f: File; line: ARRAY OF CHAR) : WORD;
 VAR w : WORD;
 BEGIN
@@ -333,6 +386,9 @@ BEGIN
   RETURN w
 END WriteLine;
 
+(* Position: current read/write cursor position.
+   Parameters: F — the open file.
+   Result: current byte offset from the start of the file. *)
 PROCEDURE Position*(VAR F: File): LONGINT;
 BEGIN
   (* derive from the WORD cursor — F.pos is only kept fresh on growth/block ops *)
@@ -340,11 +396,18 @@ BEGIN
   RETURN AbsPos(F)
 END Position;
 
+(* Size: total size of the file.
+   Parameters: F — the open file.
+   Result: file size in bytes. *)
 PROCEDURE Size*(VAR F: File): LONGINT;
 BEGIN
   RETURN F.size
 END Size;
 
+(* Truncate: cut the file off at the current cursor position, discarding
+   everything after it.
+   Parameters: F — the open file.
+   Result: none. *)
 PROCEDURE Truncate*(VAR F: File);
   VAR pos, pageBase: LONGINT;
 BEGIN
@@ -365,6 +428,10 @@ BEGIN
   END
 END Truncate;
 
+(* Reset: open an existing disk file for reading (and writing — DOS mode
+   3D02H, read/write share).
+   Parameters: F — file record to initialize; name — path of the file to open.
+   Result: TRUE if the file was opened successfully. *)
 PROCEDURE Reset*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -405,6 +472,10 @@ BEGIN
   RETURN TRUE
 END Reset;
 
+(* ReWrite: create (or truncate) a disk file for writing.
+   Parameters: F — file record to initialize; name — path of the file to
+   create/truncate.
+   Result: TRUE if the file was created successfully. *)
 PROCEDURE ReWrite*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -443,6 +514,10 @@ BEGIN
   RETURN TRUE
 END ReWrite;
 
+(* Append: open an existing file positioned at end-of-file for writing, or
+   create it if it doesn't exist yet.
+   Parameters: F — file record to initialize; name — path of the file.
+   Result: TRUE if the file was opened/created successfully. *)
 PROCEDURE Append*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   IF Reset(F, name) THEN
@@ -462,6 +537,11 @@ BEGIN
   dst[8] := "."; dst[9] := "T"; dst[10] := "M"; dst[11] := "P"; dst[12] := 0X
 END MakeTempName;
 
+(* ReWriteTemp: create a temporary file for writing, preferring an
+   EMS-resident backend (fast, no disk I/O) and falling back to a hidden
+   auto-named disk file (deleted on Close) if EMS is unavailable.
+   Parameters: F — file record to initialize.
+   Result: TRUE if the temp file was created successfully. *)
 PROCEDURE ReWriteTemp*(VAR F: File): BOOLEAN;
   VAR name: ARRAY 16 OF CHAR; ok: BOOLEAN; handle: WORD;
 BEGIN
@@ -489,6 +569,10 @@ BEGIN
   RETURN ok
 END ReWriteTemp;
 
+(* Delete: remove a file from disk (clears the read-only attribute first if
+   needed, via DOS AH=71h long-name delete, falling back to AH=41h).
+   Parameters: FileName — path of the file to delete.
+   Result: TRUE if the file was deleted successfully. *)
 PROCEDURE Delete*(FileName: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -508,11 +592,20 @@ BEGIN
   RETURN SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0
 END Delete;
 
+(* SetDeleteOnClose: mark a disk-backed file for deletion when Close runs.
+   Parameters: F — the open file; delOnClose — TRUE to delete on Close.
+   Result: none. *)
 PROCEDURE SetDeleteOnClose*(VAR F: File; delOnClose : BOOLEAN);
 BEGIN
   F.delOnClose := delOnClose
 END SetDeleteOnClose;
 
+(* Close: flush any buffered writes, release the file's resources (EMS
+   handle or DOS file handle, and the page buffer), and delete the file if
+   SetDeleteOnClose(TRUE) was set (or it was an EMS temp file's disk
+   fallback marked as such by ReWriteTemp).
+   Parameters: F — the open file.
+   Result: none. *)
 PROCEDURE Close*(VAR F: File);
 BEGIN
   IF F.backend = BkEms THEN
@@ -533,6 +626,9 @@ BEGIN
   END
 END Close;
 
+(* Rename: rename/move a file on disk (DOS AH=56h).
+   Parameters: OldName — current path; NewName — new path.
+   Result: TRUE if the rename succeeded. *)
 PROCEDURE Rename*(OldName, NewName: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -551,6 +647,12 @@ END Rename;
    and sprays the copied bytes over the heap (see DOCS/IMPLRULE.MD §"Stack
    size and big stack frames").  Both files are 8 KB-buffered internally, so
    a small staging chunk costs almost nothing. *)
+(* BlockCopy: copy len bytes from src to dst, staged through a small stack
+   buffer (see the comment above about why it must stay small).
+   Parameters: src — source file, read from its current cursor position;
+   dst — destination file, written from its current cursor position; len —
+   number of bytes to copy.
+   Result: TRUE if all len bytes were copied successfully. *)
 PROCEDURE BlockCopy*(VAR src, dst: File; len : LONGINT): BOOLEAN;
   VAR buf: ARRAY CopyChunk OF BYTE;
       n: WORD;
@@ -568,6 +670,10 @@ BEGIN
   RETURN TRUE
 END BlockCopy;
 
+(* Copy: copy an entire file to a new path (opens src for reading, dst for
+   writing, and copies src's full contents via BlockCopy).
+   Parameters: src — path of the file to copy; dst — path of the destination.
+   Result: TRUE if the copy completed successfully. *)
 PROCEDURE Copy*(src, dst: ARRAY OF CHAR): BOOLEAN;
   VAR fSrc, fDst: File;
       res : BOOLEAN;
@@ -581,7 +687,10 @@ END Copy;
 (* Build dst = path with its extension (the part from the last "." after the
    last path separator) replaced by newExt (e.g. "OSTRIP.OM" + ".BAK" ->
    "OSTRIP.BAK") — keeps 8.3 names valid (no double extension). If path has
-   no extension, newExt is simply appended. *)
+   no extension, newExt is simply appended.
+   Parameters: path — source path; newExt — replacement extension (including
+   the leading "."); dst — receives the resulting path.
+   Result: none. *)
 PROCEDURE ReplaceExt*(path: ARRAY OF CHAR; newExt: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
   VAR i, dot, sep: INTEGER; extLen: WORD;
 BEGIN
@@ -603,6 +712,11 @@ BEGIN
   dst[dot + INTEGER(extLen)] := 0X
 END ReplaceExt;
 
+(* FileExists: test whether a file exists on disk (tries the long-name
+   AH=71h/AX=714Eh call first, falling back to the classic AH=4Eh
+   find-first via a saved/restored DTA for DOS versions without LFN support).
+   Parameters: FileName — path to test.
+   Result: TRUE if the file exists. *)
 PROCEDURE FileExists*(FileName: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers; buf: ARRAY 320 OF CHAR; oldES, oldBX: INTEGER; ok: BOOLEAN;
 BEGIN
@@ -644,6 +758,10 @@ BEGIN
   RETURN ok
 END FileExists;
 
+(* GetFTime: read a disk file's last-modified timestamp (DOS AH=57h/AL=00h).
+   No-op (time set to 0) for EMS-backed files, which have no DOS timestamp.
+   Parameters: f — the open file; time — receives the packed DOS date/time.
+   Result: none. *)
 PROCEDURE GetFTime*(VAR f : File; VAR time : Time.DosTime);
   VAR r: SYSTEM.Registers;
 
@@ -656,6 +774,10 @@ BEGIN
   time := SYSTEM.IOR(LONGINT(SYSTEM.LSL(LONGINT(WORD(r.DX)), 16)), LONGINT(WORD(r.CX)))
 END GetFTime;
 
+(* SetFTime: set a disk file's last-modified timestamp (DOS AH=57h/AL=01h).
+   No-op for EMS-backed files.
+   Parameters: f — the open file; time — packed DOS date/time to set.
+   Result: none. *)
 PROCEDURE SetFTime*(VAR f : File; time : Time.DosTime);
   VAR r: SYSTEM.Registers;
 BEGIN

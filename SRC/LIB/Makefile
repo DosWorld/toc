@@ -47,7 +47,10 @@ OUT87.OM: OUT87.MOD OUT.OM SYSTEM.OM $(OC)
 IN.OM: IN.MOD SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) IN.MOD
 
-EMS.OM: EMS.MOD SYSTEM.OM $(OC)
+# (*$L EMSAPI.RDF*) inside EMS.MOD is resolved from the CWD (this dir) --
+# same pattern as SYSTEM.OM + SYS.RDF.  EMSAPI.RDF is a checked-in binary,
+# same as SYS.RDF: no rule here to rebuild it from EMSAPI.ASM.
+EMS.OM: EMSAPI.RDF EMS.MOD SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) EMS.MOD
 
 FILES.OM: FILES.MOD EMS.OM SYSTEM.OM $(OC)

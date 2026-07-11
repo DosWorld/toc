@@ -51,16 +51,25 @@ BEGIN
     INC(failureCount)
 END Fail;
 
+(* AssertTrue: record a test failure for the current test if cond is FALSE.
+   Parameters: cond — condition expected to be TRUE; msg — message reported
+   on failure. *)
 PROCEDURE AssertTrue*(cond: BOOLEAN; msg: ARRAY OF CHAR);
 BEGIN
     IF ~cond THEN Fail(msg) END
 END AssertTrue;
 
+(* AssertFalse: record a test failure for the current test if cond is TRUE.
+   Parameters: cond — condition expected to be FALSE; msg — message reported
+   on failure. *)
 PROCEDURE AssertFalse*(cond: BOOLEAN; msg: ARRAY OF CHAR);
 BEGIN
     IF cond THEN Fail(msg) END
 END AssertFalse;
 
+(* AssertNil: record a test failure for the current test if p is not NIL.
+   Parameters: p — pointer expected to be NIL; msg — message reported on
+   failure. *)
 PROCEDURE AssertNil*(p : SYSTEM.ADDRESS; msg: ARRAY OF CHAR);
 BEGIN
     IF p # NIL THEN
@@ -72,6 +81,9 @@ BEGIN
     END
 END AssertNil;
 
+(* AssertNotNil: record a test failure for the current test if p is NIL.
+   Parameters: p — pointer expected to be non-NIL; msg — message reported on
+   failure. *)
 PROCEDURE AssertNotNil*(p : SYSTEM.ADDRESS; msg: ARRAY OF CHAR);
 BEGIN
     IF p = NIL THEN
@@ -83,6 +95,10 @@ BEGIN
     END
 END AssertNotNil;
 
+(* AssertByte: record a test failure for the current test if expected and
+   actual differ.
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertByte*(expected, actual: BYTE; msg: ARRAY OF CHAR);
 BEGIN
     IF expected # actual THEN
@@ -94,6 +110,10 @@ BEGIN
     END
 END AssertByte;
 
+(* AssertInt: record a test failure for the current test if expected and
+   actual differ.
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertInt*(expected, actual: INTEGER; msg: ARRAY OF CHAR);
 BEGIN
     IF expected # actual THEN
@@ -105,6 +125,10 @@ BEGIN
     END
 END AssertInt;
 
+(* AssertWord: record a test failure for the current test if expected and
+   actual differ.
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertWord*(expected, actual: WORD; msg: ARRAY OF CHAR);
 BEGIN
     IF expected # actual THEN
@@ -116,6 +140,10 @@ BEGIN
     END
 END AssertWord;
 
+(* AssertLong: record a test failure for the current test if expected and
+   actual differ.
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertLong*(expected, actual: LONGINT; msg: ARRAY OF CHAR);
 BEGIN
     IF expected # actual THEN
@@ -127,6 +155,10 @@ BEGIN
     END
 END AssertLong;
 
+(* AssertReal: record a test failure for the current test if expected and
+   actual differ by more than a small epsilon (1.0E-6).
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertReal*(expected, actual: REAL; msg: ARRAY OF CHAR);
 BEGIN
     IF Math.Abs(expected - actual) > 1.0E-6 THEN
@@ -138,6 +170,10 @@ BEGIN
     END
 END AssertReal;
 
+(* AssertLongReal: record a test failure for the current test if expected and
+   actual differ by more than a small epsilon (1.0E-6).
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertLongReal*(expected, actual: LONGREAL; msg: ARRAY OF CHAR);
   VAR diff: LONGREAL;
 BEGIN
@@ -152,6 +188,10 @@ BEGIN
     END
 END AssertLongReal;
 
+(* AssertStr: record a test failure for the current test if expected and
+   actual differ as strings.
+   Parameters: expected — value the test expects; actual — value produced by
+   the code under test; msg — message reported on failure. *)
 PROCEDURE AssertStr*(expected, actual: ARRAY OF CHAR; msg: ARRAY OF CHAR);
 BEGIN
     IF ~StrEq(expected, actual) THEN
@@ -163,6 +203,9 @@ BEGIN
     END
 END AssertStr;
 
+(* AddTest: register a test procedure to be run by RunTests.
+   Parameters: t — FAR-callable test procedure to register; name — display
+   name for the test (truncated to 24 characters). *)
 PROCEDURE AddTest*(t: TestProc; name : ARRAY OF CHAR);
 VAR i : WORD;
 BEGIN
@@ -184,6 +227,9 @@ BEGIN
     END
 END AddTest;
 
+(* RunTests: run every test registered via AddTest, printing a PASSED/FAIL
+   line per test and a summary, then halt the process with exit code 0 if
+   all tests passed or 1 otherwise. *)
 PROCEDURE RunTests*;
 VAR i, total, passed : INTEGER;
 BEGIN

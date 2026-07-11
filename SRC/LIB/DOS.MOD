@@ -56,11 +56,20 @@ DosExitCode* : WORD;     (* child's exit status from last Exec — low byte is t
                             termination type (0=normal, 1=Ctrl-C, 2=critical err,
                             3=TSR).  Matches Turbo Pascal Dos.DosExitCode. *)
 
+(* Intr: invoke an arbitrary software interrupt with caller-supplied
+   register values, and return the register values set on return.
+   Parameters: IntNo — interrupt number to invoke; Regs — in/out register
+   set (AX/BX/CX/DX/SI/DI/DS/ES/Flags).
+   Result: none (Regs is updated in place). *)
 PROCEDURE Intr*(IntNo: BYTE; VAR Regs: Registers);
 BEGIN
     SYSTEM.Intr(IntNo, Regs);
 END Intr;
 
+(* MsDos: invoke INT 21h (the DOS API dispatcher) with caller-supplied
+   register values, and return the register values set on return.
+   Parameters: Regs — in/out register set (AX/BX/CX/DX/SI/DI/DS/ES/Flags).
+   Result: none (Regs is updated in place). *)
 PROCEDURE MsDos*(VAR Regs: Registers);
 BEGIN
     SYSTEM.Intr(21H, Regs)
@@ -79,6 +88,10 @@ BEGIN
     RETURN p^
 END ReadByte;
 
+(* GetPsp: retrieve the segment address of the current process's Program
+   Segment Prefix, via INT 21h AH=62h.
+   Parameters: none.
+   Result: the PSP segment. *)
 PROCEDURE GetPsp*:INTEGER;
 VAR
     regs    : SYSTEM.Registers;
@@ -158,11 +171,23 @@ BEGIN
     END
 END ArgInit;
 
+(* ParamCount: report how many command-line arguments were passed to
+   this program (parsed from the PSP command tail at startup).
+   Parameters: none.
+   Result: the number of arguments (excludes argument 0, the program
+   name). *)
 PROCEDURE ParamCount*: INTEGER;
 BEGIN
     RETURN argCount
 END ParamCount;
 
+(* ParamStr: retrieve one command-line argument by index.
+   Parameters: i — argument index (0 = the program's own path/name,
+   retrieved from the environment block; 1..ParamCount() = the parsed
+   command-tail arguments); p — output buffer receiving the ASCIIZ
+   argument text (truncated to fit).
+   Result: none (p is filled in place; empty string if i is out of
+   range). *)
 PROCEDURE ParamStr*(i: INTEGER; VAR p: ARRAY OF CHAR);
     VAR src, dst, envseg, ofs : INTEGER; ch : CHAR;
 BEGIN
@@ -208,6 +233,13 @@ BEGIN
     END
 END ParamStr;
 
+(* GetEnv: look up an environment variable by name in the process's
+   environment block (reached via the PSP environment segment pointer).
+   Parameters: envvar — variable name to search for (case-insensitive);
+   dst — output buffer receiving the value's ASCIIZ text (truncated to
+   fit).
+   Result: none (dst is set to the value, or to an empty string if the
+   variable is not found). *)
 PROCEDURE GetEnv*(envvar: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR
     envseg : INTEGER;
@@ -257,6 +289,10 @@ BEGIN
     END
 END GetEnv;
 
+(* GetDTA: retrieve the current Disk Transfer Area address, via
+   INT 21h AH=2Fh.
+   Parameters: none.
+   Result: far address of the current DTA. *)
 PROCEDURE GetDTA*: SYSTEM.ADDRESS;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -265,6 +301,9 @@ BEGIN
   RETURN SYSTEM.PTR(r.ES, r.BX)
 END GetDTA;
 
+(* SetDTA: set the Disk Transfer Area address, via INT 21h AH=1Ah.
+   Parameters: dta — far address to use as the new DTA.
+   Result: none. *)
 PROCEDURE SetDTA*(dta : SYSTEM.ADDRESS);
   VAR r: SYSTEM.Registers; p : POINTER TO CHAR;
 BEGIN
@@ -281,7 +320,11 @@ END SetDTA;
    self-contained: subsequent FindNext calls re-use it without an
    explicit DTA argument.  Sets DosError to 0 on success or to the
    INT 21h failure code (typically 02 = file not found, 12H = no more
-   files for FindNext).  Matches Turbo Pascal's Dos.FindFirst semantics. *)
+   files for FindNext).  Matches Turbo Pascal's Dos.FindFirst semantics.
+   Parameters: Path — ASCIIZ search pattern (may include wildcards);
+   Attr — attribute mask to match (e.g. AnyFile); S — output search
+   record, filled with the first match.
+   Result: none (see DosError for success/failure). *)
 PROCEDURE FindFirst*(Path: ARRAY OF CHAR; Attr: BYTE; VAR S: SearchRec);
   VAR r: SYSTEM.Registers;
       pathz: ARRAY 80 OF CHAR;
@@ -311,7 +354,10 @@ END FindFirst;
 
 (* FindNext: continue a search opened by FindFirst.  The same SearchRec
    must be passed and unmodified between calls — DOS keeps its search
-   state in `S.fill`.  Sets DosError to 12H when no more entries match. *)
+   state in `S.fill`.  Sets DosError to 12H when no more entries match.
+   Parameters: S — the search record from the prior FindFirst/FindNext
+   call, updated in place with the next match.
+   Result: none (see DosError for success/failure). *)
 PROCEDURE FindNext*(VAR S: SearchRec);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -330,7 +376,9 @@ BEGIN
 END FindNext;
 
 (* MkDir: create a directory.  Returns TRUE on success, FALSE if the
-   directory already exists or cannot be created.  Sets DosError. *)
+   directory already exists or cannot be created.  Sets DosError.
+   Parameters: Path — ASCIIZ directory path to create.
+   Result: TRUE on success, FALSE on failure. *)
 PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers; pathz: ARRAY 80 OF CHAR; i: INTEGER;
 BEGIN
@@ -351,7 +399,9 @@ BEGIN
 END MkDir;
 
 (* ChDir: change current directory.  Returns TRUE on success.  Sets
-   DosError. *)
+   DosError.
+   Parameters: Path — ASCIIZ directory path to change into.
+   Result: TRUE on success, FALSE on failure. *)
 PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN;
   VAR r: SYSTEM.Registers; pathz: ARRAY 80 OF CHAR; i: INTEGER;
 BEGIN
@@ -371,6 +421,10 @@ BEGIN
   DosError := 0; RETURN TRUE
 END ChDir;
 
+(* GetDate: retrieve the current system date, via INT 21h AH=2Ah.
+   Parameters: Year — output, full year (e.g. 2026); Month — output,
+   1..12; Day — output, 1..31; DayOfWeek — output, 0=Sunday..6=Saturday.
+   Result: none (all four VAR parameters are filled). *)
 PROCEDURE GetDate*(VAR Year,Month,Day,DayOfWeek: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -382,6 +436,9 @@ BEGIN
   DayOfWeek := r.AX MOD 256
 END GetDate;
 
+(* SetDate: set the system date, via INT 21h AH=2Bh.
+   Parameters: Year — full year; Month — 1..12; Day — 1..31.
+   Result: none. *)
 PROCEDURE SetDate*(Year,Month,Day: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -391,6 +448,11 @@ BEGIN
   SYSTEM.Intr(21H, r)
 END SetDate;
 
+(* GetTime: retrieve the current system time, via INT 21h AH=2Ch.
+   Parameters: Hour — output, 0..23; Minute — output, 0..59;
+   Second — output, 0..59; Sec100 — output, hundredths of a second,
+   0..99.
+   Result: none (all four VAR parameters are filled). *)
 PROCEDURE GetTime*(VAR Hour,Minute,Second,Sec100: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -402,6 +464,10 @@ BEGIN
   Sec100 := r.DX MOD 256
 END GetTime;
 
+(* SetTime: set the system time, via INT 21h AH=2Dh.
+   Parameters: Hour — 0..23; Minute — 0..59; Second — 0..59;
+   Sec100 — hundredths of a second, 0..99.
+   Result: none. *)
 PROCEDURE SetTime*(Hour,Minute,Second,Sec100: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -411,6 +477,11 @@ BEGIN
   SYSTEM.Intr(21H, r)
 END SetTime;
 
+(* GetCBreak: query the current Ctrl-Break check setting, via
+   INT 21h AH=33h/AL=00h.
+   Parameters: Break — output, TRUE if extended Ctrl-Break checking is
+   enabled.
+   Result: none (Break is filled in place). *)
 PROCEDURE GetCBreak*(VAR Break: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -419,6 +490,11 @@ BEGIN
   Break := (r.DX MOD 256) # 0
 END GetCBreak;
 
+(* SetCBreak: enable or disable extended Ctrl-Break checking, via
+   INT 21h AH=33h/AL=01h.
+   Parameters: Break — TRUE to enable extended checking, FALSE to
+   disable it.
+   Result: none. *)
 PROCEDURE SetCBreak*(Break: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -427,6 +503,10 @@ BEGIN
   SYSTEM.Intr(21H, r)
 END SetCBreak;
 
+(* GetVerify: query the current disk-write verify flag, via
+   INT 21h AH=54h.
+   Parameters: Verify — output, TRUE if verify-after-write is enabled.
+   Result: none (Verify is filled in place). *)
 PROCEDURE GetVerify*(VAR Verify: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -435,6 +515,11 @@ BEGIN
   Verify := (r.AX MOD 256) # 0
 END GetVerify;
 
+(* SetVerify: enable or disable disk-write verification, via
+   INT 21h AH=2Eh.
+   Parameters: Verify — TRUE to enable verify-after-write, FALSE to
+   disable it.
+   Result: none. *)
 PROCEDURE SetVerify*(Verify: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -443,6 +528,10 @@ BEGIN
   SYSTEM.Intr(21H, r)
 END SetVerify;
 
+(* DiskFree: report the free space on a drive, via INT 21h AH=36h (get
+   free disk space): AX=sectors/cluster, BX=free clusters, CX=bytes/sector.
+   Parameters: Drive — drive number (0=default, 1=A:, 2=B:, ...).
+   Result: free space in bytes, or -1 if the drive number is invalid. *)
 PROCEDURE DiskFree*(Drive: BYTE): LONGINT;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -453,6 +542,12 @@ BEGIN
   RETURN LONGINT(r.AX) * LONGINT(r.BX) * LONGINT(r.CX)
 END DiskFree;
 
+(* DiskSize: report the total capacity of a drive, via INT 21h AH=36h
+   (get free disk space): AX=sectors/cluster, CX=bytes/sector,
+   DX=total clusters.
+   Parameters: Drive — drive number (0=default, 1=A:, 2=B:, ...).
+   Result: total capacity in bytes, or -1 if the drive number is
+   invalid. *)
 PROCEDURE DiskSize*(Drive: BYTE): LONGINT;
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -463,6 +558,11 @@ BEGIN
   RETURN LONGINT(r.AX) * LONGINT(r.CX) * LONGINT(r.DX)
 END DiskSize;
 
+(* GetIntVec: retrieve the current handler address for an interrupt
+   vector, via INT 21h AH=35h (get interrupt vector).
+   Parameters: IntNo — interrupt number to query; Vector — output, far
+   address of the current handler.
+   Result: none (Vector is filled in place). *)
 PROCEDURE GetIntVec*(IntNo: BYTE; VAR Vector: SYSTEM.ADDRESS);
   VAR r: SYSTEM.Registers;
 BEGIN
@@ -471,6 +571,11 @@ BEGIN
   Vector := SYSTEM.PTR(r.ES, r.BX)
 END GetIntVec;
 
+(* SetIntVec: install a new handler address for an interrupt vector, via
+   INT 21h AH=25h (set interrupt vector).
+   Parameters: IntNo — interrupt number to modify; Vector — far address
+   of the new handler.
+   Result: none. *)
 PROCEDURE SetIntVec*(IntNo: BYTE; Vector: SYSTEM.ADDRESS);
   VAR r: SYSTEM.Registers; p: POINTER TO CHAR;
 BEGIN
@@ -481,6 +586,13 @@ BEGIN
   SYSTEM.Intr(21H, r)
 END SetIntVec;
 
+(* FExpand: expand a path into its canonical fully-qualified form
+   (drive, directory, name), via INT 21h AX=6000h ("truename"); falls
+   back to copying Path unchanged if the call fails (e.g. on DOS
+   versions that don't support it).
+   Parameters: Path — ASCIIZ path to expand; Dest — output buffer
+   receiving the expanded ASCIIZ path (truncated to fit).
+   Result: none (Dest is filled in place). *)
 PROCEDURE FExpand*(Path: ARRAY OF CHAR; VAR Dest : ARRAY OF CHAR);
   VAR r: SYSTEM.Registers; p, d: POINTER TO CHAR; i: INTEGER;
 BEGIN
@@ -502,6 +614,13 @@ BEGIN
   END
 END FExpand;
 
+(* FSplit: split a path into its directory, base name, and extension
+   components (pure string parsing, no DOS call).
+   Parameters: Path — ASCIIZ path to split; Dir — output, the directory
+   portion including the trailing '\' or ':' (empty if none); Name —
+   output, the base filename without extension; Ext — output, the
+   extension including the leading '.' (empty if none).
+   Result: none (Dir, Name, Ext are filled in place). *)
 PROCEDURE FSplit*(Path: ARRAY OF CHAR; VAR Dir, Name, Ext: ARRAY OF CHAR);
   VAR i, j, len, dirEnd, nameStart, extStart : INTEGER;
 BEGIN
@@ -554,7 +673,10 @@ END FSplit;
 
    Semantics match Turbo Pascal's Dos.Exec.  No Setblock dance: the runtime
    (SYS.ASM SYSTEM_INIT) allocates only $M max paragraphs, so memory above
-   the parent's heap is naturally available to the child. *)
+   the parent's heap is naturally available to the child.
+   Parameters: Path — ASCIIZ path to the executable; CmdLine — ASCIIZ
+   command-tail text (without the program name).
+   Result: none (see DosError/DosExitCode for outcome). *)
 PROCEDURE Exec*(Path, CmdLine: ARRAY OF CHAR);
 VAR
     pathz : ARRAY 80 OF CHAR;  (* NUL-terminated path *)
@@ -607,6 +729,11 @@ BEGIN
     END
 END Exec;
 
+(* SwapVectors: Turbo Pascal compatibility stub for swapping the
+   critical-error and Ctrl-Break interrupt vectors around an Exec call;
+   currently a no-op in this runtime.
+   Parameters: none.
+   Result: none. *)
 PROCEDURE SwapVectors*;
 BEGIN
 END SwapVectors;

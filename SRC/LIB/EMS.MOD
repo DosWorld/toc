@@ -2,251 +2,81 @@
 MODULE EMS;
 
 CONST
-  PageSize = 16384;
-  MaxPhysicalPages = 4;
-
   VER35* = 035H;
   VER40* = 040H;
 
-TYPE
-(*$A-*)
-  MoveDesc = RECORD
-    len       : LONGINT;
-    srcType   : BYTE;
-    srcHandle : WORD;
-    src       : LONGINT;
-    dstType   : BYTE;
-    dstHandle : WORD;
-    dst       : LONGINT
-  END;
+(* Present: test whether a LIM EMS 4.0 driver was detected at module init.
+   Result: TRUE if an EMM driver is present and a page frame was obtained. *)
+PROCEDURE Present*(): BOOLEAN; EXTERNAL;
+(* GetError: read the LIM EMS error code from the most recent EMS operation.
+   Result: 0 if that operation succeeded, else the driver's AH error code. *)
+PROCEDURE GetError*(): WORD; EXTERNAL;
+(* Alloc: allocate an EMS handle with at least sizeKB of backing storage
+   (rounded up to 16 KB pages).
+   Parameters: sizeKB — requested size in kilobytes (0 rounds up to one
+   16 KB page); handle — receives the new EMS handle on success.
+   Result: TRUE if the allocation succeeded. *)
+PROCEDURE Alloc*(sizeKB: WORD; VAR handle: WORD): BOOLEAN; EXTERNAL;
+(* Free: release an EMS handle and all its pages.
+   Parameters: handle — the EMS handle to free.
+   Result: TRUE if the handle was freed successfully. *)
+PROCEDURE Free*(handle: WORD): BOOLEAN; EXTERNAL;
+(* Realloc: resize an existing EMS handle's backing storage, rounded up to
+   16 KB pages.  A no-op (returns TRUE without a driver call) if the new
+   size already matches the current page count.
+   Parameters: handle — the EMS handle to resize (never changes value: LIM
+   EMS reallocation always keeps the same handle); newSizeKB — requested
+   new size in kilobytes.
+   Result: TRUE if the resize succeeded (or was already the right size). *)
+PROCEDURE Realloc*(VAR handle: WORD; newSizeKB: WORD): BOOLEAN; EXTERNAL;
+(* CopyToEMS: copy bytes from conventional memory into an EMS handle's
+   backing storage (LIM EMS 4.0 Move Memory Region).
+   Parameters: dosBuf — source buffer in conventional memory; handle — target
+   EMS handle; emsOffset — flat byte offset within the handle's storage to
+   copy to; size — number of bytes to copy (0 is a no-op, returns TRUE).
+   Result: TRUE if the copy succeeded. *)
+PROCEDURE CopyToEMS*(VAR dosBuf; handle: WORD; emsOffset: LONGINT; size: WORD): BOOLEAN; EXTERNAL;
+(* CopyToDos: copy bytes from an EMS handle's backing storage into
+   conventional memory (LIM EMS 4.0 Move Memory Region).
+   Parameters: handle — source EMS handle; emsOffset — flat byte offset
+   within the handle's storage to copy from; dosBuf — destination buffer in
+   conventional memory; size — number of bytes to copy (0 is a no-op,
+   returns TRUE).
+   Result: TRUE if the copy succeeded. *)
+PROCEDURE CopyToDos*(handle: WORD; emsOffset: LONGINT; VAR dosBuf; size: WORD): BOOLEAN; EXTERNAL;
+(* Version: query the EMM driver's version number.
+   Result: BCD-encoded version byte (e.g. 40H for version 4.0), or 0 if no
+   driver is present or the query failed. *)
+PROCEDURE Version*(): BYTE; EXTERNAL;
+(* RequireVersion: disable EMS support (as seen by Present) if the detected
+   driver's version is below the given minimum.
+   Parameters: ver — minimum required BCD-encoded version (see VER35/VER40).
+   Result: none. *)
+PROCEDURE RequireVersion*(ver: BYTE); EXTERNAL;
+(* MapPage: map one 16 KB logical page of an EMS handle into one of the
+   page frame's physical window slots, making it addressable via
+   conventional memory (LIM EMS 4.0 Map Handle Page).
+   Parameters: handle — the EMS handle owning the page; logicalPage —
+   0-based logical page number within that handle; physicalPage — which
+   page-frame window to map into (0..MaxPhysicalPages-1).
+   Result: TRUE if the mapping succeeded. *)
+PROCEDURE MapPage*(handle: WORD; logicalPage: WORD; physicalPage: WORD): BOOLEAN; EXTERNAL;
+(* UnmapPage: clear one of the page frame's physical window slots.
+   Parameters: physicalPage — which page-frame window to unmap
+   (0..MaxPhysicalPages-1).
+   Result: TRUE if the unmap succeeded. *)
+PROCEDURE UnmapPage*(physicalPage: WORD): BOOLEAN; EXTERNAL;
+(* MapPtr: map the EMS page containing a given flat offset into a physical
+   window and return a conventional-memory pointer to that offset.
+   Parameters: handle — the EMS handle; emsOffset — flat byte offset within
+   the handle's storage; physWin — which page-frame window to use.
+   Result: far pointer usable to read/write that offset directly, or NIL if
+   the mapping failed. *)
+PROCEDURE MapPtr*(handle: WORD; emsOffset: LONGINT; physWin: WORD): SYSTEM.ADDRESS; EXTERNAL;
 
-VAR
-  driverPresent: BOOLEAN;
-  errorCode: WORD;
-  pageFrameSeg: WORD;
-  pageFrameObtained: BOOLEAN;
+PROCEDURE Detect(); FAR; EXTERNAL;
 
-PROCEDURE Err(AH: INTEGER): WORD;
-BEGIN
-  RETURN WORD(SYSTEM.LSR(AH, 8))
-END Err;
-
-PROCEDURE Present*(): BOOLEAN;
-BEGIN
-  RETURN driverPresent
-END Present;
-
-PROCEDURE Alloc*(sizeKB: WORD; VAR handle: WORD): BOOLEAN;
-  VAR pages: WORD; r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF sizeKB = 0 THEN pages := 1
-  ELSE pages := WORD((LONGINT(sizeKB) + 15) DIV 16)
-  END;
-  r.AX := 4300H;
-  r.BX := INTEGER(pages);
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  IF errorCode = 0 THEN handle := WORD(r.DX) END;
-  RETURN errorCode = 0
-END Alloc;
-
-PROCEDURE Free*(handle: WORD): BOOLEAN;
-  VAR r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  r.AX := 4500H;
-  r.DX := INTEGER(handle);
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  RETURN errorCode = 0
-END Free;
-
-PROCEDURE DoMove(fromEMS: BYTE;
-                 conv : LONGINT; emsHandle: WORD;
-                 ems: LONGINT;
-                 length: WORD): BOOLEAN;
-  VAR desc: MoveDesc; r: SYSTEM.Registers;
-BEGIN
-  (* Per LIM EMS 4.0 move_source_dest_struct, each side packs two WORDs:
-     +0 offset, +2 segment-or-logical-page.
-       - Conventional memory: low word = far-pointer offset, high word =
-         segment.  `conv` is LONGINT(SYSTEM.ADR(buf)) verbatim (ADR already
-         packs segment:offset as high:low).
-       - EMS memory: low word = offset WITHIN the 16 KB logical page, high word
-         = the logical PAGE NUMBER -- NOT a raw byte offset.  `ems` arrives as a
-         flat byte offset, so re-pack it with SYSTEM.PTR(page, offsetInPage).
-         (Passing the raw byte offset is a bug: any offset >= 16384 overflows
-         the 16-bit offset field and corrupts the move.)  Per the LIM EMS 4.0
-         spec, function 57h maps consecutive logical pages of the handle to
-         complete the move, so a length that crosses a page boundary is handled
-         by the EMM and needs no manual splitting here.
-     *Handle is 0 for the conventional side "for future compatibility" -- it is
-     NOT a place to stash the segment. *)
-  ems := LONGINT(SYSTEM.PTR(WORD(ems DIV PageSize), WORD(ems MOD PageSize)));
-  desc.len := LONGINT(length);
-  IF fromEMS = 0 THEN
-    desc.srcType    := 0;
-    desc.srcHandle  := 0;
-    desc.src        := conv;
-    desc.dstType    := 1;
-    desc.dstHandle  := emsHandle;
-    desc.dst        := ems;
-  ELSE
-    desc.srcType    := 1;
-    desc.srcHandle  := emsHandle;
-    desc.src        := ems;
-    desc.dstType    := 0;
-    desc.dstHandle  := 0;
-    desc.dst        := conv
-  END;
-  r.AX := 5700H;
-  r.DS := SYSTEM.SEG(desc);
-  r.SI := SYSTEM.OFS(desc);
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  RETURN errorCode = 0
-END DoMove;
-
-PROCEDURE CopyToEMS*(VAR dosBuf;
-                     handle: WORD;
-                     emsOffset: LONGINT;
-                     size: WORD): BOOLEAN;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF size = 0 THEN errorCode := 0; RETURN TRUE END;
-  RETURN DoMove(0, LONGINT(SYSTEM.ADR(dosBuf)), handle, emsOffset, size)
-END CopyToEMS;
-
-PROCEDURE CopyToDos*(handle: WORD;
-                     emsOffset: LONGINT;
-                     VAR dosBuf;
-                     size: WORD): BOOLEAN;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF size = 0 THEN errorCode := 0; RETURN TRUE END;
-  RETURN DoMove(1, LONGINT(SYSTEM.ADR(dosBuf)), handle, emsOffset, size)
-END CopyToDos;
-
-(* Function 18 (AH=51h, Reallocate Pages) keeps the SAME handle; it never
-   returns a new one in DX -- only BX (the new page count) is meaningful on
-   success.  newHandle is therefore always 'handle' on success. *)
-PROCEDURE Realloc*(VAR handle: WORD; newSizeKB: WORD): BOOLEAN;
-  VAR newPages, curPages: WORD; r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF newSizeKB = 0 THEN newPages := 1
-  ELSE newPages := WORD((LONGINT(newSizeKB) + 15) DIV 16)
-  END;
-  r.AX := 4C00H;
-  r.DX := INTEGER(handle);
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  IF errorCode # 0 THEN RETURN FALSE END;
-  curPages := WORD(r.BX);
-  IF curPages = newPages THEN
-    errorCode := 0;
-    RETURN TRUE
-  END;
-  r.AX := 5100H;
-  r.DX := INTEGER(handle);
-  r.BX := INTEGER(newPages);
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  RETURN errorCode = 0
-END Realloc;
-
-PROCEDURE GetError*(): WORD;
-BEGIN
-  RETURN errorCode
-END GetError;
-
-PROCEDURE Detect;
-  VAR
-      p: POINTER TO ARRAY 8 OF CHAR;
-      r: SYSTEM.Registers;
-BEGIN
-  driverPresent := FALSE;
-  errorCode := 0;
-  pageFrameSeg := 0;
-  pageFrameObtained := FALSE;
-
-  (* INT 21h/AH=35h returns the INT 67h handler segment in ES; a real EMM driver
-     exposes the "EMMXXXX0" device-header signature at ES:000Ah. *)
-  r.AX := 3567H;
-  SYSTEM.Intr(21H, r);
-  p := SYSTEM.PTR(r.ES, 0AH);
-  IF (p^[0] = 'E') & (p^[1] = 'M') & (p^[2] = 'M') & (p^[3] = 'X') &
-     (p^[4] = 'X') & (p^[5] = 'X') & (p^[6] = 'X') & (p^[7] = '0') THEN
-    driverPresent := TRUE;
-    r.AX := 4100H;
-    SYSTEM.Intr(67H, r);
-    errorCode := Err(r.AX);
-    IF errorCode = 0 THEN
-      pageFrameSeg := WORD(r.BX);
-      pageFrameObtained := TRUE
-    END
-  END
-END Detect;
-
-PROCEDURE Version*:BYTE;
-  VAR
-      r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN RETURN 0 END;
-  errorCode := 0;
-  r.AX := 4600H;
-  SYSTEM.Intr(21H, r);
-  errorCode := Err(r.AX);
-  IF errorCode = 0 THEN RETURN SYSTEM.AND(r.AX, 0FFH) END;
-  RETURN 0
-END Version;
-
-PROCEDURE RequireVersion*(ver: BYTE);
-BEGIN
-  IF Version() < ver THEN driverPresent := FALSE END;
-END RequireVersion;
-
-PROCEDURE MapPage*(handle: WORD; logicalPage: WORD; physicalPage: WORD): BOOLEAN;
-  VAR r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF ~pageFrameObtained THEN errorCode := 0FFH; RETURN FALSE END;
-  IF physicalPage >= MaxPhysicalPages THEN errorCode := 0FFH; RETURN FALSE END;
-  r.DX := INTEGER(handle);
-  r.BX := INTEGER(logicalPage);
-  r.AX := SYSTEM.IOR(4400H, BYTE(physicalPage));
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  RETURN errorCode = 0
-END MapPage;
-
-PROCEDURE UnmapPage*(physicalPage: WORD): BOOLEAN;
-  VAR r: SYSTEM.Registers;
-BEGIN
-  IF ~driverPresent THEN errorCode := 0FFH; RETURN FALSE END;
-  IF ~pageFrameObtained THEN errorCode := 0FFH; RETURN FALSE END;
-  IF physicalPage >= MaxPhysicalPages THEN errorCode := 0FFH; RETURN FALSE END;
-  r.AX := 4400H;
-  r.DX := 0;
-  r.BX := 0;
-  r.AX := SYSTEM.IOR(4400H, BYTE(physicalPage));
-  SYSTEM.Intr(67H, r);
-  errorCode := Err(r.AX);
-  RETURN errorCode = 0
-END UnmapPage;
-
-PROCEDURE MapPtr*(handle: WORD; emsOffset: LONGINT; physWin: WORD): SYSTEM.ADDRESS;
-  VAR logicalPage: WORD; offsetInPage: WORD;
-BEGIN
-  logicalPage := WORD(emsOffset DIV PageSize);
-  offsetInPage := WORD(emsOffset MOD PageSize);
-  IF MapPage(handle, logicalPage, physWin) THEN
-    RETURN SYSTEM.PTR(pageFrameSeg + physWin * (PageSize DIV 16), offsetInPage)
-  ELSE
-    RETURN NIL
-  END
-END MapPtr;
+(*$L EMSAPI.RDF*)
 
 BEGIN
   Detect;

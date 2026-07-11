@@ -24,12 +24,17 @@ BEGIN
   END
 END Skip;
 
+(* Open: initialize the In module and prime the lookahead character
+   from standard input; sets Done to TRUE. *)
 PROCEDURE Open*;
 BEGIN
   Done := TRUE;
   ReadChar(ch)
 END Open;
 
+(* Char: read the next character from standard input.
+   Parameters: c — receives the character read.
+   Result: none directly; sets Done to FALSE at end of input (via c). *)
 PROCEDURE Char*(VAR c: CHAR);
 BEGIN
   IF Done THEN
@@ -38,6 +43,9 @@ BEGIN
   END
 END Char;
 
+(* Int: skip leading whitespace and read a signed decimal INTEGER.
+   Parameters: i — receives the parsed value.
+   Result: none directly; sets Done to FALSE if no valid integer is found. *)
 PROCEDURE Int*(VAR i: INTEGER);
 VAR 
   sgn, val: INTEGER;
@@ -65,6 +73,9 @@ BEGIN
   END
 END Int;
 
+(* LongInt: skip leading whitespace and read a signed decimal LONGINT.
+   Parameters: l — receives the parsed value.
+   Result: none directly; sets Done to FALSE if no valid integer is found. *)
 PROCEDURE LongInt*(VAR l: LONGINT);
 VAR 
   sgn: LONGINT;
@@ -91,6 +102,9 @@ BEGIN
   END
 END LongInt;
 
+(* String: skip leading whitespace and read a whitespace-delimited token.
+   Parameters: s — receives the NUL-terminated token (truncated to fit).
+   Result: none directly; sets Done to FALSE if no token is found. *)
 PROCEDURE String*(VAR s: ARRAY OF CHAR);
 VAR i: INTEGER;
 BEGIN

@@ -35,6 +35,9 @@ VAR
     SS: FLD dword [BX]    36 D9 07
     FABS                  D9 E1
     ADD SP, 4             83 C4 04
+
+  Parameters: x — the REAL value.
+  Result: the absolute value of x.
 *)
 PROCEDURE Abs*(x: REAL): REAL;
   INLINE(089H, 0E3H, 036H, 0D9H, 007H, 0D9H, 0E1H, 083H, 0C4H, 004H);
@@ -48,6 +51,9 @@ PROCEDURE Abs*(x: REAL): REAL;
     SS: FLD dword [BX]    36 D9 07
     FMUL ST(0), ST(0)     D8 C8
     ADD SP, 4             83 C4 04
+
+  Parameters: x — the REAL value to square.
+  Result: x*x.
 *)
 PROCEDURE Sqr*(x: REAL): REAL;
   INLINE(089H, 0E3H, 036H, 0D9H, 007H, 0D8H, 0C8H, 083H, 0C4H, 004H);
@@ -62,6 +68,9 @@ PROCEDURE Sqr*(x: REAL): REAL;
     SS: FLD dword [BX]    36 D9 07
     FSQRT                 D9 FA
     ADD SP, 4             83 C4 04
+
+  Parameters: x — the REAL value to take the square root of.
+  Result: sqrt(x); +inf or NaN if x < 0.
 *)
 PROCEDURE Sqrt*(x: REAL): REAL;
   INLINE(089H, 0E3H, 036H, 0D9H, 007H, 0D9H, 0FAH, 083H, 0C4H, 004H);
@@ -82,6 +91,9 @@ PROCEDURE Sqrt*(x: REAL): REAL;
     SS: FISTP word [BX]   36 DF 1F
     SS: MOV AX, [BX]      36 8B 07
     ADD SP, 4             83 C4 04
+
+  Parameters: x — the REAL value to round.
+  Result: the nearest INTEGER, ties rounded to even.
 *)
 PROCEDURE Round*(x: REAL): INTEGER;
   INLINE(089H, 0E3H, 036H, 0D9H, 007H, 036H, 0DFH, 01FH, 036H, 08BH, 007H, 083H, 0C4H, 004H);
@@ -112,6 +124,9 @@ PROCEDURE Round*(x: REAL): INTEGER;
     SS: FLDCW [BX]        36 D9 2F          (restore CW)
     SS: MOV AX, [BX+4]    36 8B 47 04       (get integer result)
     ADD SP, 8             83 C4 08          (release CW area + input)
+
+  Parameters: x — the REAL value to truncate.
+  Result: x truncated toward zero, as an INTEGER.
 *)
 PROCEDURE Trunc*(x: REAL): INTEGER;
   INLINE(083H, 0ECH, 004H, 089H, 0E3H,
@@ -156,10 +171,17 @@ PROCEDURE Trunc*(x: REAL): INTEGER;
     FPTAN                 D9 F2           (ST(0)=1.0, ST(1)=tan(x))
     FSTP ST(0)            DD D8           (pop the 1.0; ST(0)=tan(x))
     ADD SP, 4             83 C4 04
+
+  Parameters: x — angle in radians, |x| < pi/4.
+  Result: tan(x).
 *)
 PROCEDURE Tan*(x: REAL): REAL;
   INLINE(089H, 0E3H, 036H, 0D9H, 007H, 0D9H, 0F2H, 0DDH, 0D8H, 083H, 0C4H, 004H);
 
+(* Int(x): truncate toward zero, return REAL (see the Trunc/Int comment above
+   for the control-word trick shared by both).
+   Parameters: x — the REAL value to truncate.
+   Result: x truncated toward zero, as a REAL. *)
 PROCEDURE Int*(x: REAL): REAL;
   INLINE(083H, 0ECH, 004H, 089H, 0E3H,
          036H, 0D9H, 03FH,
@@ -223,6 +245,9 @@ PROCEDURE Int*(x: REAL): REAL;
     51:  73 02            JNB +2 → 55 (done)
     53:  D9 E0            FCHS                    negate result
     55:  83 C4 04         ADD SP, 4               (done)  pop input REAL
+
+  Parameters: x — any REAL value.
+  Result: arctan(x), in radians.
 *)
 PROCEDURE ArcTan*(x: REAL): REAL;
   INLINE(089H, 0E3H,
@@ -263,6 +288,10 @@ BEGIN
     RETURN x - Int(n) * y
 END Mod;
 
+(* Sin(x): compute the sine of x via the half-angle tangent identity,
+   after reducing x into [0, pi] using periodicity and symmetry.
+   Parameters: x — angle in radians.
+   Result: sin(x). *)
 PROCEDURE Sin*(x: REAL): REAL;
 VAR twoPi, xr, sign, t: REAL;
 BEGIN
@@ -283,11 +312,17 @@ BEGIN
     RETURN sign * (2.0 * t) / (1.0 + Sqr(t))
 END Sin;
 
+(* Cos(x): compute the cosine of x via the identity cos(x) = sin(pi/2 - x).
+   Parameters: x — angle in radians.
+   Result: cos(x). *)
 PROCEDURE Cos*(x: REAL): REAL;
 BEGIN
     RETURN Sin(PI / 2.0 - x)
 END Cos;
 
+(* ArcSin(x): compute the arcsine of x via arcsin(x) = arctan(x/sqrt(1-x^2)).
+   Parameters: x — value in [-1, 1].
+   Result: arcsin(x), in radians; 0.0 if x is outside [-1, 1]. *)
 PROCEDURE ArcSin*(x: REAL): REAL;
 BEGIN
     IF (x < -1.0) OR (x > 1.0) THEN
@@ -303,6 +338,9 @@ BEGIN
     RETURN ArcTan(x / Sqrt(1.0 - Sqr(x)))
 END ArcSin;
 
+(* ArcCos(x): compute the arccosine of x via arccos(x) = pi/2 - arcsin(x).
+   Parameters: x — value in [-1, 1].
+   Result: arccos(x), in radians; 0.0 if x is outside [-1, 1]. *)
 PROCEDURE ArcCos*(x: REAL): REAL;
 BEGIN
     IF (x < -1.0) OR (x > 1.0) THEN

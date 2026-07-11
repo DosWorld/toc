@@ -13,6 +13,9 @@ TYPE
     eof*:    BOOLEAN
   END;
 
+(* OpenHandle: initialize a Rider to read/write through an already-open
+   file handle.
+   Parameters: r — rider to initialize; h — file handle to attach. *)
 PROCEDURE OpenHandle*(VAR r: Rider; h: INTEGER);
 BEGIN
   r.handle := h;
@@ -20,16 +23,23 @@ BEGIN
   r.eof    := FALSE
 END OpenHandle;
 
+(* StdOut: initialize a Rider bound to the standard output handle.
+   Parameters: r — rider to initialize. *)
 PROCEDURE StdOut*(VAR r: Rider);
 BEGIN
   OpenHandle(r, STDOUT)
 END StdOut;
 
+(* StdErr: initialize a Rider bound to the standard error handle.
+   Parameters: r — rider to initialize. *)
 PROCEDURE StdErr*(VAR r: Rider);
 BEGIN
   OpenHandle(r, STDERR)
 END StdErr;
 
+(* ReadChar: read one character through r's handle, advancing r's position.
+   Parameters: r — rider to read from, updated (pos advanced, eof set on
+   end-of-file); ch — set to the character read, or 0X at end-of-file. *)
 PROCEDURE ReadChar*(VAR r: Rider; VAR ch: CHAR);
 BEGIN
   IF SYSTEM.BLOCKREAD(r.handle, ch, 1) = 0 THEN
@@ -40,21 +50,31 @@ BEGIN
   END
 END ReadChar;
 
+(* WriteChar: write one character through r's handle, advancing r's position.
+   Parameters: r — rider to write to, updated (pos advanced on success);
+   ch — character to write. *)
 PROCEDURE WriteChar*(VAR r: Rider; ch: CHAR);
 BEGIN
   IF SYSTEM.BLOCKWRITE(r.handle, ch, 1) = 1 THEN INC(r.pos) END
 END WriteChar;
 
+(* WriteLn: write a CR/LF line terminator through r's handle.
+   Parameters: r — rider to write to, updated. *)
 PROCEDURE WriteLn*(VAR r: Rider);
 BEGIN
   WriteChar(r, 0DX); WriteChar(r, 0AX)
 END WriteLn;
 
+(* WriteStr: write the characters of s (excluding its terminator) through
+   r's handle.
+   Parameters: r — rider to write to, updated; s — string to write. *)
 PROCEDURE WriteStr*(VAR r: Rider; s: ARRAY OF CHAR);
 BEGIN
   INC(r.pos, SYSTEM.BLOCKWRITE(r.handle, s, SYSTEM.LENGTH(s)))
 END WriteStr;
 
+(* WriteInt: write the decimal representation of n through r's handle.
+   Parameters: r — rider to write to, updated; n — value to write. *)
 PROCEDURE WriteInt*(VAR r: Rider; n: LONGINT);
   VAR buf: ARRAY 12 OF CHAR;
       i, k, rem: INTEGER;
@@ -85,6 +105,8 @@ BEGIN
   WriteStr(r, buf)
 END WriteInt;
 
+(* WriteBoolean: write "TRUE" or "FALSE" through r's handle.
+   Parameters: r — rider to write to, updated; n — value to write. *)
 PROCEDURE WriteBoolean*(VAR r: Rider; n: BOOLEAN);
 BEGIN
   IF n THEN WriteStr(r, "TRUE") ELSE WriteStr(r, "FALSE") END;
@@ -97,6 +119,10 @@ BEGIN
   END
 END HexDigit;
 
+(* HexDump: write a classic hex-dump listing (offset, hex bytes, ASCII
+   sidebar) of a memory block through r's handle, 16 bytes per line.
+   Parameters: r — rider to write to, updated; buf — start of the memory
+   block to dump; len — number of bytes to dump. *)
 PROCEDURE HexDump*(VAR r: Rider; VAR buf; len: WORD);
   VAR
       offset, lenL: WORD;

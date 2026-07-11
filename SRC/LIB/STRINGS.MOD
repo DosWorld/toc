@@ -1,6 +1,9 @@
 (*$R-,D-*)
 MODULE Strings;
 
+(* Length: compute the length of a NUL-terminated string.
+   Parameters: s — the string to measure.
+   Result: number of characters before the terminating 0X. *)
 PROCEDURE Length*(s: ARRAY OF CHAR): INTEGER;
 BEGIN
   RETURN SYSTEM.LENGTH(s)
@@ -11,6 +14,10 @@ BEGIN
   RETURN SYSTEM.LENGTH(s)
 END NearLength;
 
+(* Pos: find the first occurrence of pat in s starting the scan at pos.
+   Parameters: pat — substring to search for; s — string to search within;
+   pos — 0-based index to start scanning from.
+   Result: 0-based index of the first match, or -1 if not found. *)
 PROCEDURE Pos*(pat, s: ARRAY OF CHAR; pos: INTEGER): INTEGER;
 VAR i, j, lp, ls, r: INTEGER; found: BOOLEAN;
 BEGIN
@@ -34,6 +41,9 @@ BEGIN
   IF found THEN RETURN i ELSE RETURN -1 END
 END Pos;
 
+(* Append: append s to the end of the NUL-terminated string d, truncating
+   if d's buffer is too small.
+   Parameters: s — string to append; d — destination string, modified in place. *)
 PROCEDURE Append*(s: ARRAY OF CHAR; VAR d: ARRAY OF CHAR);
 VAR dl, len: INTEGER;
 BEGIN
@@ -45,6 +55,10 @@ BEGIN
   END
 END Append;
 
+(* Insert: insert src into dst at position pos, shifting the existing tail
+   right to make room (truncating if dst's buffer is too small).
+   Parameters: src — string to insert; pos — 0-based insertion index (clamped
+   to dst's current length); dst — destination string, modified in place. *)
 PROCEDURE Insert*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
 VAR sl, dl, i, max, tailLen: INTEGER;
 BEGIN
@@ -74,6 +88,10 @@ BEGIN
   END
 END Insert;
 
+(* Delete: remove n characters from s starting at pos, shifting the tail left.
+   Parameters: s — string to modify in place; pos — 0-based index of the first
+   character to remove (clamped to s's length); n — number of characters to
+   remove (clamped so it doesn't run past the end of s). *)
 PROCEDURE Delete*(VAR s: ARRAY OF CHAR; pos, n: INTEGER);
 VAR l, tailLen: INTEGER;
 BEGIN
@@ -92,6 +110,11 @@ BEGIN
   END
 END Delete;
 
+(* Replace: overwrite dst starting at pos with the characters of src (does not
+   shift the remaining tail; truncates if dst's buffer is too small).
+   Parameters: src — replacement text; pos — 0-based index in dst to start
+   overwriting (clamped to dst's current length); dst — destination string,
+   modified in place. *)
 PROCEDURE Replace*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
 VAR sl, dl, n: INTEGER;
 BEGIN
@@ -106,6 +129,11 @@ BEGIN
   IF pos + n > dl THEN dst[pos + n] := 0X END
 END Replace;
 
+(* Extract: copy a substring of src into dst.
+   Parameters: src — source string; pos — 0-based start index (clamped to
+   src's length); n — number of characters to copy (clamped to src's length
+   and dst's buffer size); dst — destination string, overwritten and
+   NUL-terminated. *)
 PROCEDURE Extract*(VAR src: ARRAY OF CHAR; pos, n: INTEGER; VAR dst: ARRAY OF CHAR);
 VAR sl: INTEGER;
 BEGIN
@@ -130,7 +158,9 @@ END Extract;
    .loop: JCXZ .done; MOV AL,ES:[DI]; OR AL,AL; JZ .done
           PUSH CX; MOV AH,0; PUSH AX; MOV AX,BX; MOV CX,43; MUL CX
           POP CX(char); ADD AX,CX; MOV BX,AX; POP CX(count); INC DI; DEC CX; JMP .loop
-   .done: MOV AX,BX *)
+   .done: MOV AX,BX
+   Parameters: str — string to hash.
+   Result: 16-bit hash of str's characters. *)
 PROCEDURE HashCode*(str: ARRAY OF CHAR): WORD;
   INLINE(05FH,007H,059H,0BBH,0F0H,0CBH,0E3H,01CH,026H,08AH,005H,008H,0C0H,074H,015H,
          051H,0B4H,000H,050H,089H,0D8H,0B9H,02BH,000H,0F7H,0E1H,059H,001H,0C8H,089H,0C3H,
@@ -155,17 +185,26 @@ END EqualCase;
    lookup, PredeclType, linker FindSymbol): two INLINE string ops, no per-char
    procedure call.  Comparing LENGTH(a)+1 bytes includes a's terminator, so a
    length mismatch always hits a terminator-vs-char difference first — REPE
-   CMPSB stops there, never reading past the shorter string's buffer. *)
+   CMPSB stops there, never reading past the shorter string's buffer.
+   Parameters: a, b — strings to compare.
+   Result: TRUE if a and b are identical (case-sensitive). *)
 PROCEDURE Equal*(a, b: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   RETURN SYSTEM.COMPARE(a[0], b[0], SYSTEM.LENGTH(a) + 1)
 END Equal;
 
+(* EqualICase: compare two strings for equality, ignoring letter case.
+   Parameters: a, b — strings to compare.
+   Result: TRUE if a and b are identical when case is ignored. *)
 PROCEDURE EqualICase*(a, b: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   RETURN EqualCase(SYSTEM.ADR(a[0]), SYSTEM.ADR(b[0]), TRUE)
 END EqualICase;
 
+(* StartsWith: test whether str begins with substr.
+   Parameters: str — string to test; substr — prefix to look for; ICase —
+   TRUE to ignore letter case during comparison.
+   Result: TRUE if str starts with substr. *)
 PROCEDURE StartsWith*(VAR str: ARRAY OF CHAR; substr: ARRAY OF CHAR; ICase: BOOLEAN): BOOLEAN;
 VAR st, subs : SYSTEM.ADDRESS;
 BEGIN
@@ -179,6 +218,10 @@ BEGIN
   RETURN TRUE
 END StartsWith;
 
+(* EndsWith: test whether str ends with substr.
+   Parameters: str — string to test; substr — suffix to look for; ICase —
+   TRUE to ignore letter case during comparison.
+   Result: TRUE if str ends with substr. *)
 PROCEDURE EndsWith*(VAR str: ARRAY OF CHAR; substr: ARRAY OF CHAR; ICase: BOOLEAN): BOOLEAN;
 VAR ls, lsub: INTEGER;
 BEGIN
@@ -188,6 +231,9 @@ BEGIN
   RETURN EqualCase(SYSTEM.ADR(str[ls-lsub]), SYSTEM.ADR(substr[0]), ICase)
 END EndsWith;
 
+(* Copy: copy src into dst, truncating if dst's buffer is too small.
+   Parameters: src — source string; dst — destination string, overwritten
+   and NUL-terminated. *)
 PROCEDURE Copy*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR len : INTEGER;
 BEGIN
@@ -196,6 +242,9 @@ BEGIN
   dst[len] := 0X
 END Copy;
 
+(* Str: convert a LONGINT to its decimal string representation.
+   Parameters: src — value to convert; dst — destination string, overwritten
+   and NUL-terminated (truncated if dst's buffer is too small). *)
 PROCEDURE Str*(src : LONGINT; VAR dst : ARRAY OF CHAR);
   CONST MaxLen = 12; MinLong = -2147483647 - 1;
   VAR buf : ARRAY MaxLen OF CHAR;
@@ -252,6 +301,11 @@ BEGIN
   END;
 END Str;
 
+(* Val: parse a decimal (optionally signed) integer from s, skipping leading
+   and trailing whitespace.
+   Parameters: s — character pointer to parse from; startFrom — updated by
+   the number of characters consumed while scanning.
+   Result: the parsed LONGINT value. *)
 PROCEDURE Val*(VAR s; VAR startFrom: WORD): LONGINT;
   VAR v: LONGINT; neg: BOOLEAN;
 BEGIN
@@ -267,6 +321,9 @@ BEGIN
   RETURN v
 END Val;
 
+(* AppendInt: append the decimal representation of val to str.
+   Parameters: val — value to convert and append; str — destination string,
+   modified in place. *)
 PROCEDURE AppendInt*(val : LONGINT; VAR str : ARRAY OF CHAR);
 VAR v   : ARRAY 16 OF CHAR;
 BEGIN
@@ -282,6 +339,9 @@ BEGIN
   END
 END HexVal;
 
+(* ByteToHexStr: format val as a 2-digit uppercase hexadecimal string.
+   Parameters: val — byte to format; str — destination string, overwritten
+   and NUL-terminated. *)
 PROCEDURE ByteToHexStr*(val : BYTE; VAR str : ARRAY OF CHAR);
 BEGIN
   str[1] := HexVal(val);  val := SYSTEM.LSR(val, 4);
@@ -289,6 +349,9 @@ BEGIN
   str[2] := 0X;
 END ByteToHexStr;
 
+(* WordToHexStr: format val as a 4-digit uppercase hexadecimal string.
+   Parameters: val — word to format; str — destination string, overwritten
+   and NUL-terminated. *)
 PROCEDURE WordToHexStr*(val : WORD; VAR str : ARRAY OF CHAR);
 BEGIN
   str[3] := HexVal(BYTE(val));  val := SYSTEM.LSR(val, 4);
@@ -298,6 +361,9 @@ BEGIN
   str[4] := 0X;
 END WordToHexStr;
 
+(* AppendHexByte: append the 2-digit hexadecimal representation of val to str.
+   Parameters: val — byte to convert and append; str — destination string,
+   modified in place. *)
 PROCEDURE AppendHexByte*(val : BYTE; VAR str : ARRAY OF CHAR);
 VAR v   : ARRAY 3 OF CHAR;
 BEGIN
@@ -305,6 +371,9 @@ BEGIN
   Append(v, str);
 END AppendHexByte;
 
+(* AppendHexWord: append the 4-digit hexadecimal representation of val to str.
+   Parameters: val — word to convert and append; str — destination string,
+   modified in place. *)
 PROCEDURE AppendHexWord*(val : WORD; VAR str : ARRAY OF CHAR);
 VAR v   : ARRAY 5 OF CHAR;
 BEGIN

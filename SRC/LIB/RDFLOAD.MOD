@@ -331,7 +331,14 @@ END ApplyRecords;
    (if non-NIL); if that returns NIL, BuiltinResolve is tried.  Unresolved
    imports leave their RELOC/SEGRELOC patches untouched — the caller can
    walk the module's imports list (currently private) or simply detect a
-   call into NIL at runtime.  Returns NIL on file/format failure. *)
+   call into NIL at runtime.  Returns NIL on file/format failure.
+   Parameters: fileName — path of the .RDF file to load; resolve — optional
+   user-supplied resolver called before BuiltinResolve for each IMPORT name
+   (pass NIL to use only the built-in table).
+   Result: the loaded module (heap-allocated code/data + export/import
+   lists), or NIL if the file could not be opened, is not a valid RDOFF2
+   signature, or its code/data+bss size exceeds the 65520-byte segment
+   limit. *)
 PROCEDURE LoadLibraryWith*(fileName: ARRAY OF CHAR;
                           resolve: Resolver): RDFModule;
   VAR f: Files.File;
@@ -381,12 +388,20 @@ END LoadLibraryWith;
 
 (* LoadLibrary — convenience wrapper that uses only BuiltinResolve.
    Suitable for RDFs that import nothing or only standard runtime
-   procedures from SYSTEM, Files and Strings. *)
+   procedures from SYSTEM, Files and Strings.
+   Parameters: fileName — path of the .RDF file to load.
+   Result: the loaded module, or NIL on failure (see LoadLibraryWith). *)
 PROCEDURE LoadLibrary*(fileName: ARRAY OF CHAR): RDFModule;
 BEGIN
   RETURN LoadLibraryWith(fileName, NIL)
 END LoadLibrary;
 
+(* GetProcAddress — look up a GLOBAL (exported) symbol by name in an
+   already-loaded module.
+   Parameters: module — a module returned by LoadLibrary/LoadLibraryWith;
+   name — the exported symbol's name as it appears in the RDOFF2 GLOBAL
+   record.
+   Result: the symbol's host-side address, or NIL if no such export exists. *)
 PROCEDURE GetProcAddress*(module: RDFModule; name: ARRAY OF CHAR): SYSTEM.ADDRESS;
   VAR cur: ExportSym;
 BEGIN
@@ -398,6 +413,10 @@ BEGIN
   RETURN NIL
 END GetProcAddress;
 
+(* FreeLibrary — release a loaded module's export/import lists and its
+   heap-allocated code/data blocks.  Safe to call with module = NIL (no-op).
+   Parameters: module — a module returned by LoadLibrary/LoadLibraryWith.
+   Result: none. *)
 PROCEDURE FreeLibrary*(module: RDFModule);
   VAR eNext: ExportSym; iNext: ImportSym;
 BEGIN

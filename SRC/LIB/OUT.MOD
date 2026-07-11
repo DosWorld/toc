@@ -4,25 +4,33 @@ MODULE Out;
 CONST
   STDOUT = 1;
 
+(* Open: initialize the Out module for output. *)
 PROCEDURE Open*;
 BEGIN
 END Open;
 
+(* Char: write a single character to standard output.
+   Parameters: ch — the character to write. *)
 PROCEDURE Char*(ch: CHAR);
 BEGIN
   SYSTEM.DOSCHAR(ch)
 END Char;
 
+(* Ln: write a CR/LF line terminator to standard output. *)
 PROCEDURE Ln*;
 BEGIN
   Char(0DX); Char(0AX)
 END Ln;
 
+(* String: write a NUL-terminated string to standard output.
+   Parameters: s — the character array to write (up to the NUL terminator). *)
 PROCEDURE String*(s: ARRAY OF CHAR);
 BEGIN
   SYSTEM.BLOCKWRITE(STDOUT, s, SYSTEM.LENGTH(s))
 END String;
 
+(* Int: write a LONGINT value in decimal, right-justified in a field.
+   Parameters: l — the value to write; w — minimum field width (padded with spaces). *)
 PROCEDURE Int*(l: LONGINT; w: INTEGER);
 VAR
   n: INTEGER;
@@ -63,6 +71,8 @@ BEGIN
   END
 END HexDigit;
 
+(* Hex: write an INTEGER value as 4 hex digits, right-justified in a field.
+   Parameters: i — the value to write; w — minimum field width (padded with spaces). *)
 PROCEDURE Hex*(i: INTEGER; w: INTEGER);
 VAR
   n: INTEGER;
@@ -81,6 +91,8 @@ BEGIN
   END
 END Hex;
 
+(* Adr: write a SYSTEM.ADDRESS as segment:offset hex.
+   Parameters: p — the address to write. *)
 PROCEDURE Adr*(p: SYSTEM.ADDRESS);
 VAR n : POINTER TO CHAR;
 BEGIN
@@ -90,11 +102,15 @@ BEGIN
   Hex(SYSTEM.OFS(n^), 0)
 END Adr;
 
+(* Boolean: write "TRUE" or "FALSE" to standard output.
+   Parameters: val — the BOOLEAN value to write. *)
 PROCEDURE Boolean*(val: BOOLEAN);
 BEGIN
   IF val THEN String("TRUE") ELSE String("FALSE") END
 END Boolean;
 
+(* HexDump: write a classic hex+ASCII dump of a memory block, 16 bytes per line.
+   Parameters: buf — the memory block to dump; len — number of bytes to dump. *)
 PROCEDURE HexDump*(VAR buf; len: WORD);
   VAR
       offset, lenL: WORD;
