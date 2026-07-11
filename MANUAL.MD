@@ -98,8 +98,7 @@ happen to coincide — code that assumes that is simply wrong here.
 | `LONGREAL` | 8 | IEEE-754 double precision; x87 `ST(0)` |
 | `SET` | 2 | elements `0..15` |
 | `POINTER` | 4 | far: `{offset:word, segment:word}` |
-| `PROCEDURE FAR` (proc variable) | 4 | far: `{offset, segment}` |
-| `PROCEDURE NEAR` (proc variable) | 2 | near: `{offset}` only — same code segment assumed |
+| `PROCEDURE` (proc variable) | 4 | always far: `{offset, segment}` — `PROCEDURE NEAR` as a variable type is a compile error (2026-07-10: proc-typed values are always FAR; the optional `FAR` modifier is a no-op) |
 
 `NIL` is `0000:0000` — both words zero.
 
@@ -153,7 +152,7 @@ smaller and faster at every call site — see the "Visibility / NEAR rule" in
 [`DOCS/IMPLRULE.MD`](DOCS/IMPLRULE.MD).
 
 **Return values:** scalars in `AX`; `LONGINT` and far pointers in `DX:AX`
-(segment in `DX`); a NEAR procedure-variable's value in `AX` only. **A
+(segment in `DX`); procedure-variable values are always far (`DX:AX`). **A
 procedure may not return an array or a record** — there's no hidden
 result-pointer convention, so the result type must be scalar, pointer, or
 procedure.

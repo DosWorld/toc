@@ -132,16 +132,17 @@ PointerType = "POINTER" "TO" type .
    Self-referential pointers (T = POINTER TO RECORD ... next: T END) work.
    Mutual recursion via non-pointer fields is NOT supported. *)
 
-ProcedureType = "PROCEDURE" [ CallingConv ] [ FormalParams ] .
-(* CallingConv is an optional context-sensitive identifier: "FAR" or "NEAR".
-   Default (no modifier) is FAR.
-   FAR  procedural type: 4-byte far pointer {offset:2, segment:2}; only FAR procs assignable.
-   NEAR procedural type: 2-byte near offset; only NEAR procs assignable.
-   A NEAR proc var and a FAR proc var are not assignment-compatible with each other. *)
+ProcedureType = "PROCEDURE" [ "FAR" ] [ FormalParams ] .
+(* Procedure-typed VALUES are always FAR (4-byte far pointer {offset:2, segment:2})
+   — maintainer rule 2026-07-10: "procedure addr always is FAR".
+   "FAR" here is an optional context-sensitive identifier accepted as a no-op.
+   "PROCEDURE NEAR (...)" as a TYPE is a FATAL ERROR (removed 2026-07-10).
+   A FAR proc var may hold a NEAR-declared procedure's address; only the
+   value's storage and indirect-call codegen are FAR. *)
 
 CallingConv = "FAR" | "NEAR" .
 (* Context-sensitive identifier; not a keyword. Valid in:
-   - ProcedureType: "PROCEDURE FAR (...)" or "PROCEDURE NEAR (...)"
+   - ProcedureType: only "FAR" (see above; "NEAR" rejected there)
    - ProcDecl header (after ";"):  "PROCEDURE name; FAR;" or "PROCEDURE name; NEAR;"
    Exported procedures (*) are implicitly FAR and cannot be declared NEAR.
    Nested procedures (inside another procedure) default to NEAR unless FAR is specified. *)

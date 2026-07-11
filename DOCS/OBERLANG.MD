@@ -1080,12 +1080,59 @@ Examples: `Hello_WriteStr`, `Kernel_heap`, `Hello__init`
 
 ### Procedural variables
 
+**Procedure-typed values are ALWAYS FAR (maintainer rule, 2026-07-10/11:
+"procedure addr always is FAR").**  The `PROCEDURE NEAR (...)` TYPE form was
+removed: declaring a proc-typed VAR/field/param type as NEAR is a fatal
+compile error ("PROCEDURE NEAR type is not supported — proc-typed VARs are
+always FAR"); the `FAR` modifier is accepted as a no-op.  This is only about
+the TYPE used for proc *values* — a real procedure's own `NEAR;`/`FAR;`
+declaration (the Visibility/NEAR rule) is unchanged.
+
 | Type | Storage | Assignment | Call |
 |------|---------|------------|------|
-| `PROCEDURE FAR (...)` (default) | 4 bytes `{offset, segment}` | loads `AX=offset, DX=CS`; stores DX:AX | `CALL FAR [BP+n]` (FF 5E) or `CALL FAR [mem]` (FF 1E) |
-| `PROCEDURE NEAR (...)` | 2 bytes `{offset}` | loads `AX=offset` only; stores AX | `CALL NEAR [BP+n]` (FF 56) or `CALL NEAR [mem]` (FF 16) |
+| `PROCEDURE [FAR] (...)` (always FAR) | 4 bytes `{offset, segment}` | loads `AX=offset, DX=CS`; stores DX:AX | `CALL FAR [BP+n]` (FF 5E) or `CALL FAR [mem]` (FF 1E) |
 
-FAR and NEAR proc vars are **not assignment-compatible** — `type_assign_compat` rejects mismatched `is_far`.
+A FAR proc var may hold the address of a NEAR-declared procedure — only the
+variable's own storage and call-through-variable codegen must be FAR.
+
+**STRONG RULE — a procedure-typed value passed or stored as a value must always be
+loaded/compared/called as FAR, even when the underlying procedure is itself
+declared NEAR.** A NEAR procedure's code lives in the same code segment as its
+call sites *only* while every reference to it is a direct, statically-resolved
+`CALL`/`JMP`. The moment its address is taken as a **value** (assigned to a
+`PROCEDURE` type variable/parameter, stored in a record field, compared to
+another proc value, etc.), that value can end up read back and called from a
+*different* code segment than where the procedure lives — the same 8086
+memory model that makes intra-segment NEAR calls cheap makes a NEAR *address
+value* meaningless outside the segment it was taken in. Treat every
+procedure-typed value as FAR for storage/comparison/indirect-call purposes;
+only a direct `CALL`/`JMP` to a known NEAR procedure may skip the segment.
+
+**2026-07-10 bug (found + fixed) — missing relocation for indirect calls
+through a data-segment procedure variable.** `Cgen.CgCallProcVarMem` /
+`CgCallProcVarNearMem` (the `CALL FAR/NEAR [mem]` emitters used when the
+procedure variable is a **module-level `VAR`**, as opposed to a local/param
+living at `[BP+n]`) baked the module-local data offset directly into the
+instruction with a bare `EmitW` and **no relocation** — every sibling
+load/store-from-data-offset helper (`CgLoadMem`, `CgStoreMem`,
+`CgLoadAddrMem`, …) goes through `EmitMemReloc`, which pairs the `EmitW` with
+`Rdoff.RdfAddReloc(..., Rdoff.SegData, FALSE)` so the linker corrects the
+offset once the module's data is placed at its real base inside the combined
+DGROUP; these two did not. The write side (`CgStorePtrMem`, used when
+*assigning* to the proc-typed VAR) already did this correctly, so the STORED
+far pointer itself was correct in the final image — only the READ-and-CALL
+site read from the wrong, un-relocated address, landing on whatever
+unrelated bytes happened to sit at the raw pre-link offset in the final
+binary. Symptom: `Invalid opcode` crash, `CS=0000` in the register dump,
+jumping through garbage. This pattern was previously unexercised: nothing in
+the compiler before 2026-07-10 stored a FAR procedure value into a
+**global** `VAR` and called it later (a transient `Scan.SyscommentHook`
+experiment that session was the first; the shipped fix for the lost-`$M`
+problem is the `MaxPendSys` syscomment *queue* on `Scan.Scanner`, no proc-var
+involved). Fixed by routing both emitters through `EmitMemReloc` like every
+other data-offset site (`CgCallProcVarNearMem` was later deleted outright
+when proc-typed values became FAR-only). See
+`TESTS/FIX/SYSCOMMENT_STACK_BUG.md` for the full trace and isolated repro.
 
 ---
 

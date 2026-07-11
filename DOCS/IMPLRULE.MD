@@ -316,6 +316,52 @@ The compiler runs as a real-mode DOS application (16-bit, large model).
 
 *Strong rule*: Release memory, ASAP !
 
+### Stack size and big stack frames  ← STRONG RULE (2026-07-11)
+
+**No procedure may declare a multi-KB local array.**  A DOS tool linked
+without `$M` gets the default 8192-byte stack: SP starts at 0x1FFE, so a
+frame bigger than ~7 KB **wraps SP around 64 K** — the locals land at
+`SS:0xE000`-ish, which is ~56 KB *above* SS, **inside the DOS heap block**.
+There is no fault: the procedure happily reads/writes someone else's heap
+memory.  `Files.BlockCopy`'s old 8 KB staging buffer did exactly this on
+every `Tar.TarExtract` and silently corrupted StrTab/Files heap data for
+months (opt.md §8) — it surfaced only when the 2026-07 RAM arenas moved live
+symbol data into the blast zone.  Rules:
+
+- Local buffers: **≤ 512 bytes** preferred, 2 KB absolute ceiling (audit the
+  whole call chain if you need even that).  Bigger scratch space goes on the
+  heap (`NEW`/`DISPOSE`) or in a module global.
+- Every long-running tool with deep call chains (the compiler itself) must
+  declare `(*$M ...*)`; the 8192 default is only for small tools.
+- The `$M` in `TOC.MOD` is load-bearing: without it the compiler runs with a
+  256 KB heap max and dies (see next rule) — never remove or reorder it.
+
+### Allocation failure is FATAL — never continue past a NIL `NEW`  ← STRONG RULE (2026-07-11)
+
+When the heap is exhausted, `NEW(p)` yields `p = NIL`; a following
+`p^.field := x` is a **NIL far write into the interrupt vector table** — no
+fault under xt, just silent corruption, and the compile continues producing
+garbage ("undefined identifier" cascades hundreds of lines later; opt.md §8).
+Every `NEW` on a compiler-critical path must check for NIL and latch
+`Err.Error("out of memory (...)")` (fail-fast does the rest).
+`Parser.IdListAppend` and `Syms.SymOpenScope` are the canonical examples;
+StrTab/Syms-arena/Link.SymAlloc/Files already checked.  When adding any new
+`NEW` site, add the check.
+
+### Jump-range discipline: short (rel8) jumps only over FIXED emit sequences  ← STRONG RULE (2026-07-11)
+
+`Cgen.CgCondShort`/`CgPatchShort` (rel8) may only span a **fixed, known-size**
+byte sequence emitted by the same procedure (a NEG skip, a NIL guard — a few
+bytes).  Any jump over a *parsed* region (an expression, a statement, an RHS)
+must use `CgCondNear`/`CgJmpNear`/`CgPatchNear` (rel16): parsed regions have
+unbounded size, and a >127-byte span silently wraps the rel8 **backward into
+the middle of another instruction** (wild execution: hang or invalid opcode).
+This exact bug in the short-circuit `&`/`OR` emitters broke self-hosting
+(opt.md §8).  `CgPatchShort` now latches a fatal
+`"internal: short jump out of range"` when the displacement leaves −128..127
+— if you ever see that error, the fix is to switch the call site to the near
+variants, never to widen the check.
+
 ### Memory-leak discipline — ZERO tolerance  ← CRITICAL
 
 The compiler runs many module compiles **in one process** (the all-in-one build
