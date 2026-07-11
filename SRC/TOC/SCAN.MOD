@@ -5,7 +5,7 @@ MODULE Scan;
   Reads source text from a Files.File handle byte-by-byte, produces tokens.
   No global state: all state lives in the Scanner record passed by VAR.
 *)
-IMPORT Files, Err, Strings;
+IMPORT Files, LogErr, Strings;
 
 CONST
   (* Token kinds -- match scanner.h values exactly *)
@@ -182,7 +182,7 @@ END ReadCh;
 
 PROCEDURE ScanError(VAR s: Scanner; msg: ARRAY OF CHAR);
 BEGIN
-  Err.ErrorInFile(s.filename, LONGINT(s.line), msg)
+  LogErr.ErrorInFile(s.filename, LONGINT(s.line), msg)
 END ScanError;
 
 (* ---- keyword lookup -- linear search over 33 keywords ---- *)
@@ -661,7 +661,7 @@ BEGIN
   Strings.Copy(filename, s.filename);
   s.fileOpen := Files.Reset(s.file, filename);
   IF ~s.fileOpen THEN
-    Err.Error2("cannot open ", filename);
+    LogErr.Error2("cannot open ", filename);
     RETURN
   END;
   ReadCh(s);

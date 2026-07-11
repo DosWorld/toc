@@ -5,7 +5,7 @@ MODULE Def;
   .def file writer (DefWrite) and reader (DefRead).
   Text I/O via Files.File with byte-level helpers.
 *)
-IMPORT Files, Err, Syms, Strings, StrTab;
+IMPORT Files, LogErr, Syms, Strings, StrTab;
 
 CONST
   SegData* = 1;
@@ -417,7 +417,7 @@ BEGIN
   END;
   s := Syms.SymFind(tname);
   IF (s # Syms.NoSym) & (s.kind = Syms.KType) THEN RETURN s.type END;
-  Err.Warn2("unknown type in .def: ", tname);
+  LogErr.Warn2("unknown type in .def: ", tname);
   RETURN Syms.TypeInteger
 END ResolveTypeName;
 
@@ -530,7 +530,7 @@ BEGIN
       ndHead := curInline.inlineList; ndTail := curInline.inlineList;
       (* advance ndTail to the last chunk so InlineAppend appends in order *)
       IF ndTail # NIL THEN WHILE ndTail^.next # NIL DO ndTail := ndTail^.next END END;
-      WHILE (line[i] # 0X) & ~Err.HaveErr() DO
+      WHILE (line[i] # 0X) & ~LogErr.HaveErr() DO
         SkipWS(line, i);
         IF line[i] # 0X THEN
           (* a malformed token (not 'P'/'p', not a digit/'-') makes ReadLong
@@ -542,7 +542,7 @@ BEGIN
           ELSE
             Syms.InlineAppend(ndHead, ndTail, FALSE, BYTE(INTEGER(ReadLong(line, i)) MOD 256), 0)
           END;
-          IF i = before THEN Err.Error("malformed BYTES token in .def") END;
+          IF i = before THEN LogErr.Error("malformed BYTES token in .def") END;
           curInline.inlineList := ndHead; INC(curInline.nInline)
         END
       END

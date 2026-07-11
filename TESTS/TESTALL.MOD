@@ -15,7 +15,7 @@ MODULE Testall;
 
    Output: "PASS: <name>" or "FAIL: <name> (...)" per row, then summary
    lines per section.  Exit code = 0 iff all sections pass. *)
-IMPORT Err, Files, Strings, Dos;
+IMPORT LogErr, Files, Strings, Dos;
 
 CONST
   MaxLine   = 512;
@@ -77,7 +77,7 @@ BEGIN
   Strings.Copy(libDir, from); AppendChar(from, "\");
   Strings.Append("OBERON.OM", from);
   ok := Files.Copy(from, "OBERON.OM");
-  IF ~ok THEN Err.Error("cannot copy OBERON.OM") END
+  IF ~ok THEN LogErr.Error("cannot copy OBERON.OM") END
 END CopyOberonOm;
 
 PROCEDURE ClearWorkdir;
@@ -109,7 +109,7 @@ BEGIN
   Dos.Exec(tool, args);
   IF Dos.DosError # 0 THEN
     Strings.Copy("Dos.Exec err=", msg); Strings.AppendInt(LONGINT(Dos.DosError), msg);
-    Err.Warn(msg);
+    LogErr.Warn(msg);
     RETURN -1
   END;
   RETURN INTEGER(SYSTEM.AND(INTEGER(Dos.DosExitCode), 0FFH))
@@ -318,12 +318,12 @@ PROCEDURE Pass(name: ARRAY OF CHAR);
   VAR msg: ARRAY 256 OF CHAR;
 BEGIN
   Strings.Copy("PASS: ", msg); Strings.Append(name, msg);
-  Err.Info(msg);
+  LogErr.Info(msg);
   INC(passCount)
 END Pass;
 
-(* Fail reports via Err.Error, which latches: the first failure aborts the whole
-   run (no point continuing), so callers must check Err.HaveErr() and stop. *)
+(* Fail reports via LogErr.Error, which latches: the first failure aborts the whole
+   run (no point continuing), so callers must check LogErr.HaveErr() and stop. *)
 PROCEDURE Fail(name, reason: ARRAY OF CHAR);
   VAR msg: ARRAY 256 OF CHAR;
 BEGIN
@@ -331,7 +331,7 @@ BEGIN
   IF reason[0] # 0X THEN
     Strings.Append(" (", msg); Strings.Append(reason, msg); Strings.Append(")", msg)
   END;
-  Err.Error(msg);
+  LogErr.Error(msg);
   INC(failCount)
 END Fail;
 
@@ -530,7 +530,7 @@ END RunExeTestWithDep;
 
 PROCEDURE RunSection17;
 BEGIN
-  Err.Info("== Section 17: executable test modules ==");
+  LogErr.Info("== Section 17: executable test modules ==");
   RunExeTest("17/NUM",   "NUM", "");
   RunExeTest("17/FLOAT", "FLOAT", "");
   RunExeTest("17/CTRL",  "CTRL", "");
@@ -557,7 +557,7 @@ END RunSection17;
 PROCEDURE RunSection18;
   VAR ok: BOOLEAN;
 BEGIN
-  Err.Info("== Section 18: Oberon-port unit tests ==");
+  LogErr.Info("== Section 18: Oberon-port unit tests ==");
 
   (* Pre-compile Oc* dependency chain into CWD *)
   ClearWorkdir;
@@ -568,7 +568,7 @@ BEGIN
         CompileOcMod("PExpr")   & CompileOcMod("PStmt") &
         CompileOcMod("Import")  & CompileOcMod("Parser");
   IF ~ok THEN
-    Err.Error("18/setup (Oc* compile failed)");
+    LogErr.Error("18/setup (Oc* compile failed)");
     INC(failCount); RETURN
   END;
 
@@ -607,7 +607,7 @@ END CheckAbsent;
 
 PROCEDURE RunSysDef;
 BEGIN
-  Err.Info("== SYSTEM.DEF artefact checks ==");
+  LogErr.Info("== SYSTEM.DEF artefact checks ==");
   (* T5: SYSTEM_VAL must be absent ("53 59 53 54 45 4D 5F 56 41 4C") *)
   IF CheckAbsent("53 59 53 54 45 4D 5F 56 41 4C") THEN Pass("sysdef/T5-no-SYSTEM_VAL")
   ELSE Fail("sysdef/T5-no-SYSTEM_VAL", "SYSTEM_VAL found in SYSTEM.DEF") END;
@@ -632,12 +632,12 @@ PROCEDURE Run*;
       manPassStart, manFailStart: INTEGER;
       sumBuf: ARRAY 128 OF CHAR;
 BEGIN
-  Err.Open;
-  Err.SetLevel(Err.LDEBUG);   (* print all levels (INFO/WARN/DEBUG) for the report *)
+  LogErr.Open;
+  LogErr.SetLevel(LogErr.LDEBUG);   (* print all levels (INFO/WARN/DEBUG) for the report *)
   passCount := 0; failCount := 0;
   IF Dos.ParamCount() < 1 THEN
-    Err.Error("usage: testall.exe TOOLDIR [MANIFEST]");
-    Err.Close; SYSTEM.Halt(2)
+    LogErr.Error("usage: testall.exe TOOLDIR [MANIFEST]");
+    LogErr.Close; SYSTEM.Halt(2)
   END;
   Dos.ParamStr(1, toolDir);
   (* Build manifest path in ORIGINAL CWD (we'll open it before chdir). *)
@@ -648,8 +648,8 @@ BEGIN
   END;
 
   IF ~Files.Reset(f, manifest) THEN
-    Err.Error2("FATAL: cannot open manifest: ", manifest);
-    Err.Close; SYSTEM.Halt(3)
+    LogErr.Error2("FATAL: cannot open manifest: ", manifest);
+    LogErr.Close; SYSTEM.Halt(3)
   END;
 
   (* Create TWD subdir under launch CWD and chdir into it.  All compile /
@@ -660,11 +660,11 @@ BEGIN
   IF ~Dos.MkDir("TWD") & (Dos.DosError # 5) & (Dos.DosError # 3) THEN
     Strings.Copy("FATAL: cannot create TWD subdir, err=", sumBuf);
     Strings.AppendInt(LONGINT(Dos.DosError), sumBuf);
-    Err.Error(sumBuf);
-    Err.Close; SYSTEM.Halt(4)
+    LogErr.Error(sumBuf);
+    LogErr.Close; SYSTEM.Halt(4)
   END;
   IF ~Dos.ChDir("TWD") THEN
-    Err.Error("FATAL: cannot chdir into TWD"); Err.Close; SYSTEM.Halt(5)
+    LogErr.Error("FATAL: cannot chdir into TWD"); LogErr.Close; SYSTEM.Halt(5)
   END;
 
   (* From inside TWD, paths into the parent need adjusting:
@@ -705,7 +705,7 @@ BEGIN
         EvalRow(name, fixture, cmd, expect, arg, member)
       END
     END
-  UNTIL done OR Err.HaveErr();   (* fail-fast: a FAIL latched Err, stop the run *)
+  UNTIL done OR LogErr.HaveErr();   (* fail-fast: a FAIL latched LogErr, stop the run *)
   Files.Close(f);
 
   Strings.Copy("Manifest: ", sumBuf);
@@ -713,19 +713,19 @@ BEGIN
   Strings.Append(" pass / ", sumBuf);
   Strings.AppendInt(LONGINT(failCount - manFailStart), sumBuf);
   Strings.Append(" fail", sumBuf);
-  Err.Info(sumBuf);
+  LogErr.Info(sumBuf);
 
-  IF ~Err.HaveErr() THEN RunSection17 END;
-  IF ~Err.HaveErr() THEN RunSection18 END;
-  IF ~Err.HaveErr() THEN RunSysDef END;
+  IF ~LogErr.HaveErr() THEN RunSection17 END;
+  IF ~LogErr.HaveErr() THEN RunSection18 END;
+  IF ~LogErr.HaveErr() THEN RunSysDef END;
 
   Strings.Copy("Total: ", sumBuf);
   Strings.AppendInt(LONGINT(passCount), sumBuf);
   Strings.Append(" pass / ", sumBuf);
   Strings.AppendInt(LONGINT(failCount), sumBuf);
   Strings.Append(" fail", sumBuf);
-  Err.Info(sumBuf);
-  Err.Close;
+  LogErr.Info(sumBuf);
+  LogErr.Close;
   IF failCount # 0 THEN SYSTEM.Halt(1) END
 END Run;
 

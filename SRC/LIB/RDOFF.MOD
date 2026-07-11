@@ -6,7 +6,7 @@ MODULE Rdoff;
   Writer side: ObjFile record, Emit*, Patch*, RdfInit/Free/Write/Load.
   Reader side: ScanHeader, ScanRelocs, ReadCode, ReadData (callback-based).
 *)
-IMPORT Files, Err, Strings;
+IMPORT Files, LogErr, Strings;
 
 CONST
   SegCode* = 0;
@@ -92,10 +92,10 @@ TYPE
   RelocProc*  = PROCEDURE(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                            rrefSeg: INTEGER; rrel: INTEGER);
 
-(* Error reporting goes through module Err (the single error state for the whole
+(* Error reporting goes through module LogErr (the single error state for the whole
    toolchain).  A failure inside a hot per-byte path (EmitByte, RdfSetBss) or a
    reader cannot abort the process — the only SYSTEM.Halt lives in TOC.Run.
-   Err.Error/Error2 latch the error; callers check Err.HaveErr() at a boundary. *)
+   LogErr.Error/Error2 latch the error; callers check LogErr.HaveErr() at a boundary. *)
 
 (* ---- write helpers ---- *)
 
@@ -142,10 +142,10 @@ END AddRelocNode;
 PROCEDURE RdfInit*(obj: ObjFile);
 BEGIN
   IF ~Files.ReWriteTemp(obj^.codeFile) THEN
-    Err.Error("cannot create temp buffer for code"); RETURN
+    LogErr.Error("cannot create temp buffer for code"); RETURN
   END;
   IF ~Files.ReWriteTemp(obj^.dataFile) THEN
-    Files.Close(obj^.codeFile); Err.Error("cannot create temp buffer for data"); RETURN
+    Files.Close(obj^.codeFile); LogErr.Error("cannot create temp buffer for data"); RETURN
   END;
   obj^.codeLen := 0; obj^.dataLen := 0; obj^.bssSize := 0;
   obj^.relocHead := NIL; obj^.relocTail := NIL; obj^.nRelocs := 0;
@@ -205,7 +205,7 @@ BEGIN
        here would let a >64K-byte segment sneak past RdfWriteTo's one-shot
        >= SegLimit check with a falsely-small wrapped value). *)
     IF LONGINT(obj^.codeLen) + LONGINT(n) > LONGINT(SegLimit) THEN
-      Err.Error("error: code segment exceeds limit")
+      LogErr.Error("error: code segment exceeds limit")
     ELSE INC(obj^.codeLen, n) END
   ELSE
     Files.WriteByte(obj^.dataFile, b1);
@@ -213,7 +213,7 @@ BEGIN
     IF n >= 3 THEN Files.WriteByte(obj^.dataFile, b3) END;
     IF n >= 4 THEN Files.WriteByte(obj^.dataFile, b4) END;
     IF LONGINT(obj^.dataLen) + LONGINT(n) > LONGINT(SegLimit) THEN
-      Err.Error("error: data segment exceeds limit")
+      LogErr.Error("error: data segment exceeds limit")
     ELSE INC(obj^.dataLen, n) END
   END
 END emitN;
@@ -233,12 +233,12 @@ BEGIN
   IF seg = SegCode THEN
     Files.WriteWord(obj^.codeFile, w);
     IF LONGINT(obj^.codeLen) + LONGINT(2) > LONGINT(SegLimit) THEN
-      Err.Error("error: code segment exceeds limit")
+      LogErr.Error("error: code segment exceeds limit")
     ELSE INC(obj^.codeLen, 2) END
   ELSE
     Files.WriteWord(obj^.dataFile, w);
     IF LONGINT(obj^.dataLen) + LONGINT(2) > LONGINT(SegLimit) THEN
-      Err.Error("error: data segment exceeds limit")
+      LogErr.Error("error: data segment exceeds limit")
     ELSE INC(obj^.dataLen, 2) END
   END
 END EmitWord;
@@ -248,12 +248,12 @@ BEGIN
   IF seg = SegCode THEN
     Files.BlockWrite(obj^.codeFile, buf^, len);
     IF LONGINT(obj^.codeLen) + LONGINT(len) > LONGINT(SegLimit) THEN
-      Err.Error("error: code segment exceeds limit")
+      LogErr.Error("error: code segment exceeds limit")
     ELSE INC(obj^.codeLen, len) END
   ELSE
     Files.BlockWrite(obj^.dataFile, buf^, len);
     IF LONGINT(obj^.dataLen) + LONGINT(len) > LONGINT(SegLimit) THEN
-      Err.Error("error: data segment exceeds limit")
+      LogErr.Error("error: data segment exceeds limit")
     ELSE INC(obj^.dataLen, len) END
   END
 END EmitBlock;
@@ -266,7 +266,7 @@ BEGIN
      truncating n into it (n can be large: this zero-fills a whole global
      array's worth of data-segment bytes in one call). *)
   IF LONGINT(obj^.dataLen) + n > LONGINT(SegLimit) THEN
-    Err.Error("error: data segment exceeds limit"); RETURN
+    LogErr.Error("error: data segment exceeds limit"); RETURN
   END;
   INC(obj^.dataLen, WORD(n));   (* count the zero-fill bytes so RdfWrite copies them *)
   WHILE n > 128 DO
@@ -377,7 +377,7 @@ END RdfAddSegReloc;
 PROCEDURE RdfSetBss*(obj: ObjFile; size: LONGINT);
 BEGIN
   (* Overflow sets the latch (surfaced at the RdfWrite boundary); cannot Halt. *)
-  IF size > LONGINT(SegLimit) THEN Err.Error("error: bss segment exceeds limit") END;
+  IF size > LONGINT(SegLimit) THEN LogErr.Error("error: bss segment exceeds limit") END;
   obj^.bssSize := size
 END RdfSetBss;
 
@@ -394,14 +394,14 @@ BEGIN
   (* Segment-limit check (moved out of the per-byte EmitByte path).  An overflow
      here means codegen produced a >SegLimit segment; latch and bail. *)
   IF obj^.codeLen >= WORD(SegLimit) THEN
-    Err.Error("error: code segment exceeds limit"); RETURN
+    LogErr.Error("error: code segment exceeds limit"); RETURN
   END;
   IF obj^.dataLen >= WORD(SegLimit) THEN
-    Err.Error("error: data segment exceeds limit"); RETURN
+    LogErr.Error("error: data segment exceeds limit"); RETURN
   END;
   (* A failure latched during code emission (e.g. a write error in EmitByte's
      BlockWrite path) must not produce a truncated .rdf. *)
-  IF Err.HaveErr() THEN RETURN END;
+  IF LogErr.HaveErr() THEN RETURN END;
 
   hlen := 0;
   r := obj^.relocHead;
@@ -500,7 +500,7 @@ BEGIN
   Files.WriteWord(f, 0);
   Files.WriteWord(f, 0);
   Files.WriteDWord(f, 0);
-  IF ~cpOk THEN Err.Error("error: write failed serialising object") END
+  IF ~cpOk THEN LogErr.Error("error: write failed serialising object") END
 END RdfWriteTo;
 
 (* Named-file wrapper: open `filename`, serialise, close.  Keeps OC's MAIN.RDF
@@ -508,9 +508,9 @@ END RdfWriteTo;
 PROCEDURE RdfWrite*(obj: ObjFile; filename: ARRAY OF CHAR);
   VAR f: Files.File;
 BEGIN
-  IF Err.HaveErr() THEN RETURN END;
+  IF LogErr.HaveErr() THEN RETURN END;
   IF ~Files.ReWrite(f, filename) THEN
-    Err.Error2("error: cannot write ", filename); RETURN
+    LogErr.Error2("error: cannot write ", filename); RETURN
   END;
   RdfWriteTo(obj, f);
   Files.Close(f)
@@ -548,7 +548,7 @@ PROCEDURE RdfLoad*(obj: ObjFile; filename: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   IF ~Files.Reset(f, filename) THEN RETURN FALSE END;
   RdfFree(obj); RdfInit(obj);
-  IF Err.HaveErr() THEN Files.Close(f); RETURN FALSE END;
+  IF LogErr.HaveErr() THEN Files.Close(f); RETURN FALSE END;
 
   IF ~CheckSign(f) THEN Files.Close(f); RETURN FALSE END;
 
@@ -661,10 +661,10 @@ PROCEDURE ScanHeader*(VAR path: ARRAY OF CHAR; libOfs: LONGINT;
       slen, filePos: LONGINT;
       tb: BYTE;
 BEGIN
-  IF ~Files.Reset(f, path) THEN Err.Error2("Cannot open: ", path); RETURN END;
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("Cannot open: ", path); RETURN END;
   Files.Seek(f, libOfs);
   IF ~CheckSign(f) THEN
-    Files.Close(f); Err.Error2("Invalid RDOFF2 signature in ", path); RETURN
+    Files.Close(f); LogErr.Error2("Invalid RDOFF2 signature in ", path); RETURN
   END;
 
   Files.ReadDWord(f, rawSize);
@@ -740,7 +740,7 @@ PROCEDURE ScanRelocs*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
       impName: ARRAY 128 OF CHAR;
       tb: BYTE;
 BEGIN
-  IF ~Files.Reset(f, path) THEN Err.Error2("Cannot open: ", path); RETURN END;
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("Cannot open: ", path); RETURN END;
   endHdr  := libOfs + LONGINT(14) + hdrSize;
   nextRec := libOfs + LONGINT(14);
   Files.Seek(f, nextRec);
@@ -791,7 +791,7 @@ PROCEDURE ReadSeg(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
       done: BOOLEAN;
       segPos: LONGINT;
 BEGIN
-  IF ~Files.Reset(f, path) THEN Err.Error2("Cannot open: ", path); RETURN END;
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("Cannot open: ", path); RETURN END;
   dataStart := libOfs + LONGINT(14) + hdrSize;
   Files.Seek(f, dataStart);
   done := FALSE; segPos := dataStart;
@@ -806,7 +806,7 @@ BEGIN
       IF stype = wantType THEN
         Files.Seek(f, segPos);
         IF Files.BlockRead(f, buf^[dstOfs], size) # size THEN
-          Files.Close(f); Err.Error2("Read error in ", path); RETURN
+          Files.Close(f); LogErr.Error2("Read error in ", path); RETURN
         END;
         done := TRUE
       ELSIF slen > LONGINT(0) THEN

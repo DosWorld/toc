@@ -345,7 +345,7 @@ fault under xt, just silent corruption, and the compile continues producing
 garbage ("undefined identifier" cascades hundreds of lines later; found and
 fixed 2026-07-11 — see CLAUDE.md's "Self-hosting RESTORED" changelog entry).
 Every `NEW` on a compiler-critical path must check for NIL and latch
-`Err.Error("out of memory (...)")` (fail-fast does the rest).
+`LogErr.Error("out of memory (...)")` (fail-fast does the rest).
 `Parser.IdListAppend` and `Syms.SymOpenScope` are the canonical examples;
 StrTab/Syms-arena/Link.SymAlloc/Files already checked.  When adding any new
 `NEW` site, add the check.
@@ -396,62 +396,71 @@ The whole compiler/linker funnels every failure to **one** `SYSTEM.Halt`, in
 process: an aborting `SYSTEM.Halt` deep in RDOFF/TAR/Link/Syms/Import would skip
 `Cleanup` and leak the open temp files (the module-graph temp, the symbol/type
 temps, `RDFCODE.TMP`/`RDFDATA.TMP`, the linker spill).  So a fallible operation
-must **report** the error through module **Err** (see below), never halt.  A
-fallible proc reports and `RETURN`s; its caller tests `Err.HaveErr()` at a
+must **report** the error through module **LogErr** (see below), never halt.  A
+fallible proc reports and `RETURN`s; its caller tests `LogErr.HaveErr()` at a
 boundary.  **A report that leaves an object in a state the following code would
 dereference (NIL buffer, NIL symbol, unopened file) MUST be followed by
-`RETURN`** — `Err.Error` does not stop execution by itself.
+`RETURN`** — `LogErr.Error` does not stop execution by itself.
 
 `OC.Cleanup` (FreeMods + `Cgen.CgFree` + `Syms.SymsFree`) is **idempotent** and
 runs on every exit path — success or error — so no temp file or heap block
 survives the process.  `OC.RunBody` returns the exit code (0/1); `OC.Run` does
-`Err.Open; exitCode := RunBody(); Cleanup; Err.Close; SYSTEM.Halt(exitCode)`.
+`LogErr.Open; exitCode := RunBody(); Cleanup; LogErr.Close; SYSTEM.Halt(exitCode)`.
 
-### Error handling: module Err  ← CRITICAL
+### Error handling: module LogErr  ← CRITICAL
 
-**`SRC/TOC/ERR.MOD` (module `Err`) is the SINGLE error state and the SINGLE place
-any message is printed** for the whole toolchain (compiler, linker, olib, tools).
-No other module keeps its own error flag or writes diagnostics directly.
+**`SRC/LIB/LOGERR.MOD` (module `LogErr`, renamed from `LogErr` and moved from
+`SRC/TOC` to `SRC/LIB` 2026-07-11 — now a stdlib module, merged into
+`OBERON.OM` like `Strings`/`Files`) is the SINGLE error state and the SINGLE
+place any message is printed** for the whole toolchain (compiler, linker,
+olib, tools). No other module keeps its own error flag or writes diagnostics
+directly.
 
-- **One latch.** `Err.Error`/`Err.Error2`/`Err.ErrorInFile` set an internal
-  `err` flag and print the message.  `Err.HaveErr()` reads it.  There is **no
-  reset** — the toolchain is **fail-fast**: the first error latches and every
-  later message is swallowed, so the run aborts at the first failure.  Removed
-  (do not reintroduce): `Rdoff.rdfErr`, `Tar.tarErr`, `Link.linkErr`,
-  `PExpr.errors`, `Parser.parserErrors`, `Scan.errCount`, and all `VAR err:
-  BOOLEAN` out-params.  Callers gate on `Err.HaveErr()` instead.
-- **Levels + routing.** `Err.Error` (LERROR) → **stderr** and latches;
-  `Err.Warn`/`Info`/`Debug` (LWARN/LINFO/LDEBUG) → **stdout**, gated by
-  `Err.SetLevel` (default LDEBUG = everything).  `Err.Error2`/`Info2`/`Warn2`
-  take a `msg,arg` pair.  Positional diagnostics from the **scanner, parser and
-  code generator** MUST use the `*InFile` variants (`Err.ErrorInFile`,
-  `Err.WarnInFile`) so every line is `filename(line): message`.
-- **Logging.** `Err.Open` (start of each tool's `Run`) opens `output.log` (every
-  message) and `error.log` (errors only); `Err.Close` (end of `Run`) closes them.
-  Errors go to stderr **and** both logs; warnings/info go to stdout **and**
-  `output.log`.
-- **No wrappers.** Do not wrap `Err`'s procs in per-module `Fatal`/`ErrMsg`
-  helpers, and do not wrap stdlib (`IO`/`Files`/`Strings`) — call `Err.*`
+- **One latch.** `LogErr.Error`/`LogErr.Error2`/`LogErr.ErrorInFile` set an
+  internal `err` flag and print the message.  `LogErr.HaveErr()` reads it.
+  There is **no reset** — the toolchain is **fail-fast**: the first error
+  latches and every later message is swallowed, so the run aborts at the
+  first failure.  Removed (do not reintroduce): `Rdoff.rdfErr`, `Tar.tarErr`,
+  `Link.linkErr`, `PExpr.errors`, `Parser.parserErrors`, `Scan.errCount`, and
+  all `VAR err: BOOLEAN` out-params.  Callers gate on `LogErr.HaveErr()`
+  instead.
+- **Levels + routing.** `LogErr.Error` (LERROR) → **stderr** and latches;
+  `LogErr.Warn`/`Info`/`Debug` (LWARN/LINFO/LDEBUG) → **stdout**, gated by
+  `LogErr.SetLevel` (default LINFO; use `/LOG=debug` etc. to widen).
+  `LogErr.Error2`/`Info2`/`Warn2` take a `msg,arg` pair.  Positional
+  diagnostics from the **scanner, parser and code generator** MUST use the
+  `*InFile` variants (`LogErr.ErrorInFile`, `LogErr.WarnInFile`) so every line
+  is `filename(line): message`.
+- **Logging.** `LogErr.Open` (start of each tool's `Run`) opens `output.log`
+  (every message) and `error.log` (errors only); `LogErr.Close` (end of `Run`)
+  closes them. Errors go to stderr **and** both logs; warnings/info go to
+  stdout **and** `output.log`.
+- **No wrappers.** Do not wrap `LogErr`'s procs in per-module `Fatal`/`ErrMsg`
+  helpers, and do not wrap stdlib (`IO`/`Files`/`Strings`) — call `LogErr.*`
   directly at the site.  Exception (approved): `PExpr.Error`/`Error2`/`Expect`
   and `Parser.Error` are position *injectors* (they add `sc.filename`/`sc.line`
-  then call `Err.ErrorInFile`), not pass-throughs — keep them.  Need a new
-  wrapper? Ask first.  `Err.Info2`/`Warn2` were added *inside* ERR.MOD (not an
-  external wrapper).
+  then call `LogErr.ErrorInFile`), not pass-throughs — keep them.  Need a new
+  wrapper? Ask first.  `LogErr.Info2`/`Warn2` were added *inside* LOGERR.MOD
+  (not an external wrapper).
 - **Tool DATA stays on stdout.** olib's `list` member table and rdfgrep's query
   results are program output, not diagnostics — they stay on `IO`/`Out`; only
-  their error/usage messages go through `Err`.  The manifest harness greps
+  their error/usage messages go through `LogErr`.  The manifest harness greps
   `output.log` for `stderr-contains` rows so it sees diagnostics regardless of
   stream.
-- **Build graph.** `Rdoff`/`Tar` now import `Err`, so any tool linking them
-  (olib, rdfgrep) needs `SRC/TOC/ERR.OM` on its `OBERON_LIB` (already added to the
-  olib/tools Makefiles).
+- **Build graph.** `Rdoff`/`Tar`/`LogErr` all live in `SRC/LIB` now and are
+  merged into `OBERON.OM` — any tool linking them (olib, rdfgrep, toc.exe
+  itself, and future tools like TASM) gets them automatically via the normal
+  `OBERON_LIB=...OBERON.OM` entry; no separate per-module `.OM` path is
+  needed on `OBERON_LIB` any more (the old `SRC/TOC/RDOFF.OM;SRC/TOC/TAR.OM;
+  SRC/TOC/ERR.OM` entries were removed from the tools Makefile).
 
 The same one-Halt shape applies to the standalone tools: `olib` has its body in
 `TOLib.RunBody(): INTEGER`, and its `Run` wraps it with the log lifecycle —
-`Err.Open; rc := RunBody(); Err.Close; SYSTEM.Halt(rc)` (rdfgrep opens the logs
-at the top of `Run` and closes them in its single `Halt` choke point; testall
-opens at the start of `Run` and closes before every `SYSTEM.Halt`).  Every tool
-that uses `Err` MUST bracket its work with `Err.Open` … `Err.Close`.
+`LogErr.Open; rc := RunBody(); LogErr.Close; SYSTEM.Halt(rc)` (rdfgrep opens the
+logs at the top of `Run` and closes them in its single `Halt` choke point;
+testall opens at the start of `Run` and closes before every `SYSTEM.Halt`).
+Every tool that uses `LogErr` MUST bracket its work with `LogErr.Open` …
+`LogErr.Close`.
 
 When adding a new failure path: return/latch it, close what you opened, and add a
 `compile-fails` manifest row proving the compile exits non-zero and leaves no
@@ -657,9 +666,9 @@ single-process self-host's free heap (see [opt_meas.md](../opt_meas.md)).
   field access (`t.form` instead of `Syms.FormOf(t)`).  New code should always
   read fields directly; only guard with `# NIL`/`# Syms.NoType` /
   `# Syms.NoSym` where the pointer is not already known non-NIL.
-- **Chunk-allocation failure** latches `Err` ("out of memory (symbol/type
+- **Chunk-allocation failure** latches `LogErr` ("out of memory (symbol/type
   table)") and returns the last valid record so no `NIL` deref occurs before
-  the compile dies at the next `Err` boundary — fail-fast, single `Halt` in
+  the compile dies at the next `LogErr` boundary — fail-fast, single `Halt` in
   `OC.Run`.
 - Records reachable from a `Symbol`/`TypeDesc` that hold **heap** sub-objects
   (an `InlineNode`/`FwdNode` chunk chain) are registered on a module-global
@@ -1024,7 +1033,7 @@ its closing `S E ...` line always appear directly after that procedure's
   frame collected ≥1 local/param (real TLINK never emits empty scopes).
 - Every extracted `.DBG` temp is closed/deleted on all paths; every new
   chunk table is freed in `LinkFree`. No new `SYSTEM.Halt`, no stdlib
-  wrappers — errors route through `Err`.
+  wrappers — errors route through `LogErr`.
 
 **Field-order gotcha (verified against real TLINK, not assumed):** the
 on-disk `TYPE_RECORD` field order is `id, name, size, class_type,

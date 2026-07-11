@@ -7,7 +7,7 @@ MODULE Cgen;
   Imports Rdoff for ObjFile and low-level emit/reloc primitives.
   Imports Syms for TypeDesc (used in Item).
 *)
-IMPORT Rdoff, Syms, Strings, Err;
+IMPORT Rdoff, Syms, Strings, LogErr;
 
 CONST
   (* item addressing modes *)
@@ -117,7 +117,7 @@ END CgStoreDerefFarSized;
 PROCEDURE CgInit*;
 BEGIN
   NEW(CgObj);
-  Rdoff.RdfInit(CgObj)   (* errors latch in Err; caller checks Err.HaveErr() *)
+  Rdoff.RdfInit(CgObj)   (* errors latch in LogErr; caller checks LogErr.HaveErr() *)
 END CgInit;
 
 PROCEDURE CgFree*();
@@ -367,7 +367,7 @@ BEGIN
      `&`-chain — produced a wild backward jump and broke self-hosting; see
      opt.md §8).  Callers with unbounded spans must use CgCondNear/CgJmpNear. *)
   IF (rel < LONGINT(-128)) OR (rel > LONGINT(127)) THEN
-    Err.Error("internal: short jump out of range (compiler bug — use near jump)")
+    LogErr.Error("internal: short jump out of range (compiler bug — use near jump)")
   END;
   Rdoff.PatchCodeByte(CgObj, bp.offset, BYTE(INTEGER(rel) MOD 256))
 END CgPatchShort;

@@ -30,9 +30,18 @@ OCBOOT = toc_boot.exe
 # cluttered mount dir fragments the heap and breaks the largest module's .rdf
 # allocation ("cannot write Parser.rdf"); the single-process driver keeps the
 # module graph in a temp file (not the heap) and so links the full image cleanly.
+#
+# Rdoff/Tar/LogErr (2026-07-11: moved from SRC/TOC to SRC/LIB, LogErr renamed
+# from Err) are NOT listed here even though TOC.MOD/CGEN.MOD/LINK.MOD/etc.
+# `IMPORT` them: they are stdlib modules now, merged into OBERON.OM (copied
+# into this dir below), exactly like Strings/Files/IO always were.  The
+# compiler's own dep-scanner (TOC.MOD's FindSrc) only searches the CWD with
+# no OBERON_LIB entry here, so it will not find RDOFF.MOD/TAR.MOD/LOGERR.MOD
+# as source and will correctly treat them as .OM-only dependencies (same
+# path every other stdlib import already takes during self-host).
 OC_SRCS = \
-    RDOFF.MOD TAR.MOD SCAN.MOD STRTAB.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
-    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD ERR.MOD TOC.MOD
+    SCAN.MOD STRTAB.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
+    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD TOC.MOD
 
 all: TOC.exe
 

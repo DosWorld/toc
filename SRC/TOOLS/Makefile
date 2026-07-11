@@ -8,7 +8,9 @@
 #   tolib.exe      .OM archive manager (list/extract/create/merge)
 #
 # Uses BIN/TOC.EXE (built from SRC/TOC) via xt.
-# OBERON_LIB points to OBERON.OM (stdlib) and compiler .OM files (Rdoff, Tar).
+# OBERON_LIB points to OBERON.OM, which supplies the whole stdlib including
+# Rdoff/Tar/LogErr (moved into SRC/LIB and merged into OBERON.OM, 2026-07-11;
+# LogErr was renamed from Err) — no separate .OM entries needed for them.
 #
 # Usage:
 #   make           — build all tools, install into ../../BIN/
@@ -20,10 +22,8 @@ BINDIR  = ../../BIN
 XT      = xt
 
 # Mount oberonc/ root at C:\
-# OBERON_LIB: stdlib + compiler modules that tools import (Rdoff, Tar) plus
-# Err.OM (Rdoff/Tar now report through the shared Err module).
 XTRUN = $(XT) run --max=200000000 -c ../../
-OBERON_LIB = BIN/OBERON.OM;SRC/TOC/RDOFF.OM;SRC/TOC/TAR.OM;SRC/TOC/ERR.OM
+OBERON_LIB = BIN/OBERON.OM
 
 TOOLS = $(BINDIR)/RDFGREP.EXE $(BINDIR)/TESTALL.EXE $(BINDIR)/TDINFO.EXE $(BINDIR)/TOSTRIP.EXE $(BINDIR)/TOLIB.EXE
 

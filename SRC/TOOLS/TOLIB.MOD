@@ -10,7 +10,7 @@ MODULE TOLib;
 
   Uses the shared Tar module for all archive I/O.
 *)
-IMPORT Dos, Files, IO, Err, Strings, Tar;
+IMPORT Dos, Files, IO, LogErr, Strings, Tar;
 
 CONST
   MaxPath = 128;
@@ -58,19 +58,19 @@ PROCEDURE CmdExtract(archPath, memberName, outPath: ARRAY OF CHAR): INTEGER;
 BEGIN
   ok := Tar.TarExtract(archPath, memberName, tmp);
   IF ~ok THEN
-    Err.Error2("olib: member not found: ", memberName);
+    LogErr.Error2("olib: member not found: ", memberName);
     RETURN 1
   END;
 
   IF ~Files.ReWrite(fout, outPath) THEN
-    Err.Error2("olib: cannot write: ", outPath);
+    LogErr.Error2("olib: cannot write: ", outPath);
     Files.Close(tmp);   (* TAR$$.TMP auto-deletes on close *)
     RETURN 1
   END;
   n := Files.BlockRead(tmp, buf[0], 512);
   WHILE n > 0 DO
     IF Files.BlockWrite(fout, buf[0], WORD(n)) # WORD(n) THEN
-      Err.Error2("olib: write failed: ", outPath);
+      LogErr.Error2("olib: write failed: ", outPath);
       Files.Close(fout); Files.Close(tmp);
       RETURN 1
     END;
@@ -107,7 +107,7 @@ PROCEDURE AddFileToArchive(VAR fout: Files.File; filePath: ARRAY OF CHAR): BOOLE
       fsize: LONGINT;
 BEGIN
   IF ~Files.Reset(fin, filePath) THEN
-    Err.Error2("olib: cannot open: ", filePath);
+    LogErr.Error2("olib: cannot open: ", filePath);
     RETURN FALSE
   END;
   fsize := Files.Size(fin);
@@ -144,20 +144,20 @@ END OnMergeMember;
 
 PROCEDURE Usage;
 BEGIN
-  Err.Info("olib - .OM archive manager");
-  Err.Info("Usage:");
-  Err.Info("  tolib list    FILE.OM");
-  Err.Info("  tolib extract FILE.OM MEMBER OUTFILE");
-  Err.Info("  tolib create  OUT.OM  FILE ...");
-  Err.Info("  tolib merge   OUT.OM  IN.OM ...");
-  Err.Info("  @listfile    expand file with one arg per line (any command)")
+  LogErr.Info("olib - .OM archive manager");
+  LogErr.Info("Usage:");
+  LogErr.Info("  tolib list    FILE.OM");
+  LogErr.Info("  tolib extract FILE.OM MEMBER OUTFILE");
+  LogErr.Info("  tolib create  OUT.OM  FILE ...");
+  LogErr.Info("  tolib merge   OUT.OM  IN.OM ...");
+  LogErr.Info("  @listfile    expand file with one arg per line (any command)")
 END Usage;
 
 (* ---- entry point ---- *)
 
 (* Body of olib: returns the process exit code.  ALL error paths return a code
    here; the ONLY SYSTEM.Halt lives in Run.  Tar can no longer abort the process
-   (it latches via Err.HaveErr()), so create/merge check the latch. *)
+   (it latches via LogErr.HaveErr()), so create/merge check the latch. *)
 PROCEDURE RunBody(): INTEGER;
   VAR cmd:  ARRAY 16 OF CHAR;
       args: ARRAY MaxArgs OF ARRAY MaxPath OF CHAR;
@@ -202,7 +202,7 @@ BEGIN
         IF (li > 0) & (nArgs < MaxArgs) THEN INC(nArgs) END;
         Files.Close(lf)
       ELSE
-        Err.Error2("olib: cannot open list file: ", line);
+        LogErr.Error2("olib: cannot open list file: ", line);
         RETURN 1
       END
     ELSE
@@ -225,7 +225,7 @@ BEGIN
   ELSIF Strings.EqualICase(cmd, "create") THEN
     IF nArgs < 2 THEN Usage; RETURN 1 END;
     IF ~Files.ReWrite(fout, args[0]) THEN
-      Err.Error2("olib: cannot create: ", args[0]);
+      LogErr.Error2("olib: cannot create: ", args[0]);
       RETURN 1
     END;
     Tar.TarBegin(fout);
@@ -237,12 +237,12 @@ BEGIN
       INC(i)
     END;
     IF ok THEN Tar.TarEnd(fout); Files.Close(fout) END;
-    IF Err.HaveErr() THEN ret := 1 END
+    IF LogErr.HaveErr() THEN ret := 1 END
 
   ELSIF Strings.EqualICase(cmd, "merge") THEN
     IF nArgs < 2 THEN Usage; RETURN 1 END;
     IF ~Files.ReWrite(mergeOut, args[0]) THEN
-      Err.Error2("olib: cannot create: ", args[0]);
+      LogErr.Error2("olib: cannot create: ", args[0]);
       RETURN 1
     END;
     Tar.TarBegin(mergeOut);
@@ -254,10 +254,10 @@ BEGIN
     END;
     Tar.TarEnd(mergeOut);
     Files.Close(mergeOut);
-    IF Err.HaveErr() THEN ret := 1 END
+    IF LogErr.HaveErr() THEN ret := 1 END
 
   ELSE
-    Err.Error2("olib: unknown command: ", cmd);
+    LogErr.Error2("olib: unknown command: ", cmd);
     Usage; ret := 1
   END;
 
@@ -267,10 +267,10 @@ END RunBody;
 PROCEDURE Run*;
   VAR rc: INTEGER;
 BEGIN
-  IO.StdOut(outRider);     (* list output is tool DATA on stdout; diagnostics go via Err *)
-  Err.Open;
+  IO.StdOut(outRider);     (* list output is tool DATA on stdout; diagnostics go via LogErr *)
+  LogErr.Open;
   rc := RunBody();
-  Err.Close;
+  LogErr.Close;
   SYSTEM.Halt(rc)          (* the ONE and ONLY SYSTEM.Halt in olib *)
 END Run;
 

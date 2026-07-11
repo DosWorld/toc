@@ -5,7 +5,7 @@ MODULE Parser;
   module-level code (module init, __init guard, dep calls).
   Expressions: PExpr.  Statements: PStmt.
 *)
-IMPORT Dos, Files, Err, Scan, Syms, Cgen, Rdoff, Tar, Def, Import,
+IMPORT Dos, Files, LogErr, Scan, Syms, Cgen, Rdoff, Tar, Def, Import,
        PExpr, PStmt, TDbg, Strings, StrTab;
 
 CONST
@@ -233,7 +233,7 @@ BEGIN
        what broke self-hosting when a $M-less build ran with the 256 KB
        default heap (fixed 2026-07-11; see DOCS/IMPLRULE.MD §"Allocation
        failure is FATAL"). *)
-    Err.Error("out of memory (ident list)");
+    LogErr.Error("out of memory (ident list)");
     RETURN head
   END;
   Strings.Copy(name, n^.name); n^.exported := exported; n^.next := NIL;
@@ -863,7 +863,7 @@ BEGIN
       Strings.Append(" '", what);
       Strings.Append(nbuf, what);
       Strings.Append("' declared but never used", what);
-      Err.WarnInFile(PExpr.sc.filename, LONGINT(s.declLine), what)
+      LogErr.WarnInFile(PExpr.sc.filename, LONGINT(s.declLine), what)
     END;
     s := s.next
   END
@@ -986,9 +986,9 @@ PROCEDURE ParseModule*(VAR s: Scan.Scanner);
 BEGIN
   PExpr.sc := s;
   Syms.SymInit;
-  IF Err.HaveErr() THEN RETURN END;
+  IF LogErr.HaveErr() THEN RETURN END;
   Cgen.CgInit;
-  IF Err.HaveErr() THEN Syms.SymsFree(); RETURN END;
+  IF LogErr.HaveErr() THEN Syms.SymsFree(); RETURN END;
   Import.ResetLoaded();
   Cgen.EmitDataZero(2);
   PExpr.modUsesFpu := FALSE;
@@ -1079,7 +1079,7 @@ BEGIN
   END;
 
   (* validate /ENTRY= proc *)
-  IF (parserEntryProc # "") & ~Err.HaveErr() THEN
+  IF (parserEntryProc # "") & ~LogErr.HaveErr() THEN
     sym := Syms.SymFind(parserEntryProc);
     IF (sym = Syms.NoSym) OR (sym.kind # Syms.KProc) OR (sym.level # 0) THEN
       PExpr.Error2("/ENTRY= procedure not found", parserEntryProc)
@@ -1150,7 +1150,7 @@ BEGIN
   (* debug info: module code length for the SEGMENT slice *)
   TDbg.SetCodeLen(WORD(Rdoff.CodeLen(Cgen.CgObj)));
 
-  IF ~Err.HaveErr() THEN
+  IF ~LogErr.HaveErr() THEN
     (* sanitise-import: drop IMPORT records (and their CALL sites) for
        modules whose only reference was the __init dep call. *)
     SanitizeImports;
@@ -1159,9 +1159,9 @@ BEGIN
        are streamed straight into the .om.  rdfName/defName are still used as the
        tar MEMBER names so the archive layout is byte-identical to before. *)
     rfOpen := Files.ReWriteTemp(rf);
-    IF ~rfOpen THEN Err.Error("oc: cannot create .rdf temp")
+    IF ~rfOpen THEN LogErr.Error("oc: cannot create .rdf temp")
     ELSE Rdoff.RdfWriteTo(Cgen.CgObj, rf) END;
-    IF Err.HaveErr() THEN
+    IF LogErr.HaveErr() THEN
       IF rfOpen THEN Files.Close(rf) END
     ELSE
     (* write .def into a temp *)
@@ -1169,7 +1169,7 @@ BEGIN
     IF dfOpen THEN
       Def.DefWrite(df, modName)
     ELSE
-      Err.Error("oc: cannot create .def temp")
+      LogErr.Error("oc: cannot create .def temp")
     END;
     (* write .DBG into a temp — always present (0-byte when $D-); the writer
        emits nothing when collection was disabled. *)
@@ -1177,7 +1177,7 @@ BEGIN
     IF dgOpen THEN
       TDbg.WriteDbg(dg)
     ELSE
-      Err.Error("oc: cannot create .dbg temp")
+      LogErr.Error("oc: cannot create .dbg temp")
     END;
     (* Symbol table is no longer needed: .def captures all exported info.
        Release it now to free DOS heap before the entry-stub generator
@@ -1236,23 +1236,23 @@ BEGIN
           END;
           Files.Close(sf)
         ELSE
-          Err.Error2("oc: cannot open extra rdf ", er^.path^)
+          LogErr.Error2("oc: cannot open extra rdf ", er^.path^)
         END;
         er := er^.next
       END;
       Tar.TarEnd(lf);
       Files.Close(lf)
     ELSE
-      Err.Error2("oc: cannot create ", libName)
+      LogErr.Error2("oc: cannot create ", libName)
     END;
     (* close (auto-delete) the .rdf/.def/.dbg temps *)
     Files.Close(rf);
     IF dfOpen THEN Files.Close(df) END;
     IF dgOpen THEN Files.Close(dg) END;
-    IF ~Err.HaveErr() THEN Err.Info2("wrote ", libName) END
-    END   (* IF Err.HaveErr() *)
+    IF ~LogErr.HaveErr() THEN LogErr.Info2("wrote ", libName) END
+    END   (* IF LogErr.HaveErr() *)
   END;
-  (* On error, the failing diagnostic was already reported through Err; the
+  (* On error, the failing diagnostic was already reported through LogErr; the
      latch suppresses any further output, so nothing more is printed here. *)
   (* Release the symbol/type/scope arena on EVERY path.  The success branch
      already freed it (line ~1132, before .om packing); the error branch did not,

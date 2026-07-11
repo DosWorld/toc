@@ -98,6 +98,46 @@ xt run --max=50000000 -c . 'BOOT/TOC.EXE' /SYSTEM 'SRC/LIB\SYSTEM.MOD'
 After editing `SYS.ASM`, you must manually reassemble with a RDOFF2-capable NASM
 (older version) or patch the binary directly, then run `cd SRC/LIB && make install`.
 
+### Compile the EMS module
+
+`EMS.om` follows the exact same two-source pattern as `SYSTEM.om`:
+
+- `SRC/LIB/EMS.MOD` — bare `PROCEDURE ...; EXTERNAL;` declarations only
+  (`Present`/`GetError`/`Alloc`/`Free`/`Realloc`/`CopyToEMS`/`CopyToDos`/
+  `Version`/`RequireVersion`/`MapPage`/`UnmapPage`/`MapPtr`/`Detect`) — no
+  Oberon-side logic at all, same shape as `SYSTEM.MOD`'s `Alloc`/`Free`/
+  `S32MUL` stubs
+- `SRC/LIB/EMSAPI.RDF` — pre-assembled RDOFF2 object for
+  `SRC/LIB/EMSAPI.ASM` (the full LIM EMS 4.0 page-frame driver
+  implementation in hand-assembled 8086: KB→pages rounding, the
+  `move_source_dest_struct` packing for `CopyToEMS`/`CopyToDos` — via a
+  static `moveDesc` scratch buffer in `.data`, not a per-call stack frame —
+  page-frame pointer arithmetic in `MapPtr`, and the `driverPresent`/
+  `pageFrameObtained`/`pageFrameSeg`/`errorCode` module state, which lives
+  in `EMSAPI.ASM`'s own `.data` section rather than `EMS.MOD` `VAR`s);
+  packed into the output `.om` via a `(*$L EMSAPI.RDF*)` directive in
+  `EMS.MOD`
+
+**IMPORTANT — `EMSAPI.RDF` is a checked-in binary**, same as `SYS.RDF`:
+`SRC/LIB/Makefile` has **no rule** to rebuild it from `EMSAPI.ASM`. After
+editing `EMSAPI.ASM`, reassemble with a RDOFF2-capable NASM (older version)
+or patch the binary directly, then run `cd SRC/LIB && make install`.
+
+Every LIM EMS 4.0 function code (`AH=43h` Allocate Pages, `45h` Deallocate,
+`4Ch`/`51h` Get/Reallocate Pages, `57h` Move Memory Region, `44h` Map
+Handle Page, `46h` Get Version) plus the `INT 21h`/AH=35h driver-detection
+probe are issued directly from `EMSAPI.ASM` via `INT 67h`/`INT 21h` — no
+`SYSTEM.Registers` record or `SYSTEM.Intr` call anywhere in the EMS path.
+`EMSAPI.ASM`'s own routines never call one another's `global` FAR entry
+points (an intra-file FAR `call` needs a segment-base reference only a real
+RDOFF-relocatable build can resolve); where logic must be shared (e.g.
+`EMS_Version`/`EMS_RequireVersion`), it is factored into a `NEAR` helper
+instead, matching `SYS.ASM`'s own `div_kernel_32`/`check_8087`/`MEM_INIT`
+pattern. `EMSAPI.ASM` accesses its own `.data` state the same way
+`SYS.ASM` does — `mov ax, seg driverPresent` / `mov ds, ax` before any
+read/write, never `mov ax, cs`, since `.data` and `.text` are distinct
+segments in this linking model.
+
 The `/SYSTEM` flag disables the implicit SYSTEM import that every other module receives:
 - No `SYSTEM.def` is auto-loaded at startup
 - `IMPORT SYSTEM` in the source is allowed (not rejected as it would be normally)
@@ -256,9 +296,10 @@ the `/ENTRY=` value keeps its case.  Any other option is a fatal `unknown option
   loads the trailing block — debugger-only data).  Inspect with
   `BIN/TDINFO.EXE FILE.EXE`.  Details: `DOCS/OBERLANG.MD` §"Debug info",
   `DOCS/IMPLRULE.MD` §".DBG file format", `DOCS/TD-SPEC.MD`.
-- `/LOG=level` — set diagnostic verbosity for `Err` (case-insensitive):
-  `debug`, `info`, `warn`, or `error`.  Calls `Err.SetLevel`; the module's own
-  compiled-in default is otherwise unchanged (no other code path calls
+- `/LOG=level` — set diagnostic verbosity for `LogErr` (case-insensitive,
+  module renamed from `Err` and moved to `SRC/LIB` 2026-07-11):
+  `debug`, `info`, `warn`, or `error`.  Calls `LogErr.SetLevel`; the module's
+  own compiled-in default is otherwise unchanged (no other code path calls
   `SetLevel`).  At the default level, non-fatal `WarnInFile` messages
   (dead-code/unused-symbol warnings) are suppressed — use `/LOG=warn` or
   `/LOG=debug` to see them.  All Makefiles in this repo pass `/LOG=debug`.

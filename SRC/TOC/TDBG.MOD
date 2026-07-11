@@ -20,7 +20,7 @@ MODULE TDbg;
   never copied — Parser hands out the same pointer everywhere a named type
   is used), so lookup is a linear scan of a small chunked table.
 *)
-IMPORT Files, Strings, Syms, StrTab, Err;
+IMPORT Files, Strings, Syms, StrTab, LogErr;
 
 CONST
   LineChunk = 128;
@@ -145,7 +145,7 @@ BEGIN
   IF (line = lastLine) OR ((lineHead # NIL) & (codeOfs = lastOfs)) THEN RETURN END;
   IF (lineTail = NIL) OR (lineTail^.count = LineChunk) THEN
     NEW(n);
-    IF n = NIL THEN Err.Error("out of memory (debug line list)"); RETURN END;
+    IF n = NIL THEN LogErr.Error("out of memory (debug line list)"); RETURN END;
     n^.count := 0; n^.next := NIL;
     IF lineTail # NIL THEN lineTail^.next := n ELSE lineHead := n END;
     lineTail := n
@@ -179,7 +179,7 @@ PROCEDURE MapAdd(t: Syms.TypeDesc; idx: WORD);
 BEGIN
   IF (mapTail = NIL) OR (mapTail^.count = MapChunk) THEN
     NEW(n);
-    IF n = NIL THEN Err.Error("out of memory (debug type-map list)"); RETURN END;
+    IF n = NIL THEN LogErr.Error("out of memory (debug type-map list)"); RETURN END;
     n^.count := 0; n^.next := NIL;
     IF mapTail # NIL THEN mapTail^.next := n ELSE mapHead := n END;
     mapTail := n
@@ -196,7 +196,7 @@ PROCEDURE NewTypeRec(): WORD;
 BEGIN
   IF (typeTail = NIL) OR (typeTail^.count = TypeChunk) THEN
     NEW(n);
-    IF n = NIL THEN Err.Error("out of memory (debug type-record list)"); RETURN 0 END;
+    IF n = NIL THEN LogErr.Error("out of memory (debug type-record list)"); RETURN 0 END;
     n^.count := 0; n^.next := NIL;
     IF typeTail # NIL THEN typeTail^.next := n ELSE typeHead := n END;
     typeTail := n
@@ -226,7 +226,7 @@ PROCEDURE NewMembRec(info: BYTE; typ: WORD; VAR name: ARRAY OF CHAR): WORD;
 BEGIN
   IF (membTail = NIL) OR (membTail^.count = MembChunk) THEN
     NEW(n);
-    IF n = NIL THEN Err.Error("out of memory (debug member-record list)"); RETURN 0 END;
+    IF n = NIL THEN LogErr.Error("out of memory (debug member-record list)"); RETURN 0 END;
     n^.count := 0; n^.next := NIL;
     IF membTail # NIL THEN membTail^.next := n ELSE membHead := n END;
     membTail := n
@@ -307,7 +307,7 @@ BEGIN
   IF ~enabled THEN RETURN END;
   IF (symTail = NIL) OR (symTail^.count = SymChunk) THEN
     NEW(n);
-    IF n = NIL THEN Err.Error("out of memory (debug symbol list)"); RETURN END;
+    IF n = NIL THEN LogErr.Error("out of memory (debug symbol list)"); RETURN END;
     n^.count := 0; n^.next := NIL;
     IF symTail # NIL THEN symTail^.next := n ELSE symHead := n END;
     symTail := n

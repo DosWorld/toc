@@ -1,5 +1,5 @@
-(*D+*)
-MODULE Err;
+(*$D-*)
+MODULE LogErr;
 
 IMPORT IO, Files, Strings;
 
@@ -188,4 +188,4 @@ BEGIN
   SetLevel(LINFO);
   logOpen := FALSE;
   err := FALSE
-END Err.
+END LogErr.

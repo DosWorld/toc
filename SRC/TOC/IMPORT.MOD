@@ -13,7 +13,7 @@ MODULE Import;
   OBERON_LIB contains semicolon-separated paths to .OM archive files, e.g.:
     OBERON_LIB=C:\OBERON\OBERON.OM;C:\OBERON\MYLIB.OM
 *)
-IMPORT Dos, Files, Err, Def, Tar, Strings;
+IMPORT Dos, Files, LogErr, Def, Tar, Strings;
 
 CONST
   NameLen = 40;
@@ -53,7 +53,7 @@ BEGIN
   END;
   NEW(p);
   IF p = NIL THEN
-    Err.Error("out of memory (loaded-import list)");
+    LogErr.Error("out of memory (loaded-import list)");
     RETURN FALSE
   END;
   Strings.Copy(alias, p^.alias); p^.next := loadedHead; loadedHead := p;
@@ -168,7 +168,7 @@ END FindImportFile;
 (* ---- public API ---- *)
 
 (* A missing/unresolvable import is a normal compile error, not a process abort:
-   report it via Err (latches, fail-fast); the caller checks Err.HaveErr().  The
+   report it via LogErr (latches, fail-fast); the caller checks LogErr.HaveErr().  The
    only SYSTEM.Halt lives in TOC.Run. *)
 PROCEDURE LoadExplicitImport*(modName, alias: ARRAY OF CHAR);
   VAR deffile: ARRAY NameLen OF CHAR;
@@ -181,7 +181,7 @@ BEGIN
   Strings.Append(".def", deffile);
 
   IF ~FindImportFile(deffile, f) THEN
-    (* One message: the Err latch prints only the first line, so assemble the
+    (* One message: the LogErr latch prints only the first line, so assemble the
        full diagnostic before reporting it once. *)
     Strings.Copy("cannot find module '", msg);
     Strings.Append(modName, msg);
@@ -191,7 +191,7 @@ BEGIN
       Strings.Append(" and OBERON_LIB=", msg);
       Strings.Append(env, msg)
     END;
-    Err.Error(msg); RETURN
+    LogErr.Error(msg); RETURN
   END;
 
   Def.DefRead(f, alias);

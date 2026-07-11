@@ -14,6 +14,9 @@ toc MATH.MOD
 toc IO.MOD
 toc RDFLOAD.MOD
 toc TEST.MOD
+toc LOGERR.MOD
+toc RDOFF.MOD
+toc TAR.MOD
 
 echo SYSTEM.MOD > oberon.lst
 echo OUT.MOD >> oberon.lst
@@ -28,6 +31,9 @@ echo TIME.MOD >> oberon.lst
 echo MATH.MOD >> oberon.lst
 echo IO.MOD >> oberon.lst
 echo RDFLOAD.MOD >> oberon.lst
+echo RDOFF.MOD >> oberon.lst
+echo TAR.MOD >> oberon.lst
+echo LOGERR.MOD >> oberon.lst
 echo TEST.MOD >> oberon.lst
 
 del OBERON.OM

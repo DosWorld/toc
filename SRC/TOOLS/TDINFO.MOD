@@ -14,14 +14,14 @@ MODULE TDInfo;
     LINE_NUMBER_RECORD = (line, offset) — line word FIRST
   (the C tool prints garbage for both sections on a real v2.08 file).
 
-  Tool DATA goes to stdout (Out); diagnostics go via Err (matches rdfgrep).
+  Tool DATA goes to stdout (Out); diagnostics go via LogErr (matches rdfgrep).
   Chunk small records (KEY RULE): symbols/lines/types/members/scopes are read
   into chunked node lists; modules/source-files/segments/correlations are few
   (small fixed cap).
 
   Exit codes: 0 ok, 2 usage, 3 I/O / parse error.
 *)
-IMPORT Out, Dos, Files, Err;
+IMPORT Out, Dos, Files, LogErr;
 
 CONST
   Magic     = 052FBH;   (* on disk: bytes FB 52 -> little-endian word 0x52FB *)
@@ -308,7 +308,7 @@ BEGIN
 
   IF Dos.ParamCount() < 1 THEN Usage; RETURN ExitUsage END;
   Dos.ParamStr(1, path);
-  IF ~Files.Reset(f, path) THEN Err.Error2("tdinfo: cannot open ", path); RETURN ExitIo END;
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("tdinfo: cannot open ", path); RETURN ExitIo END;
   fileSize := Files.Size(f);
 
   (* Locate the block.  Method A (preferred): the TDS block starts exactly at
@@ -339,7 +339,7 @@ BEGIN
     IF w = Magic THEN found := TRUE ELSE off := off + LONGINT(1) END
   END;
   IF ~found THEN
-    Err.Error("tdinfo: TDINFO signature (0x52FB) not found");
+    LogErr.Error("tdinfo: TDINFO signature (0x52FB) not found");
     Files.Close(f); RETURN ExitIo
   END;
 
@@ -487,7 +487,7 @@ BEGIN
     NEW(pool, INTEGER(h.namesPoolSize)); poolLen := h.namesPoolSize;
     Files.Seek(f, fileSize - h.namesPoolSize);
     IF Files.BlockRead(f, pool[0], WORD(h.namesPoolSize)) # WORD(h.namesPoolSize) THEN
-      Err.Warn("tdinfo: short read on names pool")
+      LogErr.Warn("tdinfo: short read on names pool")
     END
   END;
 
@@ -631,9 +631,9 @@ END RunBody;
 PROCEDURE Run*;
   VAR rc: INTEGER;
 BEGIN
-  Err.Open;
+  LogErr.Open;
   rc := RunBody();
-  Err.Close;
+  LogErr.Close;
   SYSTEM.Halt(rc)          (* the ONE and ONLY SYSTEM.Halt in tdinfo *)
 END Run;
 

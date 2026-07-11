@@ -5,7 +5,7 @@ MODULE PStmt;
   assignment, sysproc calls (NEW/DISPOSE/INC/DEC/ASSERT).
   Uses shared state from PExpr.
 *)
-IMPORT Scan, Syms, Cgen, Rdoff, PExpr, TDbg, Strings, Err;
+IMPORT Scan, Syms, Cgen, Rdoff, PExpr, TDbg, Strings, LogErr;
 
 (* ---- BpNode linked list for backpatch chains ---- *)
 
@@ -19,10 +19,10 @@ TYPE
 VAR
   (* Fallback OOM target for BpPush: every call site immediately dereferences
      the returned pointer (`n^.bp`) with no room for a per-call-site bailout
-     mid-statement-parse.  On OOM we latch Err and hand back this static node
+     mid-statement-parse.  On OOM we latch LogErr and hand back this static node
      instead of NIL/head (head may itself be NIL on the first push) so the
      caller's dereference stays safe; the compile is already doomed once
-     Err.HaveErr() is set, and the next natural checkpoint (module-level)
+     LogErr.HaveErr() is set, and the next natural checkpoint (module-level)
      stops it. *)
   bpOomNode: BpNode;
 
@@ -31,7 +31,7 @@ PROCEDURE BpPush(head: BpNode): BpNode;
 BEGIN
   NEW(n);
   IF n = NIL THEN
-    Err.Error("out of memory (backpatch node)");
+    LogErr.Error("out of memory (backpatch node)");
     RETURN bpOomNode
   END;
   n^.next := head; RETURN n
@@ -366,7 +366,7 @@ PROCEDURE ArmSlotPush(VAR head, tail: ArmSlotNode; idx: INTEGER);
 BEGIN
   IF (tail = NIL) OR (tail^.count >= ArmSlotChunk) THEN
     NEW(r);
-    IF r = NIL THEN Err.Error("out of memory (case-arm slot list)"); RETURN END;
+    IF r = NIL THEN LogErr.Error("out of memory (case-arm slot list)"); RETURN END;
     r^.count := 0; r^.next := NIL;
     IF tail # NIL THEN tail^.next := r ELSE head := r END;
     tail := r

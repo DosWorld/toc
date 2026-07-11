@@ -22,7 +22,7 @@ MODULE TOC;
   docs/implementation-rules.md §".DBG file format").
 *)
 IMPORT Dos, Files, Strings, Scan, Syms, Cgen, Rdoff, Tar,
-       Import, Parser, PExpr, Link, Err, Time, Out;
+       Import, Parser, PExpr, Link, LogErr, Time, Out;
 
 CONST
   NameLen  = 33;
@@ -327,7 +327,7 @@ PROCEDURE ParseAndScan(srcPath: ARRAY OF CHAR; owner: ModEntry): BOOLEAN;
 BEGIN
   head := NIL; tail := NIL;
   Scan.Open(sc, srcPath);
-  IF Err.HaveErr() THEN Scan.Close(sc); RETURN FALSE END;
+  IF LogErr.HaveErr() THEN Scan.Close(sc); RETURN FALSE END;
   IF sc.sym # Scan.TModule THEN Scan.Close(sc); RETURN FALSE END;
   Scan.Next(sc);
   IF sc.sym # Scan.TIdent THEN Scan.Close(sc); RETURN FALSE END;
@@ -364,7 +364,7 @@ BEGIN
     IF ~Strings.Equal(realName, "SYSTEM") THEN
       NEW(n);
       IF n = NIL THEN
-        Err.Error("out of memory (import list)");
+        LogErr.Error("out of memory (import list)");
         WHILE head # NIL DO nx := head^.next; DISPOSE(head); head := nx END;
         Scan.Close(sc); RETURN FALSE
       END;
@@ -396,7 +396,7 @@ BEGIN
       ownerR.deps[ownerR.nDeps] := dep; INC(ownerR.nDeps);
       ModWrite(owner, ownerR)
     ELSE
-      Err.Error2("oc: too many imports in module ", ownerR.name);
+      LogErr.Error2("oc: too many imports in module ", ownerR.name);
       (* free the remaining import-name list and fail (no Halt — funnels to Run) *)
       WHILE head # NIL DO nx := head^.next; DISPOSE(head); head := nx END;
       RETURN FALSE
@@ -420,7 +420,7 @@ BEGIN
   IF HasFlag(r, FlagHasSrc) THEN
     Strings.Copy(r.srcPath, srcPath);   (* ParseAndScan re-reads/writes mod *)
     IF ~ParseAndScan(srcPath, mod) THEN
-      Err.Error2("oc: parse error in: ", srcPath)
+      LogErr.Error2("oc: parse error in: ", srcPath)
     END
   END
 END ScanDeps;
@@ -432,7 +432,7 @@ PROCEDURE TopoVisit(mod: ModEntry);
 BEGIN
   ModRead(mod, r);
   IF HasFlag(r, FlagInStack) THEN
-    Err.Error2("oc: circular dependency: ", r.name);
+    LogErr.Error2("oc: circular dependency: ", r.name);
     RETURN
   END;
   IF HasFlag(r, FlagSorted) THEN RETURN END;
@@ -476,7 +476,7 @@ END TopoSort;
 PROCEDURE OpenModFile(): BOOLEAN;
 BEGIN
   IF ~Files.ReWriteTemp(gModFile) THEN
-    Err.Error("oc: cannot create module-graph temp");
+    LogErr.Error("oc: cannot create module-graph temp");
     RETURN FALSE
   END;
   gModOpen := TRUE;
@@ -518,9 +518,9 @@ PROCEDURE GenEntryStub(modName, procName: ARRAY OF CHAR; minPara, maxPara: LONGI
       procSym: ARRAY 66 OF CHAR;
 BEGIN
   NEW(obj);
-  IF obj = NIL THEN Err.Error("out of memory (entry stub)"); RETURN FALSE END;
+  IF obj = NIL THEN LogErr.Error("out of memory (entry stub)"); RETURN FALSE END;
   Rdoff.RdfInit(obj);
-  IF Err.HaveErr() THEN DISPOSE(obj); RETURN FALSE END;
+  IF LogErr.HaveErr() THEN DISPOSE(obj); RETURN FALSE END;
   sysInitId := Rdoff.RdfAddImport(obj, "SYSTEM_INIT");
   sysDoneId := Rdoff.RdfAddImport(obj, "SYSTEM_DONE");
   Strings.Copy(modName, initSym); Strings.Append("__init", initSym);
@@ -542,7 +542,7 @@ BEGIN
   Rdoff.RdfWriteTo(obj, mainRdf);
   Rdoff.RdfFree(obj);
   DISPOSE(obj);              (* release the ObjFile record + its file buffers *)
-  RETURN ~Err.HaveErr()
+  RETURN ~LogErr.HaveErr()
 END GenEntryStub;
 
 PROCEDURE FormatStackSize(n: LONGINT; VAR dst: ARRAY OF CHAR; VAR len: INTEGER);
@@ -571,7 +571,7 @@ PROCEDURE RepackOm(modName: ARRAY OF CHAR; stackSize: LONGINT;
 BEGIN
   MakeOmName(modName, libName);
   IF ~Files.Reset(lf, libName) THEN
-    Err.Error2("oc: /ENTRY=: cannot reopen ", libName);
+    LogErr.Error2("oc: /ENTRY=: cannot reopen ", libName);
     RETURN FALSE
   END;
   Files.Seek(lf, Files.Size(lf) - LONGINT(1024));
@@ -591,12 +591,12 @@ END RepackOm;
 PROCEDURE DbgMemSize(umsg : ARRAY OF CHAR);
 VAR msg : ARRAY 512 OF CHAR;
 BEGIN
-  IF ~Err.IsDebug() THEN RETURN END;
+  IF ~LogErr.IsDebug() THEN RETURN END;
   Strings.Copy(umsg, msg);
   Strings.Append(" Max free memory block ", msg);
   Strings.AppendInt(LONGINT(SYSTEM.MemAvail()), msg);
   Strings.Append(" paragraphs)", msg);
-  Err.Debug(msg)
+  LogErr.Debug(msg)
 END DbgMemSize;
 
 PROCEDURE LeakGuard(memBefore : WORD; module, subPart : ARRAY OF CHAR);
@@ -605,14 +605,14 @@ VAR memAfter: WORD;
 BEGIN
   memAfter := SYSTEM.MemAvail();
   IF (memAfter < memBefore) THEN
-    IF Err.IsDebug() THEN
+    IF LogErr.IsDebug() THEN
           Strings.Copy("Heap leak detected ", msg);
           Strings.Append(module, msg);
           Strings.Append(subPart, msg);
           Strings.Append(" (", msg);
           Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
           Strings.Append(" paragraphs)", msg);
-          Err.Debug(msg);
+          LogErr.Debug(msg);
     END
   END
 END LeakGuard;
@@ -625,14 +625,14 @@ END LeakGuard;
 PROCEDURE DbgModTableSize;
 VAR msg : ARRAY 128 OF CHAR;
 BEGIN
-  IF ~Err.IsDebug() THEN RETURN END;
+  IF ~LogErr.IsDebug() THEN RETURN END;
   Strings.Copy("ModRec table: modCount=", msg);
   Strings.AppendInt(LONGINT(modCount), msg);
   Strings.Append(" recLen=", msg);
   Strings.AppendInt(LONGINT(RecLen), msg);
   Strings.Append(" totalBytes=", msg);
   Strings.AppendInt(LONGINT(modCount) * LONGINT(RecLen), msg);
-  Err.Debug(msg)
+  LogErr.Debug(msg)
 END DbgModTableSize;
 
 PROCEDURE CompileModule(srcPath, entryProc: ARRAY OF CHAR;
@@ -655,13 +655,13 @@ BEGIN
   Scan.Close(sc);
   Cgen.CgFree();
   LeakGuard(memBefore, srcPath, " in Cgen.CgFree()");
-  IF Err.HaveErr() THEN RETURN END;
+  IF LogErr.HaveErr() THEN RETURN END;
   IF isRoot & (entryProc[0] # 0X) THEN
     memBefore := SYSTEM.MemAvail();
     (* mainRdf temp is opened, written, streamed and closed entirely within this
        one LeakGuard window so the open buffer never looks like a leak. *)
     IF ~Files.ReWriteTemp(mainRdf) THEN
-      Err.Error("oc: /ENTRY=: cannot create MAIN.RDF temp");
+      LogErr.Error("oc: /ENTRY=: cannot create MAIN.RDF temp");
       LeakGuard(memBefore, srcPath, " in GenEntryStub"); RETURN
     END;
     IF ~GenEntryStub(Parser.parserModName, entryProc,
@@ -693,17 +693,17 @@ BEGIN
      NOW — before the module scan opens each .rdf through an 8 KB Files buffer and
      fragments the arena so no 65000-byte hole survives. *)
   NEW(ls);
-  IF ls = NIL THEN Err.Error("out of memory (link state)"); RETURN END;
+  IF ls = NIL THEN LogErr.Error("out of memory (link state)"); RETURN END;
   Link.InitState(ls);
   ls^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
   IF ~Link.ReserveBuffers(ls) THEN
-    Link.LinkFree(ls); DISPOSE(ls); RETURN   (* Err latched by ReserveBuffers *)
+    Link.LinkFree(ls); DISPOSE(ls); RETURN   (* LogErr latched by ReserveBuffers *)
   END;
 
   (* Load source modules in topo order (deepest deps first), walking the in-file
      sortNext chain.  A latched read/parse error stops the load. *)
   m := gSortHead;
-  WHILE (m # NoMod) & ~Err.HaveErr() DO
+  WHILE (m # NoMod) & ~LogErr.HaveErr() DO
     ModRead(m, mr);
     IF HasFlag(mr, FlagHasSrc) THEN
       MakeOmName(mr.name, omPath);
@@ -737,14 +737,14 @@ BEGIN
     Link.ProcessFile(ls, omExe)
   END;
 
-  IF ~Err.HaveErr() THEN Link.SmartLink(ls) END;
-  IF ~Err.HaveErr() THEN Link.ReadStackSize(ls) END;
-  IF ~Err.HaveErr() THEN Link.CalculateLayout(ls) END;
-  IF ~Err.HaveErr() THEN Link.PerformLinking(ls) END;
-  IF ~Err.HaveErr() THEN Link.WriteExe(ls, outExe) END;
+  IF ~LogErr.HaveErr() THEN Link.SmartLink(ls) END;
+  IF ~LogErr.HaveErr() THEN Link.ReadStackSize(ls) END;
+  IF ~LogErr.HaveErr() THEN Link.CalculateLayout(ls) END;
+  IF ~LogErr.HaveErr() THEN Link.PerformLinking(ls) END;
+  IF ~LogErr.HaveErr() THEN Link.WriteExe(ls, outExe) END;
   Link.LinkFree(ls);
   DISPOSE(ls);
-  IF Err.HaveErr() THEN
+  IF LogErr.HaveErr() THEN
     Files.Delete(outExe)    (* never leave a half-written .exe behind *)
   END
 END LinkAll;
@@ -760,7 +760,7 @@ BEGIN
   Parser.ParseModule(sc);
   Scan.Close(sc);
   Cgen.CgFree()
-  (* error (if any) is latched in Err; the caller checks Err.HaveErr() *)
+  (* error (if any) is latched in LogErr; the caller checks LogErr.HaveErr() *)
 END RunSystemMode;
 
 (* Idempotent cleanup run before the single SYSTEM.Halt in Run, on every exit
@@ -794,7 +794,7 @@ PROCEDURE RunBody(): INTEGER;
       omPath: ARRAY MaxPath OF CHAR;
       memBefore: WORD;
 BEGIN
-  Err.SetLevel(Err.LINFO);
+  LogErr.SetLevel(LogErr.LINFO);
   argc := Dos.ParamCount();
   IF argc < 1 THEN
     Out.String("Trubo Oberon Compiler. (c) Copyright DosWorld"); Out.Ln;
@@ -817,7 +817,7 @@ BEGIN
     Out.String("               module compiled with (*$D+*). Requires /ENTRY=."); Out.Ln;
     Out.String("  /LOG=level   set diagnostic verbosity: debug, info, warn"); Out.Ln;
     Out.String("               (default), or error. Case-insensitive."); Out.Ln;
-    Err.Error("missing <file.Mod> argument");
+    LogErr.Error("missing <file.Mod> argument");
     RETURN 1
   END;
 
@@ -829,12 +829,12 @@ BEGIN
     IF MatchSwitchVal(arg, "/ENTRY=", entryProc) THEN
       hasEntry := TRUE
     ELSIF MatchSwitchVal(arg, "/LOG=", logLevel) THEN
-      IF Strings.EqualICase(logLevel, "debug") THEN Err.SetLevel(Err.LDEBUG)
-      ELSIF Strings.EqualICase(logLevel, "info") THEN Err.SetLevel(Err.LINFO)
-      ELSIF Strings.EqualICase(logLevel, "warn") THEN Err.SetLevel(Err.LWARN)
-      ELSIF Strings.EqualICase(logLevel, "error") THEN Err.SetLevel(Err.LERROR)
+      IF Strings.EqualICase(logLevel, "debug") THEN LogErr.SetLevel(LogErr.LDEBUG)
+      ELSIF Strings.EqualICase(logLevel, "info") THEN LogErr.SetLevel(LogErr.LINFO)
+      ELSIF Strings.EqualICase(logLevel, "warn") THEN LogErr.SetLevel(LogErr.LWARN)
+      ELSIF Strings.EqualICase(logLevel, "error") THEN LogErr.SetLevel(LogErr.LERROR)
       ELSE
-        Err.Error2("oc: /LOG=: unknown level (want debug/info/warn/error) ", logLevel);
+        LogErr.Error2("oc: /LOG=: unknown level (want debug/info/warn/error) ", logLevel);
         RETURN 1
       END
     ELSIF Strings.EqualICase(arg, "/SYSTEM") THEN
@@ -846,21 +846,21 @@ BEGIN
     ELSIF (arg[0] # "/") & (arg[0] # "-") THEN
       IF srcFile[0] = 0X THEN Strings.Copy(arg, srcFile) END
     ELSE
-      Err.Error2("oc: unknown option ", arg);
+      LogErr.Error2("oc: unknown option ", arg);
       RETURN 1
     END;
     INC(i)
   END;
 
   IF srcFile[0] = 0X THEN
-    Err.Error("oc: no source file");
+    LogErr.Error("oc: no source file");
     RETURN 1
   END;
 
   (* /SYSTEM: single-file compile only, no dep-scan or link *)
   IF hasSystem THEN
     RunSystemMode(srcFile, entryProc);
-    IF Err.HaveErr() THEN RETURN 1 ELSE RETURN 0 END
+    IF LogErr.HaveErr() THEN RETURN 1 ELSE RETURN 0 END
   END;
 
   (* Open the file-backed module table for the whole compile→link cycle. *)
@@ -877,7 +877,7 @@ BEGIN
     mainMod := AddMod(srcFile);
     ModRead(mainMod, mr);
     IF ~FindSrc(srcFile, mr.srcPath) THEN
-      Err.Error2("oc: cannot find source for: ", srcFile);
+      LogErr.Error2("oc: cannot find source for: ", srcFile);
       RETURN 1
     END;
     SetFlag(mr, FlagHasSrc)
@@ -899,9 +899,9 @@ BEGIN
 
   memBefore := SYSTEM.MemAvail();
   (* Phase 2: compile stale modules in topo order (walk the in-file sortNext chain).
-     A latched error (Err.HaveErr) stops the whole compile at once. *)
+     A latched error (LogErr.HaveErr) stops the whole compile at once. *)
   m := gSortHead;
-  WHILE (m # NoMod) & ~Err.HaveErr() DO
+  WHILE (m # NoMod) & ~LogErr.HaveErr() DO
     ModRead(m, mr);
     IF HasFlag(mr, FlagHasSrc) THEN
       MakeOmName(mr.name, omPath);
@@ -921,7 +921,7 @@ BEGIN
   END;
   LeakGuard(memBefore, "all module(s)", "");
 
-  IF Err.HaveErr() THEN RETURN 1 END;
+  IF LogErr.HaveErr() THEN RETURN 1 END;
 
   (* Phase 3: link when /ENTRY= given.  The module graph already lives in
      gModFile (never in the heap), so the arena is contiguous for the linker's
@@ -931,7 +931,7 @@ BEGIN
     LinkAll(outExe, genDbg);
     FreeMods;             (* close + delete the module-graph temp after linking *)
     LeakGuard(memBefore, "link all module(s)", "");
-    IF Err.HaveErr() THEN RETURN 1 END
+    IF LogErr.HaveErr() THEN RETURN 1 END
   ELSE
     FreeMods              (* compile-only: still release the graph *)
   END;
@@ -941,10 +941,10 @@ END RunBody;
 PROCEDURE Run*;
   VAR exitCode: INTEGER;
 BEGIN
-  Err.Open;               (* open output.log / error.log for this run *)
+  LogErr.Open;               (* open output.log / error.log for this run *)
   exitCode := RunBody();
   Cleanup;                (* close every temp + free heap on EVERY exit path *)
-  Err.Close;              (* flush + close the log files *)
+  LogErr.Close;              (* flush + close the log files *)
   SYSTEM.Halt(exitCode)   (* the ONE and ONLY SYSTEM.Halt in the compiler *)
 END Run;
 

@@ -15,7 +15,7 @@ MODULE StrTab;
   All chunks are DISPOSEd by Reset (zero-leak rule); the module body performs
   the raw first-time init explicitly (the runtime does NOT zero globals).
 *)
-IMPORT Strings, Err;
+IMPORT Strings, LogErr;
 
 CONST
   TextSize = 8*1024; (* chars per text chunk *)
@@ -124,11 +124,11 @@ BEGIN
   (* text space (fresh chunk when the current one cannot hold len+1 chars) *)
   IF (nText = 0) OR (WORD(len) + 1 > WORD(TextSize) - textUsed) THEN
     IF nText >= MaxText THEN
-      Err.Error("StrTab: name text overflow"); RETURN 0
+      LogErr.Error("StrTab: name text overflow"); RETURN 0
     END;
     NEW(textDir[nText]);
     IF textDir[nText] = NIL THEN
-      Err.Error("StrTab: out of memory (text)"); RETURN 0
+      LogErr.Error("StrTab: out of memory (text)"); RETURN 0
     END;
     INC(nText); textUsed := 0
   END;
@@ -136,11 +136,11 @@ BEGIN
   IF SYSTEM.AND(count, EntPer - 1) = 0 THEN
     k := SYSTEM.LSR(count, EntBits);
     IF k >= WORD(MaxEnt) THEN
-      Err.Error("StrTab: too many names"); RETURN 0
+      LogErr.Error("StrTab: too many names"); RETURN 0
     END;
     NEW(entDir[k]);
     IF entDir[k] = NIL THEN
-      Err.Error("StrTab: out of memory (entries)"); RETURN 0
+      LogErr.Error("StrTab: out of memory (entries)"); RETURN 0
     END
   END;
 

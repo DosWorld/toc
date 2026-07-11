@@ -55,7 +55,7 @@ MODULE rdfgrep;
      @FILE       read the .def body verbatim from FILE.  Use this when the
                  body needs newlines, spaces, or multiple declarations. *)
 
-IMPORT Out, Dos, Strings, Files, Rdoff, Tar, Err;
+IMPORT Out, Dos, Strings, Files, Rdoff, Tar, LogErr;
 
 CONST
   ExitMatch* = 0;
@@ -65,7 +65,7 @@ CONST
 
 PROCEDURE Halt(code: INTEGER);
 BEGIN
-  Err.Close;
+  LogErr.Close;
   SYSTEM.Halt(BYTE(code))
 END Halt;
 
@@ -336,7 +336,7 @@ PROCEDURE loadRdf(VAR obj: Rdoff.ObjFile; path: ARRAY OF CHAR);
 BEGIN
   NEW(obj);
   Rdoff.RdfInit(obj);
-  IF Err.HaveErr() OR ~Rdoff.RdfLoad(obj, path) THEN
+  IF LogErr.HaveErr() OR ~Rdoff.RdfLoad(obj, path) THEN
     Out.String("rdfgrep: cannot load "); Out.String(path); Out.Ln;
     Halt(ExitIo)
   END
@@ -550,7 +550,7 @@ PROCEDURE Run*;
       lval: LONGINT;
       nReloc, nSegreloc: INTEGER;
 BEGIN
-  Err.Open;
+  LogErr.Open;
   IF Dos.ParamCount() < 2 THEN Usage END;
   Dos.ParamStr(1, cmd);
   Dos.ParamStr(2, file);

@@ -24,7 +24,7 @@ MODULE TOStrip;
   All error/exit paths funnel through RunBody's result code; the single
   SYSTEM.Halt lives in Run.  Every opened file is closed on every path.
 *)
-IMPORT Out, Dos, Files, Strings, Tar, Err;
+IMPORT Out, Dos, Files, Strings, Tar, LogErr;
 
 CONST
   ExitOk    = 0;
@@ -122,7 +122,7 @@ PROCEDURE StripExe(path: ARRAY OF CHAR): INTEGER;
 BEGIN
   rc := ExitOk;
   IF ~Files.Reset(f, path) THEN
-    Err.Error2("tostrip: cannot open ", path); RETURN ExitIo
+    LogErr.Error2("tostrip: cannot open ", path); RETURN ExitIo
   END;
   fileSize := Files.Size(f);
   IF FindTdsBlock(f, fileSize, off) THEN
@@ -131,15 +131,15 @@ BEGIN
     Files.ReplaceExt(path, ".BAK", bakPath);
     IF Files.FileExists(bakPath) THEN
       IF ~Files.Delete(bakPath) THEN
-        Err.Error2("tostrip: cannot remove stale ", bakPath); RETURN ExitIo
+        LogErr.Error2("tostrip: cannot remove stale ", bakPath); RETURN ExitIo
       END
     END;
     IF ~Files.Copy(path, bakPath) THEN
-      Err.Error2("tostrip: cannot back up ", path); RETURN ExitIo
+      LogErr.Error2("tostrip: cannot back up ", path); RETURN ExitIo
     END;
 
     IF ~Files.Reset(f, path) THEN
-      Err.Error2("tostrip: cannot reopen ", path); RETURN ExitIo
+      LogErr.Error2("tostrip: cannot reopen ", path); RETURN ExitIo
     END;
     Files.Seek(f, off);
     Files.Truncate(f);
@@ -162,19 +162,19 @@ BEGIN
   rc := ExitOk;
   membHead := NIL; membTail := NIL;
   Tar.ListTar(path, OnMember);
-  IF Err.HaveErr() THEN RETURN ExitIo END;
+  IF LogErr.HaveErr() THEN RETURN ExitIo END;
 
   Files.ReplaceExt(path, ".BAK", bakPath);
 
   IF ~Files.Reset(src, path) THEN
-    Err.Error2("tostrip: cannot open ", path); FreeList; RETURN ExitIo
+    LogErr.Error2("tostrip: cannot open ", path); FreeList; RETURN ExitIo
   END;
   IF ~Files.ReWriteTemp(dst) THEN
-    Err.Error("tostrip: cannot create temp file");
+    LogErr.Error("tostrip: cannot create temp file");
     Files.Close(src); FreeList; RETURN ExitIo
   END;
   IF ~Files.ReWriteTemp(empty) THEN
-    Err.Error("tostrip: cannot create temp file");
+    LogErr.Error("tostrip: cannot create temp file");
     Files.Close(src); Files.Close(dst); FreeList; RETURN ExitIo
   END;
 
@@ -199,25 +199,25 @@ BEGIN
   Files.Close(src);
   FreeList;
 
-  IF Err.HaveErr() THEN
+  IF LogErr.HaveErr() THEN
     Files.Close(dst); RETURN ExitIo
   END;
 
   IF Files.FileExists(bakPath) THEN
     IF ~Files.Delete(bakPath) THEN
-      Err.Error2("tostrip: cannot remove stale ", bakPath); Files.Close(dst); RETURN ExitIo
+      LogErr.Error2("tostrip: cannot remove stale ", bakPath); Files.Close(dst); RETURN ExitIo
     END
   END;
   IF ~Files.Rename(path, bakPath) THEN
-    Err.Error2("tostrip: cannot back up ", path); Files.Close(dst); RETURN ExitIo
+    LogErr.Error2("tostrip: cannot back up ", path); Files.Close(dst); RETURN ExitIo
   END;
 
   Files.Seek(dst, LONGINT(0));
   IF ~Files.ReWrite(out, path) THEN
-    Err.Error2("tostrip: cannot write ", path); Files.Close(dst); RETURN ExitIo
+    LogErr.Error2("tostrip: cannot write ", path); Files.Close(dst); RETURN ExitIo
   END;
   IF ~Files.BlockCopy(dst, out, Files.Size(dst)) THEN
-    Err.Error2("tostrip: short write to ", path); rc := ExitIo
+    LogErr.Error2("tostrip: short write to ", path); rc := ExitIo
   END;
   Files.Close(out);
   Files.Close(dst);
@@ -236,7 +236,7 @@ BEGIN
   IF Dos.ParamCount() < 1 THEN Usage; RETURN ExitUsage END;
   Dos.ParamStr(1, path);
   IF ~Files.FileExists(path) THEN
-    Err.Error2("tostrip: no such file: ", path); RETURN ExitIo
+    LogErr.Error2("tostrip: no such file: ", path); RETURN ExitIo
   END;
   IF Tar.IsOmFile(path) THEN
     rc := StripOm(path)
@@ -249,9 +249,9 @@ END RunBody;
 PROCEDURE Run*;
   VAR rc: INTEGER;
 BEGIN
-  Err.Open;
+  LogErr.Open;
   rc := RunBody();
-  Err.Close;
+  LogErr.Close;
   SYSTEM.Halt(rc)          (* the ONE and ONLY SYSTEM.Halt in tostrip *)
 END Run;
 

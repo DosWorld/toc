@@ -1,6 +1,6 @@
 (*D+*)
 MODULE PExpr;
-IMPORT Scan, Syms, Cgen, Rdoff, Strings, Err, StrTab;
+IMPORT Scan, Syms, Cgen, Rdoff, Strings, LogErr, StrTab;
 
 VAR
   sc*:         Scan.Scanner;
@@ -9,14 +9,14 @@ VAR
   modName*:    ARRAY 33 OF CHAR;
 
 (* ---- error helpers ----
-   All diagnostics carry the source position via Err.ErrorInFile
-   (filename(line): message).  Err latches on the first error and the whole
+   All diagnostics carry the source position via LogErr.ErrorInFile
+   (filename(line): message).  LogErr latches on the first error and the whole
    compile shuts down — there is no error counter any more; callers test
-   Err.HaveErr(). *)
+   LogErr.HaveErr(). *)
 
 PROCEDURE Error*(msg: ARRAY OF CHAR);
 BEGIN
-  Err.ErrorInFile(sc.filename, LONGINT(sc.line), msg)
+  LogErr.ErrorInFile(sc.filename, LONGINT(sc.line), msg)
 END Error;
 
 PROCEDURE Error2*(msg, name: ARRAY OF CHAR);

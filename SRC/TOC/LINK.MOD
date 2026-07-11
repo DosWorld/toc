@@ -11,7 +11,7 @@ MODULE Link;
   - All data combined into one DataBuf <= 64KB.
   - All MZ relocs collected as a linked list before writing.
 *)
-IMPORT Dos, Files, Err, Rdoff, Tar, Strings;
+IMPORT Dos, Files, LogErr, Rdoff, Tar, Strings;
 
 CONST
   SymHash*   = 256;      (* symbol hash table size, power of 2 *)
@@ -221,9 +221,9 @@ TYPE
   END;
 
 (* Errors here are reached from deep helpers and FAR callbacks (OnImportForMark,
-   OnReloc, ...) whose signatures are fixed.  They latch in module Err
-   (Err.Error/Error2 — the single error state); the public link phases (called
-   from TOC.LinkAll) check Err.HaveErr() after each step and TOC.Run is the sole
+   OnReloc, ...) whose signatures are fixed.  They latch in module LogErr
+   (LogErr.Error/Error2 — the single error state); the public link phases (called
+   from TOC.LinkAll) check LogErr.HaveErr() after each step and TOC.Run is the sole
    SYSTEM.Halt. *)
 
 (* ---- string helpers ---- *)
@@ -285,7 +285,7 @@ END FindFile;
    ls^.symDir[SYSTEM.LSR(i,SymShift)]^.s[SYSTEM.AND(i,SymMask)].owner . *)
 
 (* Allocate a fresh symbol slot, growing the chunk list + directory as needed,
-   and return its WORD index.  Latches Err.HaveErr() and returns NoSym if the store or
+   and return its WORD index.  Latches LogErr.HaveErr() and returns NoSym if the store or
    directory is full. *)
 PROCEDURE SymAlloc(ls: State): Symbol;
   VAR idx: Symbol; chunk, slot: WORD; node: SymNode;
@@ -293,10 +293,10 @@ BEGIN
   idx   := ls^.symCount;
   chunk := SYSTEM.LSR(idx, SymShift);
   slot  := SYSTEM.AND(idx, SymMask);
-  IF chunk >= MaxSymChunk THEN Err.Error("Too many symbols"); RETURN NoSym END;
+  IF chunk >= MaxSymChunk THEN LogErr.Error("Too many symbols"); RETURN NoSym END;
   IF slot = 0 THEN                       (* start of a new chunk — allocate it *)
     NEW(node);
-    IF node = NIL THEN Err.Error("Out of memory (symbol chunk)"); RETURN NoSym END;
+    IF node = NIL THEN LogErr.Error("Out of memory (symbol chunk)"); RETURN NoSym END;
     node^.next := ls^.symNodes; ls^.symNodes := node;
     ls^.symDir[chunk] := node
   END;
@@ -441,14 +441,14 @@ END InitState;
    the arena so that no 65000-byte hole survives by link time.  Grabbing both
    here — while the arena is still one contiguous block — guarantees the fixed
    buffers exist; the later small allocations fill the remaining space and never
-   need a large contiguous run.  Returns FALSE (latching Err.HaveErr()) if either
+   need a large contiguous run.  Returns FALSE (latching LogErr.HaveErr()) if either
    allocation fails. *)
 PROCEDURE ReserveBuffers*(ls: State): BOOLEAN;
 BEGIN
   NEW(ls^.dataBuf, Rdoff.SegLimit);
-  IF ls^.dataBuf = NIL THEN Err.Error("Out of memory (data buffer)"); RETURN FALSE END;
+  IF ls^.dataBuf = NIL THEN LogErr.Error("Out of memory (data buffer)"); RETURN FALSE END;
   NEW(ls^.codeBuf, Rdoff.SegLimit);
-  IF ls^.codeBuf = NIL THEN Err.Error("Out of memory (code buffer)"); RETURN FALSE END;
+  IF ls^.codeBuf = NIL THEN LogErr.Error("Out of memory (code buffer)"); RETURN FALSE END;
   RETURN TRUE
 END ReserveBuffers;
 
@@ -531,7 +531,7 @@ BEGIN
     Tar.ScanTar(scanPath, OnMember, dummy, FALSE);
     INC(ls^.nextGroupId)
   ELSE
-    Err.Error2("Unknown file format (must be .om): ", path)
+    LogErr.Error2("Unknown file format (must be .om): ", path)
   END
 END ProcessFile;
 
@@ -551,7 +551,7 @@ BEGIN
   IF sym = NoSym THEN
     Strings.Copy("Unresolved external: ", markErrbuf);
     Strings.Append(name, markErrbuf);
-    Err.Error(markErrbuf); RETURN
+    LogErr.Error(markErrbuf); RETURN
   END;
   MarkModule(SymOwner(markLs, sym))
 END OnImportForMark;
@@ -570,7 +570,7 @@ PROCEDURE SmartLink*(ls: State);
 BEGIN
   markLs := ls;
   sym := FindSymbol(ls, "start");
-  IF sym = NoSym THEN Err.Error("Entry point 'start' not found!"); RETURN END;
+  IF sym = NoSym THEN LogErr.Error("Entry point 'start' not found!"); RETURN END;
   MarkModule(SymOwner(ls, sym))
 END SmartLink;
 
@@ -634,7 +634,7 @@ BEGIN
       END;
       groupEnd := codeBase;
       IF groupEnd - groupCodeStart > LONGINT(65000) THEN
-        Err.Error("Code group exceeds 64KB")
+        LogErr.Error("Code group exceeds 64KB")
       END;
 
       n := m;
@@ -659,7 +659,7 @@ BEGIN
   ls^.totalBssLen  := bssBase;
 
   IF ls^.totalDataLen + ls^.totalBssLen > LONGINT(65520) THEN
-    Err.Error("Data+BSS segment exceeds 64KB")
+    LogErr.Error("Data+BSS segment exceeds 64KB")
   END
 END CalculateLayout;
 
@@ -775,7 +775,7 @@ BEGIN
     fixup := WORD(lnkLs^.totalDataLen + m^.bssFinalOfs)
   ELSE
     sym := FindImport(rrefSeg);
-    IF sym = NoSym THEN Err.Error("Relocation to missing import"); RETURN END;
+    IF sym = NoSym THEN LogErr.Error("Relocation to missing import"); RETURN END;
     so := SymOwner(lnkLs, sym);
     fixup := WORD(SymOffset(lnkLs, sym));
     IF SymSegId(lnkLs, sym) = 0 THEN
@@ -926,7 +926,7 @@ BEGIN
     padLen := WORD(codeStart - pos);
     SYSTEM.FILL(padBuf, 16, 0);
     IF Files.BlockWrite(ftmp, padBuf, padLen) # padLen THEN
-      Err.Error("Write error (code pad)")
+      LogErr.Error("Write error (code pad)")
     END;
     pos := codeStart
   END;
@@ -969,7 +969,7 @@ BEGIN
 
   (* spill the relocated group sequentially *)
   IF Files.BlockWrite(ftmp, ls^.codeBuf^[0], WORD(sz)) # WORD(sz) THEN
-    Err.Error("Write error (code spill)")
+    LogErr.Error("Write error (code spill)")
   END;
   (* advance pos by the group's LONGINT codeLen — NOT `pos + sz`: sz is a WORD
      and WORD->LONGINT widening sign-extends (a 37 KB group reads as negative),
@@ -1009,12 +1009,12 @@ BEGIN
   (* Stream the code: process each group transiently into the spill file,
      writing strictly sequentially (pos tracks the next byte). *)
   lnkLs := ls;
-  IF ~Files.ReWriteTemp(ls^.spillFile) THEN Err.Error("Cannot create code temp"); RETURN END;
+  IF ~Files.ReWriteTemp(ls^.spillFile) THEN LogErr.Error("Cannot create code temp"); RETURN END;
   pos := LONGINT(0);
   g := ls^.groupHead;
-  WHILE (g # NIL) & ~Err.HaveErr() DO
+  WHILE (g # NIL) & ~LogErr.HaveErr() DO
     gslot := 0;
-    WHILE (gslot < g^.count) & ~Err.HaveErr() DO
+    WHILE (gslot < g^.count) & ~LogErr.HaveErr() DO
       ProcessGroup(ls, g, gslot, ls^.spillFile, pos); INC(gslot)
     END;
     g := g^.next
@@ -1460,7 +1460,7 @@ BEGIN
   WHILE p # NIL DO
     IF p^.used > 0 THEN
       IF Files.BlockWrite(fout, p^.bytes[0], WORD(p^.used)) # WORD(p^.used) THEN
-        Err.Error("Write error (debug pool)")
+        LogErr.Error("Write error (debug pool)")
       END
     END;
     p := p^.next
@@ -1474,12 +1474,12 @@ PROCEDURE WriteZeros(VAR f: Files.File; n: LONGINT);
 BEGIN
   SYSTEM.FILL(buf, 128, 0);
   WHILE n > LONGINT(128) DO
-    IF Files.BlockWrite(f, buf, 128) # 128 THEN Err.Error("Write error") END;
+    IF Files.BlockWrite(f, buf, 128) # 128 THEN LogErr.Error("Write error") END;
     DEC(n, LONGINT(128))
   END;
   chunk := WORD(n);
   IF chunk > 0 THEN
-    IF Files.BlockWrite(f, buf, chunk) # chunk THEN Err.Error("Write error") END
+    IF Files.BlockWrite(f, buf, chunk) # chunk THEN LogErr.Error("Write error") END
   END
 END WriteZeros;
 
@@ -1500,7 +1500,7 @@ BEGIN
        (final group's trailing alignment).  Zero-fill any tail beyond EOF. *)
     i := got; WHILE i < chunk DO buf[i] := BYTE(0); INC(i) END;
     IF Files.BlockWrite(fout, buf[0], chunk) # chunk THEN
-      Files.Close(ls^.spillFile); Err.Error("Write error (code)")
+      Files.Close(ls^.spillFile); LogErr.Error("Write error (code)")
     END;
     left := left - LONGINT(chunk)
   END;
@@ -1518,7 +1518,7 @@ PROCEDURE WriteExe*(ls: State; outPath: ARRAY OF CHAR);
       dataInPara, bssGapPara, stackPara, minAlloc: LONGINT;
       summary: ARRAY 128 OF CHAR;
 BEGIN
-  IF ~Files.ReWrite(fout, outPath) THEN Err.Error2("Cannot write: ", outPath); RETURN END;
+  IF ~Files.ReWrite(fout, outPath) THEN LogErr.Error2("Cannot write: ", outPath); RETURN END;
 
   codePara    := INTEGER((ls^.totalCodeLen + LONGINT(15)) DIV LONGINT(16));
   dataBssPara := INTEGER((ls^.totalDataLen + ls^.totalBssLen + LONGINT(15)) DIV LONGINT(16));
@@ -1566,7 +1566,7 @@ BEGIN
   WHILE rel # NIL DO
     IF rel^.count > 0 THEN
       IF Files.BlockWrite(fout, rel^.w[0], WORD(rel^.count * 2 * 2)) # WORD(rel^.count * 2 * 2) THEN
-        Err.Error("Write error (MZ reloc)")
+        LogErr.Error("Write error (MZ reloc)")
       END
     END;
     rel := rel^.next
@@ -1583,7 +1583,7 @@ BEGIN
   IF ls^.totalDataLen > LONGINT(0) THEN
     IF Files.BlockWrite(fout, ls^.dataBuf^[0], WORD(ls^.totalDataLen))
        # WORD(ls^.totalDataLen) THEN
-      Err.Error("Write error (data)")
+      LogErr.Error("Write error (data)")
     END
   END;
 
@@ -1598,7 +1598,7 @@ BEGIN
   Strings.Append(", Data=", summary); Strings.AppendInt(ls^.totalDataLen, summary);
   Strings.Append(", BSS=",  summary); Strings.AppendInt(ls^.totalBssLen,  summary);
   Strings.Append(", Stack=", summary); Strings.AppendInt(ls^.stackSize,   summary);
-  Err.Info(summary)
+  LogErr.Info(summary)
 END WriteExe;
 
 (* Read META-INF/STACK.TXT from the entry .om *)

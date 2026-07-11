@@ -15,7 +15,7 @@ MODULE Syms;
   zero NEW'd chunks).
 
   NoSym / NoType are exported VARs holding NIL (CONSTs are integer-only in
-  this dialect).  Chunk-allocation failure latches Err ("out of memory …")
+  this dialect).  Chunk-allocation failure latches LogErr ("out of memory …")
   and returns the last valid record so no NIL deref occurs before the compile
   dies at the next boundary — fail-fast, single Halt in TOC.Run.
 
@@ -28,7 +28,7 @@ MODULE Syms;
   Inline-proc byte patterns (InlineNode) and FORWARD patch lists (FwdNode)
   stay as heap lists hung off a TypeDesc / Symbol via a pointer field.
 *)
-IMPORT Err, StrTab, Strings;
+IMPORT LogErr, StrTab, Strings;
 
 CONST
   (* symbol kinds *)
@@ -306,9 +306,9 @@ END FwdAppend;
 
 (* ---- arena allocators ----
    Bump-allocate the next record slot; the pointer stays valid until SymsFree
-   (chunks never move).  On chunk exhaustion / OOM: latch Err and return the
+   (chunks never move).  On chunk exhaustion / OOM: latch LogErr and return the
    most recent record (never NIL once SymInit ran) so callers cannot NIL-deref
-   before the compile dies at the next Err boundary.  Special case: if the
+   before the compile dies at the next LogErr boundary.  Special case: if the
    very FIRST allocation fails (count = 0), "most recent record" has no
    meaning (`count - 1` would wrap a WORD to 65535, indexing 8x past the
    32-entry symDir/typeDir) — fall back to the static symOom/typeOom node
@@ -334,14 +334,14 @@ BEGIN
   IF SYSTEM.AND(symCount, ChunkPer - 1) = 0 THEN   (* next slot opens a chunk *)
     c := SYSTEM.LSR(symCount, ChunkBits);
     IF c >= WORD(MaxSymChunks) THEN
-      Err.Error("too many symbols");
+      LogErr.Error("too many symbols");
       IF symCount = 0 THEN RETURN symOom END;
       RETURN SymSlotPtr(symCount - 1)
     END;
     IF symDir[c] = NIL THEN
       NEW(symDir[c]);
       IF symDir[c] = NIL THEN
-        Err.Error("out of memory (symbol table)");
+        LogErr.Error("out of memory (symbol table)");
         IF symCount = 0 THEN RETURN symOom END;
         RETURN SymSlotPtr(symCount - 1)
       END
@@ -357,14 +357,14 @@ BEGIN
   IF SYSTEM.AND(typeCount, ChunkPer - 1) = 0 THEN
     c := SYSTEM.LSR(typeCount, ChunkBits);
     IF c >= WORD(MaxTypeChunks) THEN
-      Err.Error("too many types");
+      LogErr.Error("too many types");
       IF typeCount = 0 THEN RETURN typeOom END;
       RETURN TypeSlotPtr(typeCount - 1)
     END;
     IF typeDir[c] = NIL THEN
       NEW(typeDir[c]);
       IF typeDir[c] = NIL THEN
-        Err.Error("out of memory (type table)");
+        LogErr.Error("out of memory (type table)");
         IF typeCount = 0 THEN RETURN typeOom END;
         RETURN TypeSlotPtr(typeCount - 1)
       END
@@ -684,7 +684,7 @@ BEGIN
        declaration (NIL far writes land in the IVT under xt) and produces
        "undefined identifier" cascades much later.  See DOCS/IMPLRULE.MD
        §"Allocation failure is FATAL". *)
-    Err.Error("out of memory (scope)");
+    LogErr.Error("out of memory (scope)");
     RETURN
   END;
   sc^.symbols  := NIL;
@@ -852,7 +852,7 @@ END PredefSysProc;
 PROCEDURE OpenStores(): BOOLEAN;
 BEGIN
   (* nothing can fail here — chunks are NEW'd lazily by the allocators (an
-     allocation failure latches Err there).  BOOLEAN kept for the SymInit
+     allocation failure latches LogErr there).  BOOLEAN kept for the SymInit
      call shape. *)
   FreeChunks;
   allInline := NIL; allFwd := NIL; allScopes := NIL;
@@ -948,7 +948,7 @@ PROCEDURE StatsDump;
   VAR i: WORD; t: TypeDesc; m: ARRAY 160 OF CHAR;
       nArr, nProc, nRec, nPtr, nOther: INTEGER;
 BEGIN
-  IF ~Err.IsDebug() THEN RETURN END;
+  IF ~LogErr.IsDebug() THEN RETURN END;
   IF typeCount = 0 THEN RETURN END;
   nArr := 0; nProc := 0; nRec := 0; nPtr := 0; nOther := 0;
   i := 0;
@@ -972,7 +972,7 @@ BEGIN
   Strings.Append(" strtab=", m); Strings.AppendInt(LONGINT(StrTab.Count()), m);
   Strings.Append(" strtabKB=", m);
   Strings.AppendInt((StrTab.MemBytes() + LONGINT(1023)) DIV LONGINT(1024), m);
-  Err.Debug(m)
+  LogErr.Debug(m)
 END StatsDump;
 
 (* Release the symbol table: DISPOSE all arena chunks plus the heap nodes hung
