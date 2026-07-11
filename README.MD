@@ -170,7 +170,7 @@ interpreter.
 | Procedures | `FAR`/`NEAR`, nested, `EXTERNAL`, `INLINE` (whole-body and statement forms), `FORWARD`, typeless `VAR` params, full actual-parameter type checking |
 | Object model | `POINTER TO RECORD` extension, runtime `IS` type tests (compile-time folded where possible), `NEW`/`DISPOSE` with runtime type tags |
 | Modules | Qualified imports, namespace isolation, `$L`/`$M`/`$R` directives, dead-code/unused-symbol warnings |
-| `SYSTEM` | `ADR`, `SEG`, `OFS`, `PTR`, `GET`/`PUT`, `MOVE`, `FILL`, `PORTOUT`/`PORTIN`, `Intr`, `LSL`/`LSR`/`ASR`/`ROR`/`AND`/`IOR`/`XOR` |
+| `SYSTEM` | `ADR`, `SEG`, `OFS`, `PTR`, `MOVE`, `FILL`, `PORTOUT`/`PORTIN`, `Intr`, `LSL`/`LSR`/`ASR`/`ROR`/`AND`/`IOR`/`XOR` |
 | Expressions | Constant folding, implicit `INTEGER`→`REAL` coercion, `SET` operators, `IN`, array bounds checks (`$R+`/`$R-`), `SIZE`/`LEN` |
 | Codegen | Strength reduction (mul/div/mod by powers of two and small constants → shift/add), peephole cleanup, RDOFF2 object format with smart (dead-module-eliminating) linking |
 
