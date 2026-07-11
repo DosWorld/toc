@@ -2,7 +2,9 @@ MODULE SYS2;
 IMPORT Test, Out;
 
 TYPE
-  NfNearBinop   = PROCEDURE NEAR (a, b: INTEGER): INTEGER;
+  (* Proc-typed VARs are always FAR (see DOCS/OBERLANG.MD §"Procedural
+     variables") — PROCEDURE NEAR is not a valid type for a VAR/field, even
+     though the underlying procedure it refers to may itself be NEAR. *)
   NfFarBinop    = PROCEDURE FAR  (a, b: INTEGER): INTEGER;
   NfFarBinopDef = PROCEDURE      (a, b: INTEGER): INTEGER;
   AdAllocFn = PROCEDURE FAR (n: WORD): SYSTEM.ADDRESS;
@@ -11,10 +13,10 @@ TYPE
   GlMixed  = RECORD b1: BYTE; i1: INTEGER; b2: BYTE; i2: INTEGER END;
 
 VAR
-  NfnearFn:   PROCEDURE NEAR (a, b: INTEGER): INTEGER;
+  NfnearFn:   PROCEDURE FAR  (a, b: INTEGER): INTEGER;
   NffarFn:    PROCEDURE FAR  (a, b: INTEGER): INTEGER;
   NfdefFn:    PROCEDURE      (a, b: INTEGER): INTEGER;
-  NfnearFn2:  NfNearBinop;
+  NfnearFn2:  NfFarBinop;
   NffarFn2:   NfFarBinop;
   IngA, IngB: INTEGER;
   GlgI1, GlgI2, GlgI3 : INTEGER;
@@ -56,18 +58,21 @@ BEGIN
   r := NfSubFar(15, 5);  Test.AssertInt(10, r, "NfSubFar direct")
 END NfTDirectCalls;
 
+(* A FAR-typed proc VAR can hold the address of a NEAR-declared procedure
+   (only the VAR's own storage/call-through-variable codegen must be FAR —
+   see DOCS/OBERLANG.MD §"Procedural variables"); this covers that case. *)
 PROCEDURE NfTNearProcVar*;
 VAR r: INTEGER;
 BEGIN
-  NfnearFn := NfAddNear; r := NfnearFn(7, 8); Test.AssertInt(15, r, "NEAR var NfAddNear");
-  NfnearFn := NfMulNear; r := NfnearFn(3, 5); Test.AssertInt(15, r, "NEAR var NfMulNear");
-  NfnearFn2 := NfAddNear; r := NfnearFn2(11, 4); Test.AssertInt(15, r, "named NfNearBinop NfAddNear");
-  NfnearFn2 := NfMulNear; r := NfnearFn2(4, 5);  Test.AssertInt(20, r, "named NfNearBinop NfMulNear");
-        
+  NfnearFn := NfAddNear; r := NfnearFn(7, 8); Test.AssertInt(15, r, "FAR var holding NfAddNear");
+  NfnearFn := NfMulNear; r := NfnearFn(3, 5); Test.AssertInt(15, r, "FAR var holding NfMulNear");
+  NfnearFn2 := NfAddNear; r := NfnearFn2(11, 4); Test.AssertInt(15, r, "named NfFarBinop holding NfAddNear");
+  NfnearFn2 := NfMulNear; r := NfnearFn2(4, 5);  Test.AssertInt(20, r, "named NfFarBinop holding NfMulNear");
+
   NfnearFn := NfAddNear;
-  Test.AssertInt(3,  NfnearFn(1, 2), "NEAR var swap before");
+  Test.AssertInt(3,  NfnearFn(1, 2), "swap before");
   NfnearFn := NfMulNear;
-  Test.AssertInt(12, NfnearFn(3, 4), "NEAR var swap after")
+  Test.AssertInt(12, NfnearFn(3, 4), "swap after")
 END NfTNearProcVar;
 
 PROCEDURE NfTFarProcVar*;

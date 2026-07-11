@@ -38,7 +38,7 @@ if [ -z "$XT" ] || ! [ -x "$XT" ]; then
 fi
 
 # All modules in SRC/TOC/ in dependency order
-ALL_MODS="Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link TOC"
+ALL_MODS="Err Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link TOC"
 
 # Scratch dirs live under the project TMP/ (not the system tmpfs).
 mkdir -p "$ROOT/TMP"
@@ -88,7 +88,7 @@ recompile_mod() {
     [ -s "$WORK/$out_upper" ] || [ -s "$WORK/$m.om" ]
 }
 
-for m in Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link; do
+for m in Err Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link; do
     echo "  - $m"
     recompile_mod "$m" || { echo "FAIL: $m.om not produced"; exit 1; }
 done

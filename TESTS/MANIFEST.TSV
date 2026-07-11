@@ -276,6 +276,9 @@ inline/56n-stmt-runtime-nops-exit0	INLEXIT.MOD	/ENTRY=Run	errorlevel	0
 inc-long/carries-into-hi-word	INCLONG.MOD	/ENTRY=Run	errorlevel	0
 asgn-widen/word-byte-char-zero-extend	ASGWIDEN.MOD	/ENTRY=Run	errorlevel	0
 divmod/floored-int-word-longint	DIVMODFL.MOD	/ENTRY=Run	errorlevel	0
+shortcircuit/and-or-skip-rhs	SHORTCIR.MOD	/ENTRY=Run	errorlevel	0
+shortcircuit/long-chain-near-jumps	LONGBOOL.MOD	/ENTRY=Run	errorlevel	0
+stack/stacked-syscomments-keep-M	STKQUEUE.MOD	/ENTRY=Run	mz-sp	32766
 near-far/37l-near-exported-rejected	NEAREXP.MOD	fails	compile-fails
 intr/T13-def-alone-not-enough	INTRT13.MOD+CORRUPT.DEF	fails	compile-fails
 opt/A-mul8-shl	OPTMUL.MOD		code-contains	B1 03 D3 E0
