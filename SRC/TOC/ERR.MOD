@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Err;
 
 IMPORT IO, Files, Strings;
@@ -184,7 +185,7 @@ END DebugInFile;
 BEGIN
   IO.StdErr(errRider);
   IO.StdOut(outRider);
-  SetLevel(LWARN);
+  SetLevel(LDEBUG);
   logOpen := FALSE;
   err := FALSE
 END Err.

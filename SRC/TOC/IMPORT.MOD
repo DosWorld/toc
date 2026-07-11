@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Import;
 (*
   Module import resolver.

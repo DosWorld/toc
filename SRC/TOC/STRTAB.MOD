@@ -1,3 +1,4 @@
+(*D+*)
 MODULE StrTab;
 (*
   Interned string table (opt.md §12 Layer 1).

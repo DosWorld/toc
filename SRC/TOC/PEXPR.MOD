@@ -1,3 +1,4 @@
+(*D+*)
 MODULE PExpr;
 IMPORT Scan, Syms, Cgen, Rdoff, Strings, Err, StrTab;
 
@@ -1399,13 +1400,9 @@ BEGIN
           Cgen.EmitCodeStr("83,C4,04")  (* ADD SP,4 *)
         ELSE
           ParseActualParameters(pt);
-          IF pt.isFar THEN
-            IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
-            ELSE Cgen.CgCallProcVarBp(varAdr) END
-          ELSE
-            IF varGlobal THEN Cgen.CgCallProcVarNearMem(WORD(varAdr))
-            ELSE Cgen.CgCallProcVarNearBp(varAdr) END
-          END
+          (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
+          IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
+          ELSE Cgen.CgCallProcVarBp(varAdr) END
         END;
         item.type := pt.retType; item.isRef := FALSE;
         IF (pt.retType # Syms.NoType) & ((pt.retType.form = Syms.TFReal) OR (pt.retType.form = Syms.TFLongreal)) THEN
@@ -1446,6 +1443,31 @@ END ParseFactor;
 
 (* ---- term ---- *)
 
+(* Short-circuit AND: `p & q` == `IF p THEN q ELSE FALSE` (Oberon-07 §9.1).
+   Only the LHS is unconditionally evaluated; the RHS's parse+emit happens
+   only on the path where it's reachable, so a side-effecting or unsafe RHS
+   (function call, a divisor guarded by `(n#0) & (x DIV n>0)`) is never
+   evaluated when the LHS is already FALSE.  Result is materialized 0/1 in AX
+   exactly as the bitwise-AND path did, so every caller (IF/WHILE/REPEAT
+   conditions, nested boolean exprs) sees the same Item shape as before. *)
+PROCEDURE ParseAndTail(VAR item: Cgen.Item);
+  VAR rhs: Cgen.Item; falseBp, joinBp: Cgen.Backpatch;
+BEGIN
+  Cgen.CgLoadItem(item);
+  Cgen.CgTestAx();
+  (* MUST be a near jump: it spans the whole RHS emit (ParseFactor may emit
+     an arbitrarily long expression — a >127-byte span in a short Jcc wraps
+     the rel8 and jumps backward into mid-instruction; this exact overflow
+     broke self-hosting, see opt.md §8). *)
+  Cgen.CgCondNear(Cgen.OpJz, falseBp);    (* LHS false -> skip RHS, result FALSE *)
+  ParseFactor(rhs); Cgen.CgLoadItem(rhs); (* BOOLEAN is always a clean 0/1 -> AX *)
+  Cgen.CgJmpNear(joinBp);
+  Cgen.CgPatchNear(falseBp);
+  Cgen.Emit2(033H, 0C0H);                 (* XOR AX,AX *)
+  Cgen.CgPatchNear(joinBp);
+  item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+END ParseAndTail;
+
 PROCEDURE ParseTerm(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; op: INTEGER; isLong, isFpu, isWord: BOOLEAN;
       rhsLoaded: BOOLEAN;
@@ -1454,7 +1476,9 @@ BEGIN
   WHILE (sc.sym = Scan.TStar) OR (sc.sym = Scan.TDiv) OR
         (sc.sym = Scan.TMod)  OR (sc.sym = Scan.TAnd) OR (sc.sym = Scan.TSlash) DO
     op := sc.sym; Scan.Next(sc);
-    IF IsIntConst(item) & ((op = Scan.TStar) OR (op = Scan.TDiv) OR (op = Scan.TMod)) THEN
+    IF op = Scan.TAnd THEN
+      ParseAndTail(item); rhsLoaded := FALSE
+    ELSIF IsIntConst(item) & ((op = Scan.TStar) OR (op = Scan.TDiv) OR (op = Scan.TMod)) THEN
       ParseFactor(rhs);
       IF IsIntConst(rhs) THEN ConstFoldInt(item, op, rhs); rhsLoaded := FALSE
       ELSE
@@ -1597,6 +1621,24 @@ END ParseTerm;
 
 (* ---- simple expression ---- *)
 
+(* Short-circuit OR: `p OR q` == `IF p THEN TRUE ELSE q` (Oberon-07 §9.1).
+   Mirrors ParseAndTail: the RHS's parse+emit is skipped entirely once the LHS
+   already makes the result TRUE. *)
+PROCEDURE ParseOrTail(VAR item: Cgen.Item);
+  VAR rhs: Cgen.Item; trueBp, joinBp: Cgen.Backpatch;
+BEGIN
+  Cgen.CgLoadItem(item);
+  Cgen.CgTestAx();
+  (* MUST be a near jump: spans the whole RHS emit — see ParseAndTail. *)
+  Cgen.CgCondNear(Cgen.OpJnz, trueBp);    (* LHS true -> skip RHS, result TRUE *)
+  ParseTerm(rhs); Cgen.CgLoadItem(rhs);   (* BOOLEAN is always a clean 0/1 -> AX *)
+  Cgen.CgJmpNear(joinBp);
+  Cgen.CgPatchNear(trueBp);
+  Cgen.CgLoadImm(1);
+  Cgen.CgPatchNear(joinBp);
+  item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+END ParseOrTail;
+
 PROCEDURE ParseSimpleExpression(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; op: INTEGER; negate, isFpu, isLong, isWord, isAddr: BOOLEAN;
       rhsLoaded: BOOLEAN;
@@ -1618,7 +1660,9 @@ BEGIN
   END;
   WHILE (sc.sym = Scan.TPlus) OR (sc.sym = Scan.TMinus) OR (sc.sym = Scan.TOr) DO
     op := sc.sym; Scan.Next(sc);
-    IF IsIntConst(item) & ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
+    IF op = Scan.TOr THEN
+      ParseOrTail(item); rhsLoaded := FALSE
+    ELSIF IsIntConst(item) & ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
       ParseTerm(rhs);
       IF IsIntConst(rhs) THEN ConstFoldInt(item, op, rhs); rhsLoaded := FALSE
       ELSE

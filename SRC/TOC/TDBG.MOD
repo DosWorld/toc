@@ -1,3 +1,4 @@
+(*D+*)
 MODULE TDbg;
 (*
   Turbo-Debugger (TDS/TDINFO) debug-info collection — compiler side.

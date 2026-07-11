@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Cgen;
 (*
   Oberon compiler code generator.
@@ -6,7 +7,7 @@ MODULE Cgen;
   Imports Rdoff for ObjFile and low-level emit/reloc primitives.
   Imports Syms for TypeDesc (used in Item).
 *)
-IMPORT Rdoff, Syms, Strings;
+IMPORT Rdoff, Syms, Strings, Err;
 
 CONST
   (* item addressing modes *)
@@ -302,22 +303,10 @@ END CgCallLocalFar;
 
 PROCEDURE CgCallProcVarBp*(ofs: LONGINT); BEGIN EmitRel(0FFH, 01EH, ofs) END CgCallProcVarBp;
 
-PROCEDURE CgCallProcVarMem*(dataOfs: WORD);
-BEGIN
-  Emit2(0FFH, 01EH); EmitW(INTEGER(dataOfs))
-END CgCallProcVarMem;
-
 PROCEDURE CgCallProcVarEsbx*();
 BEGIN
   Emit3(026H, 0FFH, 01FH)
 END CgCallProcVarEsbx;
-
-PROCEDURE CgCallProcVarNearBp*(ofs: LONGINT); BEGIN EmitRel(0FFH, 016H, ofs) END CgCallProcVarNearBp;
-
-PROCEDURE CgCallProcVarNearMem*(dataOfs: WORD);
-BEGIN
-  Emit2(0FFH, 016H); EmitW(INTEGER(dataOfs))
-END CgCallProcVarNearMem;
 
 PROCEDURE CgCallFar*(importId: INTEGER);
   VAR ofsAt, segAt: LONGINT;
@@ -372,6 +361,14 @@ PROCEDURE CgPatchShort*(VAR bp: Backpatch);
   VAR rel: LONGINT;
 BEGIN
   rel := CgPc() - (bp.offset + LONGINT(1));
+  (* A short Jcc/JMP rel8 only reaches -128..+127.  Out of range MUST be
+     fatal: a silently wrapped rel8 jumps into the middle of another
+     instruction (this exact overflow — a 142-byte span in a short-circuit
+     `&`-chain — produced a wild backward jump and broke self-hosting; see
+     opt.md §8).  Callers with unbounded spans must use CgCondNear/CgJmpNear. *)
+  IF (rel < LONGINT(-128)) OR (rel > LONGINT(127)) THEN
+    Err.Error("internal: short jump out of range (compiler bug — use near jump)")
+  END;
   Rdoff.PatchCodeByte(CgObj, bp.offset, BYTE(INTEGER(rel) MOD 256))
 END CgPatchShort;
 
@@ -448,6 +445,22 @@ BEGIN
   patch := CgPc(); EmitW(INTEGER(dataOfs));
   Rdoff.RdfAddReloc(CgObj, Rdoff.SegCode, patch, 2, Rdoff.SegData, FALSE)
 END CgLoadAddrMem;
+
+PROCEDURE CgCallProcVarMem*(dataOfs: WORD);
+BEGIN
+  (* CALL FAR [dataOfs] — dataOfs is a module-local data offset (e.g. a
+     KProc-typed global VAR's Symbol.adr) and MUST go through the same
+     SegData relocation as every other load/store-from-data-offset site
+     (see EmitMemReloc above); a bare EmitW here (as before 2026-07-10) left
+     the PRE-link module-local offset unpatched, so the CALL read 4 bytes
+     from the wrong absolute address once the module's data was placed at a
+     nonzero base in the combined DGROUP.  A global PROC-typed VAR is the one
+     case that reaches this path (a local/param proc-var uses
+     CgCallProcVarBp instead, which patches an SS:[BP+ofs] frame offset, not
+     a data-segment address), so it went unexercised until Scan.Scanner's
+     eager-syscomment-hook fix (2026-07-10) added the first one. *)
+  Emit1(0FFH); EmitMemReloc(01EH, dataOfs, Rdoff.SegData)
+END CgCallProcVarMem;
 
 PROCEDURE CgLoadCodeAddr*(codeOfs: WORD); BEGIN EmitMemReloc(0B8H, codeOfs, Rdoff.SegCode)
 END CgLoadCodeAddr;

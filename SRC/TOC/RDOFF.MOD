@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Rdoff;
 (*
   RDOFF2 read/write module for the compiler and linker.

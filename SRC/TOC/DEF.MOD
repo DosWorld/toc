@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Def;
 (*
   Port of def.c/def.h to Oberon-07.

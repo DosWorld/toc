@@ -5,6 +5,7 @@ IMPORT EMS, Time;
 
 CONST
   BUFSIZE = 8192;
+  CopyChunk = 512;  (* BlockCopy stack staging buffer — MUST stay small, see BlockCopy *)
   BkDisk = 0;
   BkEms  = 1;
   EmsChunkKB = 64;
@@ -541,12 +542,18 @@ BEGIN
   RETURN SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0
 END Rename;
 
+(* BlockCopy's staging buffer is deliberately SMALL (CopyChunk): it lives on
+   the stack, and tools linked with the default 8192-byte stack ($M absent)
+   MUST NOT carry a multi-KB frame here — an 8 KB frame wraps SP around 64K
+   and sprays the copied bytes over the heap (see DOCS/IMPLRULE.MD §"Stack
+   size and big stack frames").  Both files are 8 KB-buffered internally, so
+   a small staging chunk costs almost nothing. *)
 PROCEDURE BlockCopy*(VAR src, dst: File; len : LONGINT): BOOLEAN;
-  VAR buf: ARRAY BUFSIZE OF BYTE;
+  VAR buf: ARRAY CopyChunk OF BYTE;
       n: WORD;
 BEGIN
   WHILE len # 0 DO
-    IF len > BUFSIZE THEN n := BUFSIZE ELSE n := len END;
+    IF len > CopyChunk THEN n := CopyChunk ELSE n := len END;
     n := BlockRead(src, buf[0], n);
     IF n # 0 THEN
       IF BlockWrite(dst, buf[0], n) # n THEN RETURN FALSE END;

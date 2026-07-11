@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Tar;
 (*
   ustar archive module: read/write .om archives.

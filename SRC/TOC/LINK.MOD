@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Link;
 (*
   RDOFF2 smart linker core for MS-DOS.
@@ -16,6 +17,17 @@ CONST
   SymHash*   = 256;      (* symbol hash table size, power of 2 *)
   MaxPath*   = 128;
   MaxName*   = 34;      (* link symbol = module(<=8) + "_" + ident(<=24) + 0X *)
+  (* Default stack size when the entry module has no `$M` directive.  Raising
+     this blanket default was tried on 2026-07-10 (to paper over TOC.MOD's
+     `$M` directive not reaching the linker) and reverted: every program
+     with no `$M` of its own (e.g. SRC/TOOLS/*.MOD) inherited the bigger
+     stack too, shrinking the DOS minAlloc headroom left for its runtime
+     heap and causing unrelated "StrTab: out of memory" failures in small
+     tools that never needed a big stack.  The real fix is making sure each
+     entry module's own `$M` directive (or lack of one, when 8192 is
+     genuinely enough) reaches the linker correctly — see
+     TESTS/FIX/SYSCOMMENT_STACK_BUG.md for the syscomment-queue fix that
+     makes TOC.MOD's own `$M 32000,...` propagate now. *)
   StackDef   = 8192;     (* default stack size *)
   MzHdrBytes = 28;       (* fixed MZ header size *)
   MZChunk    = 256;      (* MZ relocations per chunk node (small-record rule) *)

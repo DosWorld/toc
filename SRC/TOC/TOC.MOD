@@ -1,4 +1,5 @@
 (*$M 32000, 262144, 650000*)
+(*$D+*)
 MODULE TOC;
 (*
   All-in-one build driver: dependency scan + incremental compile + link.
@@ -162,7 +163,7 @@ BEGIN
   i := 0;
   WHILE (i < LEN(path) - 1) & (dir[i] # 0X) DO path[i] := dir[i]; INC(i) END;
   IF (i > 0) & (path[i-1] # "\") & (path[i-1] # "/") & (i < LEN(path) - 1) THEN
-    path[i] := "/"; INC(i)
+    path[i] := "\"; INC(i)
   END;
   j := 0;
   WHILE (i < LEN(path) - 5) & (name[j] # 0X) DO path[i] := name[j]; INC(i); INC(j) END;

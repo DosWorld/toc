@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Scan;
 (*
   Oberon compiler scanner.
@@ -116,6 +117,9 @@ CONST
   ChTab    =  9;   (* tab *)
   ChDollar = 36;   (* $ *)
 
+CONST
+  MaxPendSys = 4;  (* max system comments queued between two ProcessSyscomment drains *)
+
 TYPE
   Scanner* = RECORD
     sym*:      INTEGER;
@@ -125,9 +129,22 @@ TYPE
     sval*:     ARRAY MaxStr OF CHAR;
     line*:     INTEGER;
     filename*: ARRAY 256 OF CHAR;
-    (* syscomment: set when (*$X arg*) or //$X arg is scanned; cleared by caller *)
-    sysDir*:   CHAR;
-    sysArg*:   ARRAY MaxSyscom OF CHAR;
+    (* syscomment queue: a second (*$X*) comment scanned before the first is
+       polled must NOT clobber it — Next's comment-skip loop can scan several
+       consecutive comments in one call (e.g. `(*$M 32000,...*)(*$D+*)`
+       before MODULE), and a single pending-slot design (pre-2026-07-10)
+       silently dropped the $M directive that way.  Deliberately NOT a
+       procedure-variable callback: Scan.MOD must not store/call a FAR
+       procedure value through a module-level VAR (see CGEN.MOD
+       CgCallProcVarMem's 2026-07-10 missing-relocation bug in
+       TESTS/FIX/SYSCOMMENT_STACK_BUG.md) — that path stays broken in every
+       currently-available bootstrap binary, so anything on the bootstrap's
+       own critical path (like reading its OWN `$M` stack-size directive)
+       must not depend on it.  The parser drains this queue with a plain
+       exported procedure call instead. *)
+    sysDirs*:  ARRAY MaxPendSys OF CHAR;
+    sysArgs*:  ARRAY MaxPendSys OF ARRAY MaxSyscom OF CHAR;
+    nSys*:     INTEGER;
     (* private fields *)
     file:      Files.File;
     fileOpen:  BOOLEAN;
@@ -428,18 +445,23 @@ BEGIN
   s.sym := TString
 END ScanString;
 
+(* Appends to s.sysDirs/sysArgs (dropping silently if the queue is already
+   full — MaxPendSys=4 comfortably covers any real file; see the Scanner
+   record comment for why this is a queue rather than a proc-var callback). *)
 PROCEDURE DispatchSyscomment(VAR s: Scanner; VAR buf: ARRAY OF CHAR; n: INTEGER);
-  VAR i, j: INTEGER;
+  VAR i, j: INTEGER; slot: INTEGER;
 BEGIN
-  IF n = 0 THEN RETURN END;
-  s.sysDir := buf[0];
+  IF (n = 0) OR (s.nSys >= MaxPendSys) THEN RETURN END;
+  slot := s.nSys;
+  s.sysDirs[slot] := buf[0];
   i := 1;
   WHILE (i < n) & ((buf[i] = " ") OR (buf[i] = 09X)) DO INC(i) END;
   j := 0;
   WHILE (i < n) & (j < MaxSyscom - 1) DO
-    s.sysArg[j] := buf[i]; INC(j); INC(i)
+    s.sysArgs[slot][j] := buf[i]; INC(j); INC(i)
   END;
-  s.sysArg[j] := 0X
+  s.sysArgs[slot][j] := 0X;
+  INC(s.nSys)
 END DispatchSyscomment;
 
 PROCEDURE SkipComment(VAR s: Scanner);
@@ -627,8 +649,7 @@ BEGIN
   s.pendSym  := -1;
   s.id[0]    := 0X;
   s.sval[0]  := 0X;
-  s.sysDir   := 0X;
-  s.sysArg[0] := 0X;
+  s.nSys     := 0;
   s.fileOpen := FALSE;
   Strings.Copy(filename, s.filename);
   s.fileOpen := Files.Reset(s.file, filename);

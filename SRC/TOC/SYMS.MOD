@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Syms;
 (*
   Symbol table: types, symbols, scopes, predeclared universe.
@@ -661,6 +662,13 @@ PROCEDURE SymOpenScope*();
   VAR sc: Scope;
 BEGIN
   NEW(sc);
+  IF sc = NIL THEN
+    (* Fatal: continuing with a NIL scope silently redirects every following
+       declaration (NIL far writes land in the IVT under xt) and produces
+       "undefined identifier" cascades much later.  See opt.md §8. *)
+    Err.Error("out of memory (scope)");
+    RETURN
+  END;
   sc^.symbols  := NIL;
   sc^.nSyms    := 0;
   sc^.outer    := TopScope;

@@ -1,3 +1,4 @@
+(*D+*)
 MODULE Parser;
 (*
   Oberon compiler — declaration parsing (CONST/TYPE/VAR/PROCEDURE) and
@@ -113,16 +114,21 @@ BEGIN
   IF val[i] # 0X THEN PExpr.Error("$ directive: trailing text after toggle chain") END
 END ProcessToggleChain;
 
-PROCEDURE ProcessSyscomment(VAR sc: Scan.Scanner);
-  VAR dir: CHAR; val: ARRAY 128 OF CHAR; n: LONGINT; i, mi: INTEGER;
+(* Apply one already-dequeued system comment.  Scan.MOD queues up to
+   MaxPendSys directives per Scanner (see Scan.MOD's Scanner record comment)
+   instead of applying them via a callback: a module-level PROCEDURE-typed
+   VAR would be the first of its kind in this codebase and every currently
+   available bootstrap binary still miscompiles that pattern
+   (Cgen.CgCallProcVarMem's missing relocation — see
+   TESTS/FIX/SYSCOMMENT_STACK_BUG.md), which would make the bootstrap's own
+   `$M` stack-size directive processing crash before it could ever take
+   effect.  ProcessSyscomment (below) drains the queue with a plain call. *)
+PROCEDURE ApplyOneSyscomment(dir: CHAR; VAR arg: ARRAY OF CHAR);
+  VAR val: ARRAY 128 OF CHAR; n: LONGINT; i, mi: INTEGER;
       mvals: ARRAY 3 OF LONGINT; hasDigits: BOOLEAN;
       node: ExtraRdf;
 BEGIN
-  IF sc.sysDir = 0X THEN RETURN END;
-  dir := sc.sysDir;
-  TrimAndCopy(sc.sysArg, val);
-  sc.sysDir := 0X;   (* clear so we don't re-process *)
-  sc.sysArg[0] := 0X;
+  TrimAndCopy(arg, val);
 
   IF (dir = "R") OR (dir = "A") OR (dir = "D") THEN
     ProcessToggleChain(dir, val)
@@ -182,6 +188,19 @@ BEGIN
     (* unknown: warn but continue *)
     PExpr.Error("unknown system comment directive")
   END
+END ApplyOneSyscomment;
+
+(* Drain every system comment Scan queued since the last call (in scan
+   order) and reset the queue. *)
+PROCEDURE ProcessSyscomment(VAR sc: Scan.Scanner);
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < sc.nSys DO
+    ApplyOneSyscomment(sc.sysDirs[i], sc.sysArgs[i]);
+    INC(i)
+  END;
+  sc.nSys := 0
 END ProcessSyscomment;
 
 (* A procedure result type must be a scalar, pointer, or procedure — Oberon-07
@@ -205,7 +224,18 @@ PROCEDURE IdListAppend(VAR head: IdentNode; VAR tail: IdentNode;
                         name: ARRAY OF CHAR; exported: BOOLEAN): IdentNode;
   VAR n: IdentNode;
 BEGIN
-  NEW(n); Strings.Copy(name, n^.name); n^.exported := exported; n^.next := NIL;
+  NEW(n);
+  IF n = NIL THEN
+    (* MUST be fatal: a silently-dropped IdentNode means the declared
+       identifier never reaches the symbol table, and the compile then fails
+       later with a misleading "undefined identifier" (or worse, corrupts
+       the IVT via the NIL far write below).  This exact silent-OOM path is
+       what broke self-hosting when a $M-less build ran with the 256 KB
+       default heap — see opt.md §8 (2026-07-11). *)
+    Err.Error("out of memory (ident list)");
+    RETURN head
+  END;
+  Strings.Copy(name, n^.name); n^.exported := exported; n^.next := NIL;
   IF tail # NIL THEN tail^.next := n ELSE head := n END;
   tail := n; RETURN head
 END IdListAppend;
@@ -399,14 +429,21 @@ BEGIN
   ELSIF PExpr.sc.sym = Scan.TProcedure THEN
     Scan.Next(PExpr.sc);
     out := Syms.TypeNewProc(Syms.TypeNotype);
-    (* Optional FAR/NEAR modifier on procedure type; default FAR. *)
+    (* A PROCEDURE type (used to declare a proc-typed VAR) is always FAR: a
+       stored procedure value's address is loaded/called indirectly through
+       memory, so it must always carry a full segment:offset regardless of
+       the target procedure's own FAR/NEAR-ness (see DOCS/OBERLANG.MD
+       §"Procedural variables"). Optional "FAR" modifier accepted for
+       symmetry/clarity; "NEAR" is rejected — a NEAR proc-typed VAR is no
+       longer supported. *)
     out.isFar := TRUE; out.size := Syms.SzPointer;
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, modWord);
       IF modWord = "FAR" THEN
         Scan.Next(PExpr.sc)
       ELSIF modWord = "NEAR" THEN
-        out.isFar := FALSE; out.size := 2; Scan.Next(PExpr.sc)
+        PExpr.Error("PROCEDURE NEAR type is not supported — proc-typed VARs are always FAR");
+        Scan.Next(PExpr.sc)
       END
     END;
     IF PExpr.sc.sym = Scan.TLparen THEN ParseFormalPars(out, FALSE) END;
@@ -965,8 +1002,9 @@ BEGIN
 
   IF ~parserSystemMode THEN Import.AddImplicitImport("SYSTEM") END;
 
-  (* Handle any system comment that preceded the MODULE keyword
-     (e.g. `(*$R+*)` at the top of a file enabling bounds checks). *)
+  (* Handle any system comment(s) that preceded the MODULE keyword
+     (e.g. `(*$R+*)` at the top of a file enabling bounds checks, or
+     TOC.MOD's own stacked `(*$M ...*)(*$D+*)`). *)
   ProcessSyscomment(PExpr.sc);
   PExpr.Expect(Scan.TModule);
   ProcessSyscomment(PExpr.sc);

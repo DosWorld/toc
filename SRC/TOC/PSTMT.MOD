@@ -1,3 +1,4 @@
+(*D+*)
 MODULE PStmt;
 (*
   Statement parser: IF, WHILE, REPEAT, FOR, CASE, RETURN, procedure calls,
@@ -1137,13 +1138,9 @@ BEGIN
       ELSE
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
-        IF pt.isFar THEN
-          IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
-          ELSE Cgen.CgCallProcVarBp(varAdr) END
-        ELSE
-          IF varGlobal THEN Cgen.CgCallProcVarNearMem(WORD(varAdr))
-          ELSE Cgen.CgCallProcVarNearBp(varAdr) END
-        END
+        (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
+        IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
+        ELSE Cgen.CgCallProcVarBp(varAdr) END
       END
     ELSIF (item.mode = Cgen.MProc) & (item.type # Syms.NoType) & ItemInline(item) THEN
       PExpr.MarkRead(item);
