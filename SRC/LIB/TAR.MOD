@@ -16,7 +16,9 @@ TYPE
    errors latch in module LogErr (LogErr.Error/Error2); the caller checks
    LogErr.HaveErr() at a boundary. *)
 
-(* Return index of first char after last '/' or '\' in s, or 0 if none. *)
+(* Return index of first char after last '/' or '\' in s, or 0 if none.
+   Parameters: s — a path string.
+   Result: 0-based index where the basename starts within s. *)
 PROCEDURE BasenameStart*(s: ARRAY OF CHAR): INTEGER;
   VAR i, last: INTEGER;
 BEGIN
@@ -132,10 +134,21 @@ END WriteTarHeader;
 
 (* ---- public writer procedures ---- *)
 
+(* TarBegin*: no-op placeholder for archive-start bookkeeping (kept for
+   symmetry with TarEnd; the ustar format needs no leading marker).
+   Parameters: f — the archive file, opened for writing by the caller.
+   Result: none. *)
 PROCEDURE TarBegin*(VAR f: Files.File);
 BEGIN
 END TarBegin;
 
+(* TarAddFile*: append one member to the archive from an in-memory buffer,
+   writing its 512-byte ustar header followed by the data and zero-padding
+   to the next 512-byte boundary.
+   Parameters: f — the archive file, positioned at the append point; name —
+   member name (path within the archive); data — buffer holding the member's
+   content; len — number of bytes to write from data.
+   Result: none. *)
 PROCEDURE TarAddFile*(VAR f: Files.File; name: ARRAY OF CHAR;
                       VAR data: ARRAY OF BYTE; len: WORD);
   VAR pad : WORD;
@@ -146,6 +159,14 @@ BEGIN
   IF pad # 0 THEN WriteZeros(f, 512 - pad) END
 END TarAddFile;
 
+(* TarAddFromFile*: append one member to the archive, streaming its content
+   from another open file (via Files.BlockCopy) instead of an in-memory
+   buffer — used to pack large .rdf/.def temp files without holding them
+   fully in RAM.
+   Parameters: f — the archive file, positioned at the append point; name —
+   member name; src — source file to copy from, read from its current
+   cursor position; dataLen — number of bytes to copy from src.
+   Result: none. *)
 PROCEDURE TarAddFromFile*(VAR f: Files.File; name: ARRAY OF CHAR;
                           VAR src: Files.File; dataLen: LONGINT);
   VAR pad: WORD;
@@ -156,6 +177,10 @@ BEGIN
   IF pad # 0 THEN WriteZeros(f, 512 - pad) END
 END TarAddFromFile;
 
+(* TarEnd*: write the two all-zero 512-byte blocks that mark end-of-archive
+   in the ustar format.  Call once after the last TarAddFile/TarAddFromFile.
+   Parameters: f — the archive file, positioned at the append point.
+   Result: none. *)
 PROCEDURE TarEnd*(VAR f: Files.File);
 BEGIN
   WriteZeros(f, 512);
@@ -170,6 +195,10 @@ END TarEnd;
   open and rewound to byte 0; 'out' is that open file.  Returns TRUE on success.
   The temp is delete-on-close, so the caller need only Files.Close(out) when
   done — its content lives only while the file is open (never reopened by name).
+  Parameters: libPath — path of the archive to search; memberName — member
+  to extract, matched case-insensitively against either its basename or its
+  full in-archive path; out — receives the open, rewound temp file on success.
+  Result: TRUE if the member was found and extracted.
 *)
 PROCEDURE TarExtract*(libPath: ARRAY OF CHAR; memberName: ARRAY OF CHAR;
                       VAR out: Files.File): BOOLEAN;
@@ -226,6 +255,11 @@ END TarExtract;
   For every .rdf member calls onMember(name, libOfs, rawSize).
   libOfs is the byte offset of the RDOFF2 data (after the 512-byte header).
   If readStack is TRUE, parses META-INF/STACK.TXT and updates stackSize.
+  Parameters: archPath — path of the archive to scan; onMember — callback
+  invoked once per .rdf member found (or NIL to skip callbacks); stackSize —
+  updated in place if readStack is TRUE and a valid META-INF/STACK.TXT value
+  (2..65536) is found; readStack — whether to look for META-INF/STACK.TXT.
+  Result: none.
 *)
 PROCEDURE ScanTar*(archPath: ARRAY OF CHAR; onMember: MemberProc;
                    VAR stackSize: LONGINT; readStack: BOOLEAN);
@@ -293,6 +327,9 @@ END ScanTar;
 
 (*
   Return TRUE if the file at 'path' is a ustar archive (checks magic at offset 257).
+  Parameters: path — file to test.
+  Result: TRUE if the file is at least 262 bytes and has the "ustar" magic
+  at offset 257.
 *)
 PROCEDURE IsOmFile*(path: ARRAY OF CHAR): BOOLEAN;
   VAR f: Files.File;
@@ -320,6 +357,10 @@ END IsOmFile;
 (*
   Return the total number of members and their combined data size.
   Calls onMember for each member (any type, not just .rdf).
+  Parameters: archPath — path of the archive to list; onMember — callback
+  invoked once per member (name, data offset, data size), or NIL to skip
+  callbacks.
+  Result: none (member count/sizes are reported via onMember, not returned).
 *)
 PROCEDURE ListTar*(archPath: ARRAY OF CHAR; onMember: MemberProc);
   VAR f: Files.File;

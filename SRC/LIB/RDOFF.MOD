@@ -139,6 +139,10 @@ END AddRelocNode;
 
 (* ---- public writer procedures ---- *)
 
+(* RdfInit: prepare an ObjFile for writing — opens temp files for the code
+   and data segments and resets all counters/lists to empty.
+   Parameters: obj — the object file to initialize.
+   Result: none. *)
 PROCEDURE RdfInit*(obj: ObjFile);
 BEGIN
   IF ~Files.ReWriteTemp(obj^.codeFile) THEN
@@ -154,6 +158,10 @@ BEGIN
   obj^.nextImportId := 3
 END RdfInit;
 
+(* RdfFree: release all resources held by an ObjFile — closes the code/data
+   temp files and disposes the relocation, import and global node chains.
+   Parameters: obj — the object file to release.
+   Result: none. *)
 PROCEDURE RdfFree*(obj: ObjFile);
   VAR r, rn: RelocNode; imp, in: ImportNode; g, gn: GlobalNode;
 BEGIN
@@ -170,9 +178,15 @@ BEGIN
   obj^.globalHead := NIL; obj^.globalTail := NIL
 END RdfFree;
 
+(* CodeLen: current length of the code segment being built.
+   Parameters: obj — the object file.
+   Result: number of bytes emitted to the code segment so far. *)
 PROCEDURE CodeLen*(obj: ObjFile): LONGINT;
 BEGIN RETURN LONGINT(obj^.codeLen) END CodeLen;
 
+(* DataLen: current length of the data segment being built.
+   Parameters: obj — the object file.
+   Result: number of bytes emitted to the data segment so far. *)
 PROCEDURE DataLen*(obj: ObjFile): LONGINT;
 BEGIN RETURN LONGINT(obj^.dataLen) END DataLen;
 
@@ -182,7 +196,10 @@ BEGIN RETURN LONGINT(obj^.dataLen) END DataLen;
    the append position after touching the file (see below).  So EmitByte just
    Files.WriteByte at the current position: no per-byte Files.Seek, no
    BlockWrite(…,1) chunk machinery, and the in-buffer offset math is WORD.
-   The per-byte SegLimit overflow check stays out (RdfWrite validates once). *)
+   The per-byte SegLimit overflow check stays out (RdfWrite validates once).
+   Parameters: obj — the object file being built; seg — target segment
+   (SegCode or SegData); b — the byte to emit.
+   Result: none. *)
 PROCEDURE EmitByte*(obj: ObjFile; seg: INTEGER; b: BYTE);
 BEGIN
   IF seg = SegCode THEN
@@ -218,16 +235,29 @@ BEGIN
   END
 END emitN;
 
+(* EmitByte2: emit two bytes in sequence to a segment.
+   Parameters: obj — the object file being built; seg — target segment
+   (SegCode or SegData); b1, b2 — the bytes to emit, in order.
+   Result: none. *)
 PROCEDURE EmitByte2*(obj: ObjFile; seg: INTEGER; b1, b2: BYTE);
 BEGIN
   emitN(obj, seg, b1, b2, 0, 0, 2)
 END EmitByte2;
 
+(* EmitByte3: emit three bytes in sequence to a segment.
+   Parameters: obj — the object file being built; seg — target segment
+   (SegCode or SegData); b1, b2, b3 — the bytes to emit, in order.
+   Result: none. *)
 PROCEDURE EmitByte3*(obj: ObjFile; seg: INTEGER; b1, b2, b3: BYTE);
 BEGIN
   emitN(obj, seg, b1, b2, b3, 0, 3)
 END EmitByte3;
 
+(* EmitWord: emit a 16-bit word to a segment, updating the segment's length
+   counter (with SegLimit overflow check).
+   Parameters: obj — the object file being built; seg — target segment
+   (SegCode or SegData); w — the word value to emit.
+   Result: none. *)
 PROCEDURE EmitWord*(obj: ObjFile; seg: INTEGER; w: INTEGER);
 BEGIN
   IF seg = SegCode THEN
@@ -243,6 +273,12 @@ BEGIN
   END
 END EmitWord;
 
+(* EmitBlock: emit a block of raw bytes to a segment in one write, updating
+   the segment's length counter (with SegLimit overflow check).
+   Parameters: obj — the object file being built; seg — target segment
+   (SegCode or SegData); buf — the source buffer; len — number of bytes to
+   copy from buf.
+   Result: none. *)
 PROCEDURE EmitBlock*(obj: ObjFile; seg: INTEGER; VAR buf; len : WORD);
 BEGIN
   IF seg = SegCode THEN
@@ -258,6 +294,11 @@ BEGIN
   END
 END EmitBlock;
 
+(* EmitZero: emit n zero bytes to the data segment (used to zero-fill global
+   array/record storage), updating the data length counter.
+   Parameters: obj — the object file being built; n — number of zero bytes
+   to emit.
+   Result: none. *)
 PROCEDURE EmitZero*(obj: ObjFile; n: LONGINT);
   VAR buf : ARRAY 128 OF BYTE;
 BEGIN
@@ -276,6 +317,12 @@ BEGIN
   Files.BlockWrite(obj^.dataFile, buf, WORD(n))
 END EmitZero;
 
+(* PatchCodeByte: overwrite a single byte at an earlier offset in the code
+   segment (e.g. backpatching a jump target), then restore the file position
+   so the next EmitByte still appends correctly.
+   Parameters: obj — the object file being built; offset — byte offset
+   within the code segment to overwrite; b — the new byte value.
+   Result: none. *)
 PROCEDURE PatchCodeByte*(obj: ObjFile; offset: LONGINT; b: BYTE);
   VAR tmp: BYTE; save: LONGINT;
 BEGIN
@@ -289,6 +336,11 @@ BEGIN
   Files.Seek(obj^.codeFile, save)
 END PatchCodeByte;
 
+(* PeekCodeByte: read back a single byte previously written to the code
+   segment, without disturbing the current append position.
+   Parameters: obj — the object file being built; offset — byte offset
+   within the code segment to read.
+   Result: the byte at offset, or 0 if offset is out of range. *)
 PROCEDURE PeekCodeByte*(obj: ObjFile; offset: LONGINT): BYTE;
   VAR tmp: BYTE; save: LONGINT;
 BEGIN
@@ -302,6 +354,11 @@ BEGIN
   RETURN tmp
 END PeekCodeByte;
 
+(* PeekDataByte: read back a single byte previously written to the data
+   segment, without disturbing the current append position.
+   Parameters: obj — the object file being built; offset — byte offset
+   within the data segment to read.
+   Result: the byte at offset, or 0 if offset is out of range. *)
 PROCEDURE PeekDataByte*(obj: ObjFile; offset: LONGINT): BYTE;
   VAR tmp: BYTE; save: LONGINT;
 BEGIN
@@ -315,6 +372,10 @@ BEGIN
   RETURN tmp
 END PeekDataByte;
 
+(* RdfFindImport: look up an existing import entry by name.
+   Parameters: obj — the object file being built; name — the imported
+   symbol's link name to search for.
+   Result: the import's RDOFF2 segment ID if found, otherwise -1. *)
 PROCEDURE RdfFindImport*(obj: ObjFile; name: ARRAY OF CHAR): INTEGER;
   VAR imp: ImportNode;
 BEGIN
@@ -326,6 +387,11 @@ BEGIN
   RETURN -1
 END RdfFindImport;
 
+(* RdfAddImport: add a new import entry, allocating it the next free
+   RDOFF2 segment ID.
+   Parameters: obj — the object file being built; name — the imported
+   symbol's link name.
+   Result: the newly assigned segment ID for this import. *)
 PROCEDURE RdfAddImport*(obj: ObjFile; name: ARRAY OF CHAR): INTEGER;
   VAR imp: ImportNode;
 BEGIN
@@ -342,6 +408,12 @@ BEGIN
   RETURN imp^.segId
 END RdfAddImport;
 
+(* RdfAddGlobal: add a new exported-symbol (global) entry.
+   Parameters: obj — the object file being built; name — the exported
+   symbol's link name; segId — which physical segment the symbol lives in
+   (SegCode/SegData/SegBss); offset — the symbol's byte offset within that
+   segment.
+   Result: none. *)
 PROCEDURE RdfAddGlobal*(obj: ObjFile; name: ARRAY OF CHAR; segId: BYTE; offset: LONGINT);
   VAR g: GlobalNode;
 BEGIN
@@ -357,6 +429,14 @@ BEGIN
   INC(obj^.nGlobals)
 END RdfAddGlobal;
 
+(* RdfAddReloc: record a relocation against a symbol/import (RecReloc).
+   Parameters: obj — the object file being built; physSeg — which physical
+   segment the relocation site is in; offset — byte offset of the
+   relocation site within that segment; width — size in bytes of the field
+   to patch; rseg — the RDOFF2 import/segment ID being referenced;
+   relative — TRUE if the reference is PC-relative (sets the high relative
+   flag bit on the stored physical-segment byte).
+   Result: none. *)
 PROCEDURE RdfAddReloc*(obj: ObjFile; physSeg: INTEGER; offset: LONGINT;
                        width: INTEGER; rseg: INTEGER; relative: BOOLEAN);
   VAR ps: BYTE;
@@ -366,6 +446,13 @@ BEGIN
   AddRelocNode(obj, ps, offset, BYTE(width), rseg)
 END RdfAddReloc;
 
+(* RdfAddSegReloc: record a segment-relocation (RecSegreloc) — a fixup that
+   patches a segment/paragraph value rather than an offset.
+   Parameters: obj — the object file being built; physSeg — which physical
+   segment the relocation site is in; offset — byte offset of the
+   relocation site within that segment; rseg — the RDOFF2 import/segment ID
+   being referenced.
+   Result: none. *)
 PROCEDURE RdfAddSegReloc*(obj: ObjFile; physSeg: INTEGER; offset: LONGINT;
                           rseg: INTEGER);
   VAR ps: BYTE;
@@ -374,6 +461,10 @@ BEGIN
   AddRelocNode(obj, ps, offset, BYTE(2), rseg)
 END RdfAddSegReloc;
 
+(* RdfSetBss: set the size of the module's uninitialized (BSS) data area.
+   Parameters: obj — the object file being built; size — number of bytes
+   of zero-initialized storage to reserve.
+   Result: none. *)
 PROCEDURE RdfSetBss*(obj: ObjFile; size: LONGINT);
 BEGIN
   (* Overflow sets the latch (surfaced at the RdfWrite boundary); cannot Halt. *)
@@ -384,7 +475,10 @@ END RdfSetBss;
 (* RdfWriteTo: serialise the object into an already-open, rewound file `f`.
    The caller owns `f` (it is NOT closed here).  Used for both the named-file
    path (RdfWrite) and the temp-file path (Parser streams the temp into the .om
-   without ever naming it on disk). *)
+   without ever naming it on disk).
+   Parameters: obj — the object file to serialise; f — an already-open,
+   rewound file to write the RDOFF2 image into.
+   Result: none (failures latch via LogErr; check LogErr.HaveErr()). *)
 PROCEDURE RdfWriteTo*(obj: ObjFile; VAR f: Files.File);
   VAR r: RelocNode; imp: ImportNode; g: GlobalNode;
       hlen, modSize: LONGINT;
@@ -504,7 +598,10 @@ BEGIN
 END RdfWriteTo;
 
 (* Named-file wrapper: open `filename`, serialise, close.  Keeps OC's MAIN.RDF
-   path (and any other by-name caller) unchanged. *)
+   path (and any other by-name caller) unchanged.
+   Parameters: obj — the object file to serialise; filename — path of the
+   .rdf file to create.
+   Result: none (failures latch via LogErr). *)
 PROCEDURE RdfWrite*(obj: ObjFile; filename: ARRAY OF CHAR);
   VAR f: Files.File;
 BEGIN
@@ -529,6 +626,14 @@ BEGIN
   RETURN TRUE
 END CheckSign;
 
+(* RdfLoad: read an entire RDOFF2 file into obj — resets obj, verifies the
+   signature, replays the header records (relocations, imports, globals,
+   bss) into obj's lists, and copies the code/data segment bodies into
+   obj's code/data temp files.
+   Parameters: obj — the object file to load into (re-initialised first);
+   filename — path of the .rdf file to read.
+   Result: TRUE if the file was opened, signed correctly, and fully copied;
+   FALSE otherwise. *)
 PROCEDURE RdfLoad*(obj: ObjFile; filename: ARRAY OF CHAR): BOOLEAN;
   VAR f: Files.File;
       n: INTEGER;
@@ -644,6 +749,16 @@ END RdfLoad;
   Scan the RDOFF2 header at 'path'+'libOfs'.
   Fills rawSize, hdrSize, codeSize, dataSize, bssSize.
   Calls onGlobal/onImport for each record (either may be NIL).
+
+  Parameters: path — file to read; libOfs — byte offset within path where
+  the RDOFF2 image starts (an .om archive member); rawSize — OUT: total
+  module size from the header; hdrSize — OUT: size of the header-record
+  area; codeSize, dataSize — OUT: code/data segment lengths found in the
+  segment table; bssSize — OUT: total BSS bytes requested (summed over all
+  RecBss records); onGlobal — callback invoked for each RecGlobal record
+  (may be NIL); onImport — callback invoked for each RecImport record (may
+  be NIL).
+  Result: none (failures latch via LogErr).
 *)
 
 PROCEDURE ScanHeader*(VAR path: ARRAY OF CHAR; libOfs: LONGINT;
@@ -726,6 +841,14 @@ END ScanHeader;
 (*
   Walk all RDOFF2 header records at 'path'+'libOfs'.
   Calls onImport, onReloc, onSegReloc as appropriate (any may be NIL).
+
+  Parameters: path — file to read; libOfs — byte offset within path where
+  the RDOFF2 image starts; hdrSize — size of the header-record area (as
+  filled by ScanHeader); onImport — callback invoked for each RecImport
+  record (may be NIL); onReloc — callback invoked for each RecReloc record
+  (may be NIL); onSegReloc — callback invoked for each RecSegreloc record
+  (may be NIL).
+  Result: none (failures latch via LogErr).
 *)
 PROCEDURE ScanRelocs*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
                       onImport: ImportProc;
@@ -822,6 +945,12 @@ END ReadSeg;
 
 (*
   Read code segment bytes into buf at offset dstOfs.
+
+  Parameters: path — file to read; libOfs — byte offset within path where
+  the RDOFF2 image starts; hdrSize — size of the header-record area (as
+  filled by ScanHeader); buf — destination far buffer; dstOfs — byte offset
+  within buf to start writing; codeSize — number of code bytes to copy.
+  Result: none (failures latch via LogErr).
 *)
 PROCEDURE ReadCode*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
                     buf: SegBuf; dstOfs, codeSize: WORD);
@@ -831,6 +960,12 @@ END ReadCode;
 
 (*
   Read data segment bytes into buf at offset dstOfs.
+
+  Parameters: path — file to read; libOfs — byte offset within path where
+  the RDOFF2 image starts; hdrSize — size of the header-record area (as
+  filled by ScanHeader); buf — destination far buffer; dstOfs — byte offset
+  within buf to start writing; dataSize — number of data bytes to copy.
+  Result: none (failures latch via LogErr).
 *)
 PROCEDURE ReadData*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
                     buf: SegBuf; dstOfs, dataSize: WORD);
