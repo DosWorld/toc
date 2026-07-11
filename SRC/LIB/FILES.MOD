@@ -5,7 +5,7 @@ IMPORT EMS, Time;
 
 CONST
   BUFSIZE = 8192;
-  CopyChunk = 512;  (* BlockCopy stack staging buffer — MUST stay small, see BlockCopy *)
+  CopyChunk = 1024;  (* BlockCopy stack staging buffer — MUST stay small, see BlockCopy *)
   BkDisk = 0;
   BkEms  = 1;
   EmsChunkKB = 64;
@@ -37,11 +37,14 @@ BEGIN
 END DOSGetFileSize;
 
 PROCEDURE CopyName(VAR F: File; VAR name: ARRAY OF CHAR);
-  VAR i: INTEGER;
+  VAR n: WORD;
 BEGIN
-  i := 0;
-  WHILE (name[i] # 0X) & (i < 255) DO F.name[i] := name[i]; INC(i) END;
-  F.name[i] := 0X
+  (* name is a value param here at both call sites (Reset/ReWrite), so it can
+     never alias F.name -> SYSTEM.MOVE is safe (non-overlapping). *)
+  n := SYSTEM.LENGTH(name);
+  IF n > WORD(255) THEN n := WORD(255) END;
+  SYSTEM.MOVE(name[0], F.name[0], n);
+  F.name[n] := 0X
 END CopyName;
 
 PROCEDURE EmsEnsureCap(VAR F: File; need: LONGINT): BOOLEAN;
@@ -580,8 +583,10 @@ END Copy;
    "OSTRIP.BAK") — keeps 8.3 names valid (no double extension). If path has
    no extension, newExt is simply appended. *)
 PROCEDURE ReplaceExt*(path: ARRAY OF CHAR; newExt: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
-  VAR i, k, dot, sep: INTEGER;
+  VAR i, dot, sep: INTEGER; extLen: WORD;
 BEGIN
+  (* The dot/sep scan tests 4 distinct byte values per position, not a single
+     byte -> not a FINDBYTE candidate; kept as a manual loop. *)
   dot := -1; sep := -1; i := 0;
   WHILE path[i] # 0X DO
     IF path[i] = "." THEN dot := i
@@ -590,11 +595,12 @@ BEGIN
     INC(i)
   END;
   IF dot <= sep THEN dot := i END;
-  k := 0;
-  WHILE k < dot DO dst[k] := path[k]; INC(k) END;
-  i := 0;
-  WHILE newExt[i] # 0X DO dst[k] := newExt[i]; INC(k); INC(i) END;
-  dst[k] := 0X
+  (* path/newExt are value params, dst is a separate VAR param -> non-aliased,
+     SYSTEM.MOVE is safe for both straight-line copies. *)
+  SYSTEM.MOVE(path[0], dst[0], WORD(dot));
+  extLen := SYSTEM.LENGTH(newExt);
+  SYSTEM.MOVE(newExt[0], dst[dot], extLen);
+  dst[dot + INTEGER(extLen)] := 0X
 END ReplaceExt;
 
 PROCEDURE FileExists*(FileName: ARRAY OF CHAR): BOOLEAN;

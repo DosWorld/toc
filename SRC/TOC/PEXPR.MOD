@@ -647,6 +647,8 @@ BEGIN
       MarkRead(arg);
       IF nArgs < 32 THEN
         argAdr[nArgs] := arg.adr; argGlobal[nArgs] := (arg.mode = Cgen.MGlobal)
+      ELSE
+        Error("too many INLINE call arguments (max 32)")
       END;
       INC(nArgs);
       IF f # Syms.NoSym THEN f := f.next END;
@@ -661,7 +663,7 @@ BEGIN
           Cgen.Emit1(n^.rawByte[k])
         ELSE
           idx := n^.paramIdx[k];
-          IF (idx >= 0) & (idx < nArgs) THEN
+          IF (idx >= 0) & (idx < nArgs) & (idx < 32) THEN
             IF argGlobal[idx] THEN
               Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, Cgen.CgPc(), 2, Rdoff.SegData, FALSE)
             END;
@@ -1140,6 +1142,19 @@ BEGIN
   CASE sc.sym OF
     Scan.TInt:
       item.mode := Cgen.MConst; item.val := sc.ival;
+      (* NOTE: the natural fix here (type any literal >= 32768 as LONGINT
+         instead of INTEGER, since it doesn't fit signed 16-bit range) was
+         tried and reverted 2026-07-11 — it breaks self-hosting.  RDOFF.MOD's
+         own `CONST SegLimit* = 65530` picks up LONGINT under that rule, and
+         retyping this single widely-imported CONST (via Parser.ParseConstDecl,
+         not the DefRead import path) ripples into a real, reproducible
+         self-host regression: a freshly self-hosted TOC.EXE rejects
+         `Halt(code: INTEGER)` called with a same-module INTEGER CONST
+         actual — `Syms.TypeParamCompat`'s pointer-identity check for
+         non-VAR params apparently gets a different `TypeInteger`/`TypeLongint`
+         resolution somewhere downstream.  Root cause not fully traced; the
+         threshold stays at 65536 (matching WORD's actual range) until this
+         is understood.  See CLAUDE.md's changelog for this date. *)
       IF sc.ival >= 65536 THEN
         item.type := Syms.TypeLongint
       ELSE item.type := Syms.TypeInteger END;
@@ -1895,6 +1910,32 @@ BEGIN
         Cgen.Emit3(025H, 0FFH, 000H);
         Cgen.Emit1(BYTE(Cgen.OpPushAx));
         rhs.type := Syms.TypeChar
+      (* CHAR vs single-char string literal (e.g. `c >= "0"`, c: CHAR): the
+         string side is really a char in disguise (LEN 2 = one char + NUL),
+         a common idiom, and this compiles correctly as-is since CgLoadItem
+         below loads the string's first byte address / the char's byte value
+         and CgCmp compares words — no array-vs-array string-compare codegen
+         is needed because one side isn't actually array-shaped at runtime. *)
+      ELSIF ((item.type # Syms.NoType) & (item.type.form = Syms.TFChar) &
+             (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFArray) &
+             (rhs.type.elem # NIL) & (rhs.type.elem.form = Syms.TFChar) &
+             (rhs.type.size = 2)) OR
+            ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFChar) &
+             (item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
+             (item.type.elem # NIL) & (item.type.elem.form = Syms.TFChar) &
+             (item.type.size = 2)) THEN
+        (* fall through unchanged — same codegen as before this fix *)
+      (* Any other ARRAY OF CHAR relop operand: this dialect has no
+         string-compare codegen (only the s="" byte-mask case above), so a
+         generic array falls through to a 2-byte word compare of just the
+         first two characters — silently wrong for s1=s2, s1<s2, etc.  Reject
+         at compile time rather than emit a codegen path that computes the
+         wrong answer; use Strings.Equal or a manual char-by-char loop. *)
+      ELSIF ((item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
+             (item.type.elem # NIL) & (item.type.elem.form = Syms.TFChar)) OR
+            ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFArray) &
+             (rhs.type.elem # NIL) & (rhs.type.elem.form = Syms.TFChar)) THEN
+        Error("relational operators on ARRAY OF CHAR are not supported (except comparing to an empty string literal); use Strings.Equal")
       END;
       Cgen.CgLoadItem(rhs);
       IF IsFpuType(rhs) THEN

@@ -12,11 +12,17 @@ BEGIN
 END NearLength;
 
 PROCEDURE Pos*(pat, s: ARRAY OF CHAR; pos: INTEGER): INTEGER;
-VAR i, j, lp, ls: INTEGER; found: BOOLEAN;
+VAR i, j, lp, ls, r: INTEGER; found: BOOLEAN;
 BEGIN
   lp := NearLength(pat);
   ls := NearLength(s);
   IF lp = 0 THEN RETURN pos END;
+  IF lp = 1 THEN
+    (* Single-char pattern: dispatch to the fast REPNE SCASB scan instead of
+       the general double loop below. *)
+    r := SYSTEM.FINDBYTE(s[pos], BYTE(pat[0]), WORD(ls - pos));
+    IF r = WORD(ls - pos) THEN RETURN -1 ELSE RETURN pos + r END
+  END;
   i := pos; found := FALSE;
   WHILE (i <= ls - lp) & ~found DO
     j := 0;
@@ -40,7 +46,7 @@ BEGIN
 END Append;
 
 PROCEDURE Insert*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
-VAR sl, dl, i, max: INTEGER;
+VAR sl, dl, i, max, tailLen: INTEGER;
 BEGIN
   sl := NearLength(src);
   dl := NearLength(dst);
@@ -48,6 +54,12 @@ BEGIN
   IF pos < 0 THEN pos := 0 END;
   IF pos > dl THEN pos := dl END;
   IF sl > 0 THEN
+    (* Shift-right: dst (destination dst[pos+sl..]) is at a HIGHER address
+       than src (dst[pos..]) and the ranges overlap — SYSTEM.MOVE's REP MOVSB
+       always copies low-to-high, so a forward SYSTEM.MOVE here would read
+       bytes AFTER they were already overwritten (silent corruption).  Must
+       stay a manual backward (high-to-low) loop; only the final src-copy
+       below (into the now-vacated gap) is safe to move in bulk. *)
     i := dl;
     WHILE i >= pos DO
       IF i + sl <= max THEN
@@ -55,58 +67,57 @@ BEGIN
       END;
       DEC(i)
     END;
-    i := 0;
-    WHILE (i < sl) & (pos + i < max) DO
-      dst[pos + i] := src[i];
-      INC(i)
-    END
+    (* src is a VALUE param (by-value copy on entry) so it can never alias
+       dst — a forward SYSTEM.MOVE into the gap is always safe here. *)
+    tailLen := SYSTEM.MIN(sl, max - pos);
+    IF tailLen > 0 THEN SYSTEM.MOVE(src[0], dst[pos], tailLen) END
   END
 END Insert;
 
 PROCEDURE Delete*(VAR s: ARRAY OF CHAR; pos, n: INTEGER);
-VAR i, l: INTEGER;
+VAR l, tailLen: INTEGER;
 BEGIN
   l := NearLength(s);
   IF pos < 0 THEN pos := 0 END;
   IF pos >= l THEN n := 0 END;
   IF pos + n > l THEN n := l - pos END;
   IF n > 0 THEN
-    i := pos;
-    WHILE i + n <= l DO
-      s[i] := s[i + n];
-      INC(i)
-    END
+    (* Shift-left: dst (s[pos..]) is at a LOWER address than src (s[pos+n..]),
+       so the ranges can overlap but a forward copy (SYSTEM.MOVE's REP MOVSB,
+       low-to-high) never reads a byte after it has already been overwritten
+       — safe, unlike Insert's shift-right below. Includes the terminating
+       0X, so tailLen = l - (pos+n) + 1. *)
+    tailLen := l - (pos + n) + 1;
+    SYSTEM.MOVE(s[pos + n], s[pos], tailLen)
   END
 END Delete;
 
 PROCEDURE Replace*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
-VAR i, sl, dl: INTEGER;
+VAR sl, dl, n: INTEGER;
 BEGIN
   sl := NearLength(src);
   dl := NearLength(dst);
   IF pos < 0 THEN pos := 0 END;
   IF pos > dl THEN pos := dl END;
-  i := 0;
-  WHILE (i < sl) & (pos + i < LEN(dst) - 1) DO
-    dst[pos + i] := src[i];
-    INC(i)
-  END;
-  IF pos + i > dl THEN dst[pos + i] := 0X END
+  (* src is a VALUE param (by-value copy on entry), so it can never alias
+     dst — a forward SYSTEM.MOVE is always safe regardless of pos vs dl. *)
+  n := SYSTEM.MIN(sl, LEN(dst) - 1 - pos);
+  IF n > 0 THEN SYSTEM.MOVE(src[0], dst[pos], n) END;
+  IF pos + n > dl THEN dst[pos + n] := 0X END
 END Replace;
 
 PROCEDURE Extract*(VAR src: ARRAY OF CHAR; pos, n: INTEGER; VAR dst: ARRAY OF CHAR);
-VAR i, sl: INTEGER;
+VAR sl: INTEGER;
 BEGIN
   sl := NearLength(src);
   IF pos < 0 THEN pos := 0 END;
   IF pos >= sl THEN n := 0 END;
   IF pos + n > sl THEN n := sl - pos END;
-  i := 0;
-  WHILE (i < n) & (i < LEN(dst) - 1) DO
-    dst[i] := src[pos + i];
-    INC(i)
-  END;
-  dst[i] := 0X
+  (* dst is a separate array from src, so no overlap is possible — a plain
+     forward SYSTEM.MOVE is always safe here. *)
+  n := SYSTEM.MIN(n, LEN(dst) - 1);
+  IF n > 0 THEN SYSTEM.MOVE(src[pos], dst[0], n) END;
+  dst[n] := 0X
 END Extract;
 
 (* 16-bit name hash (h := h*43 + c over the chars; WORD wraps mod 65536).  Cheap

@@ -108,6 +108,7 @@ PROCEDURE WriteTarHeader(VAR f: Files.File; VAR name: ARRAY OF CHAR; dataLen: LO
   VAR hdr: HdrBuf; csum: LONGINT;
 BEGIN
   NEW(hdr);
+  IF hdr = NIL THEN Err.Error("out of memory (tar header)"); RETURN END;
   SYSTEM.FILL(hdr^, 512, 0);
   SetStr(hdr, 0, 100, name);
   FillOctal(hdr, 100, 8, LONGINT(420));  (* mode 0644 *)
@@ -182,6 +183,7 @@ PROCEDURE TarExtract*(libPath: ARRAY OF CHAR; memberName: ARRAY OF CHAR;
 BEGIN
   IF ~Files.Reset(lib, libPath) THEN RETURN FALSE END;
   NEW(hdr);
+  IF hdr = NIL THEN Err.Error("out of memory (tar header)"); Files.Close(lib); RETURN FALSE END;
   done := FALSE;
   WHILE ~done DO
     n := Files.BlockRead(lib, hdr^[0], 512);
@@ -239,6 +241,7 @@ PROCEDURE ScanTar*(archPath: ARRAY OF CHAR; onMember: MemberProc;
       ok: BOOLEAN;
 BEGIN
   NEW(hdr);
+  IF hdr = NIL THEN Err.Error("out of memory (tar header)"); RETURN END;
   IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);
@@ -327,6 +330,7 @@ PROCEDURE ListTar*(archPath: ARRAY OF CHAR; onMember: MemberProc);
       n: INTEGER;
 BEGIN
   NEW(hdr);
+  IF hdr = NIL THEN Err.Error("out of memory (tar header)"); RETURN END;
   IF ~Files.Reset(f, archPath) THEN Err.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);

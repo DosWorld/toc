@@ -79,8 +79,12 @@ TYPE
 
   ObjFile* = POINTER TO ObjFileRec;
 
-  (* 64KB segment buffer — used by the linker for code/data buffers. *)
-  SegBuf* = POINTER TO ARRAY 65000 OF BYTE;
+  (* 64KB segment buffer — used by the linker for code/data buffers.
+     SYSTEM.ADDRESS (a raw far pointer), not POINTER TO ARRAY: callers in
+     LINK.MOD must be updated to use SYSTEM.PUT/GET or ADR-based addressing
+     and a raw allocation mechanism instead of NEW/array-index/BlockWrite
+     syntax — that follow-up rewrite is NOT done as part of this change. *)
+  SegBuf* = SYSTEM.ADDRESS;
 
   (* Callbacks for ScanHeader and ScanRelocs. *)
   GlobalProc* = PROCEDURE(name: ARRAY OF CHAR; seg: INTEGER; ofs: LONGINT);
@@ -197,13 +201,20 @@ BEGIN
     Files.WriteByte(obj^.codeFile, b2);
     IF n >= 3 THEN Files.WriteByte(obj^.codeFile, b3) END;
     IF n >= 4 THEN Files.WriteByte(obj^.codeFile, b4) END;
-    INC(obj^.codeLen, n)
+    (* Guard the WORD counter against silent wrap before it happens (a wrap
+       here would let a >64K-byte segment sneak past RdfWriteTo's one-shot
+       >= SegLimit check with a falsely-small wrapped value). *)
+    IF LONGINT(obj^.codeLen) + LONGINT(n) > LONGINT(SegLimit) THEN
+      Err.Error("error: code segment exceeds limit")
+    ELSE INC(obj^.codeLen, n) END
   ELSE
     Files.WriteByte(obj^.dataFile, b1);
     Files.WriteByte(obj^.dataFile, b2);
     IF n >= 3 THEN Files.WriteByte(obj^.dataFile, b3) END;
     IF n >= 4 THEN Files.WriteByte(obj^.dataFile, b4) END;
-    INC(obj^.dataLen, n)
+    IF LONGINT(obj^.dataLen) + LONGINT(n) > LONGINT(SegLimit) THEN
+      Err.Error("error: data segment exceeds limit")
+    ELSE INC(obj^.dataLen, n) END
   END
 END emitN;
 
@@ -221,10 +232,14 @@ PROCEDURE EmitWord*(obj: ObjFile; seg: INTEGER; w: INTEGER);
 BEGIN
   IF seg = SegCode THEN
     Files.WriteWord(obj^.codeFile, w);
-    INC(obj^.codeLen, 2)
+    IF LONGINT(obj^.codeLen) + LONGINT(2) > LONGINT(SegLimit) THEN
+      Err.Error("error: code segment exceeds limit")
+    ELSE INC(obj^.codeLen, 2) END
   ELSE
     Files.WriteWord(obj^.dataFile, w);
-    INC(obj^.dataLen, 2)
+    IF LONGINT(obj^.dataLen) + LONGINT(2) > LONGINT(SegLimit) THEN
+      Err.Error("error: data segment exceeds limit")
+    ELSE INC(obj^.dataLen, 2) END
   END
 END EmitWord;
 
@@ -232,10 +247,14 @@ PROCEDURE EmitBlock*(obj: ObjFile; seg: INTEGER; VAR buf; len : WORD);
 BEGIN
   IF seg = SegCode THEN
     Files.BlockWrite(obj^.codeFile, buf^, len);
-    INC(obj^.codeLen, len)
+    IF LONGINT(obj^.codeLen) + LONGINT(len) > LONGINT(SegLimit) THEN
+      Err.Error("error: code segment exceeds limit")
+    ELSE INC(obj^.codeLen, len) END
   ELSE
     Files.BlockWrite(obj^.dataFile, buf^, len);
-    INC(obj^.dataLen, len)
+    IF LONGINT(obj^.dataLen) + LONGINT(len) > LONGINT(SegLimit) THEN
+      Err.Error("error: data segment exceeds limit")
+    ELSE INC(obj^.dataLen, len) END
   END
 END EmitBlock;
 
@@ -243,6 +262,12 @@ PROCEDURE EmitZero*(obj: ObjFile; n: LONGINT);
   VAR buf : ARRAY 128 OF BYTE;
 BEGIN
   SYSTEM.FILL(buf, 128, 0);
+  (* Guard against the WORD counter wrapping silently past SegLimit before
+     truncating n into it (n can be large: this zero-fills a whole global
+     array's worth of data-segment bytes in one call). *)
+  IF LONGINT(obj^.dataLen) + n > LONGINT(SegLimit) THEN
+    Err.Error("error: data segment exceeds limit"); RETURN
+  END;
   INC(obj^.dataLen, WORD(n));   (* count the zero-fill bytes so RdfWrite copies them *)
   WHILE n > 128 DO
     Files.BlockWrite(obj^.dataFile, buf, 128);

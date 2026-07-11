@@ -12,7 +12,7 @@
 objects will produce false results. `make test` enforces this automatically.
 
 ```bash
-make test      # clean, full rebuild, run 277 manifest rows (host-side, fast)
+make test      # clean, full rebuild, run 280 manifest rows (host-side, fast)
 make testall   # full DOS-side suite via xt: manifest + Section 17/18 + SYSTEM.DEF checks (~9 min)
 ```
 
@@ -135,7 +135,7 @@ and `testall.exe` (T5/T6 — SYSTEM.DEF absent checks).  The old
 
 A TSV-driven test runner — one row per test, no shell heredocs.  Each row
 names a fixture in `TESTS/FIX/`, optional compiler flags, an EXPECT
-predicate, and an argument.  **272 rows, all passing.**
+predicate, and an argument.  **280 rows, all passing.**
 
 Driven by two runners:
 - **Host-side (POSIX):** `make -f TESTS/Makefile.man test` — GNU make, calls xt per row.  Per-row scratch dirs are created under the project `TMP/` (not the system tmpfs); see `TMPROOT` in `TESTS/Makefile.man`.
@@ -204,7 +204,7 @@ form and survives all codegen reshuffles.
 
 ## Integration tests
 
-All integration tests are now in `TESTS/MANIFEST.TSV` (272 rows) or run by
+All integration tests are now in `TESTS/MANIFEST.TSV` (280 rows) or run by
 `BIN/TESTALL.EXE` (Section 17/18 executables + SYSTEM.DEF artefact checks).
 The old bash drivers (`test_src.sh`, `test_system_intrinsics.sh`) have been deleted —
 their content is fully covered by the manifest and testall.
@@ -375,7 +375,7 @@ Regressions of historical compiler bugs are preserved in the corresponding modul
   codegen (G7, `DOCS/IMPLRULE.MD` §"CASE jump-table dispatch"); it caught a
   real out-of-range-dispatch bug (values outside the label range fell into
   arm 1's body instead of the `ELSE`/fall-through target) that `make test`'s
-  272-row manifest cannot catch, since the manifest only checks compile-time
+  280-row manifest cannot catch, since the manifest only checks compile-time
   byte/symbol patterns, not runtime dispatch correctness. Also runnable
   standalone, bypassing `make testall`'s harness bugs:
   `toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe`.

@@ -209,7 +209,7 @@ MUST have an explicit unconditional jump (`CgJmpNear(defaultJmp)`) past every
 arm's body. Without it, out-of-range values silently fall into whatever code
 is emitted next (arm 1's body) — this was a real bug in the first
 implementation, caught by `TESTS/TCASETBL.MOD`'s `TDenseNoElse`/
-`TDenseWithElse` tests, not by `make test` (the 272-row manifest only checks
+`TDenseWithElse` tests, not by `make test` (the 280-row manifest only checks
 compile-time byte/symbol patterns, not runtime dispatch correctness).
 
 **This dialect has no `LOOP`/`EXIT` statement at all** — `SkipArmBody`'s
@@ -325,7 +325,8 @@ frame bigger than ~7 KB **wraps SP around 64 K** — the locals land at
 There is no fault: the procedure happily reads/writes someone else's heap
 memory.  `Files.BlockCopy`'s old 8 KB staging buffer did exactly this on
 every `Tar.TarExtract` and silently corrupted StrTab/Files heap data for
-months (opt.md §8) — it surfaced only when the 2026-07 RAM arenas moved live
+months (found and fixed 2026-07-11 — see CLAUDE.md's "Self-hosting RESTORED"
+changelog entry) — it surfaced only when the 2026-07 RAM arenas moved live
 symbol data into the blast zone.  Rules:
 
 - Local buffers: **≤ 512 bytes** preferred, 2 KB absolute ceiling (audit the
@@ -341,7 +342,8 @@ symbol data into the blast zone.  Rules:
 When the heap is exhausted, `NEW(p)` yields `p = NIL`; a following
 `p^.field := x` is a **NIL far write into the interrupt vector table** — no
 fault under xt, just silent corruption, and the compile continues producing
-garbage ("undefined identifier" cascades hundreds of lines later; opt.md §8).
+garbage ("undefined identifier" cascades hundreds of lines later; found and
+fixed 2026-07-11 — see CLAUDE.md's "Self-hosting RESTORED" changelog entry).
 Every `NEW` on a compiler-critical path must check for NIL and latch
 `Err.Error("out of memory (...)")` (fail-fast does the rest).
 `Parser.IdListAppend` and `Syms.SymOpenScope` are the canonical examples;
@@ -356,8 +358,9 @@ bytes).  Any jump over a *parsed* region (an expression, a statement, an RHS)
 must use `CgCondNear`/`CgJmpNear`/`CgPatchNear` (rel16): parsed regions have
 unbounded size, and a >127-byte span silently wraps the rel8 **backward into
 the middle of another instruction** (wild execution: hang or invalid opcode).
-This exact bug in the short-circuit `&`/`OR` emitters broke self-hosting
-(opt.md §8).  `CgPatchShort` now latches a fatal
+This exact bug in the short-circuit `&`/`OR` emitters broke self-hosting;
+found and fixed 2026-07-11 (see CLAUDE.md's "Self-hosting RESTORED" changelog
+entry).  `CgPatchShort` now latches a fatal
 `"internal: short jump out of range"` when the displacement leaves −128..127
 — if you ever see that error, the fix is to switch the call site to the near
 variants, never to widen the check.
@@ -887,6 +890,19 @@ lines on `exported`, but the `RECORD <size> … END` wrapper is unconditional.
 - Followed by zero or more `  PARAM [VAR] name type` lines
 - Terminated by `END`
 - Even procedures with **no parameters** use this format
+
+**CONST line has no type token — the reader infers it from magnitude.**
+`Def.DefWrite` writes only the decimal value (`CONST fullname intValue`); it
+never carries the exporting module's declared CONST type (INTEGER/WORD/
+LONGINT — recall CONST is integer-family-only, see §"CONST declarations are
+integer-only" in OBERLANG.MD).  `Def.DefRead` types the imported symbol
+LONGINT when the value falls outside signed INTEGER range (-32768..32767),
+INTEGER otherwise.  A value in that range is always typed INTEGER on import
+even if the exporter declared it WORD or LONGINT — this is a lossy but safe
+default (the bit pattern is identical for all three types at that magnitude).
+Without this inference, `CONST Big* = 100000` imported as INTEGER silently
+truncated to 34464 at every use site with no diagnostic (found and fixed
+2026-07-11).
 
 ---
 

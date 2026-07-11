@@ -233,7 +233,7 @@ On the host, run them with the `xt` emulator. See [XT.MD](XT.MD) for full refere
 incremental compilation, and linking in a single invocation.
 
 ```
-toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] <Root.Mod>
+toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <Root.Mod>
 ```
 
 Switches are case-insensitive (`/M`=`/m`, `/SYSTEM`=`/system`, `/ENTRY=`=`/entry=`);
@@ -256,6 +256,12 @@ the `/ENTRY=` value keeps its case.  Any other option is a fatal `unknown option
   loads the trailing block — debugger-only data).  Inspect with
   `BIN/TDINFO.EXE FILE.EXE`.  Details: `DOCS/OBERLANG.MD` §"Debug info",
   `DOCS/IMPLRULE.MD` §".DBG file format", `DOCS/TD-SPEC.MD`.
+- `/LOG=level` — set diagnostic verbosity for `Err` (case-insensitive):
+  `debug`, `info`, `warn`, or `error`.  Calls `Err.SetLevel`; the module's own
+  compiled-in default is otherwise unchanged (no other code path calls
+  `SetLevel`).  At the default level, non-fatal `WarnInFile` messages
+  (dead-code/unused-symbol warnings) are suppressed — use `/LOG=warn` or
+  `/LOG=debug` to see them.  All Makefiles in this repo pass `/LOG=debug`.
 
 ```bash
 # Compile a library (no /ENTRY=): transitive dep scan + incremental compile

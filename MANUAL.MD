@@ -274,6 +274,7 @@ an error. Everything below is reached as `SYSTEM.Name`.
 | `SYSTEM.FILL(dst, n, b)` | — | Fill `n` bytes at `dst` with byte `b` |
 | `SYSTEM.PORTOUT(p, b)` | — | `OUT` byte `b` to I/O port `p` |
 | `SYSTEM.PORTIN(p)` | `BYTE` | `IN` a byte from I/O port `p` |
+| `SYSTEM.FINDBYTE(buf, b, maxLen)` | `WORD` | Scan up to `maxLen` bytes at `buf` for byte `b` (`REPNE SCASB`); returns 0-based offset of the first match, or `maxLen` if not found |
 
 `SYSTEM.ADDRESS` is the universal 4-byte far value — assignment-compatible
 with any `POINTER`, and usable on its own as an implicit `POINTER TO CHAR`

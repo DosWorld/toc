@@ -120,6 +120,22 @@ PROCEDURE FILL*(VAR dst; n: WORD; b: BYTE);
   INLINE(058H,059H,05FH,007H,08AH,0E0H,0FCH,
          0D1H,0E9H,0F3H,0ABH,013H,0C9H,0F3H,0AAH);
 
+(* FINDBYTE(VAR buf; b: BYTE; maxLen: WORD): WORD
+   Scans up to maxLen bytes at buf for byte b using REPNE SCASB; returns the
+   0-based offset of the first match, or maxLen if not found.  Does not use
+   JCXZ/LOOP (project rule — both are slow on real 8086 hardware): the
+   zero-length guard uses OR CX,CX / JZ instead of JCXZ.
+   Caller pushes address of buf (seg+ofs, 4 bytes), b (2 bytes), maxLen (2 bytes).
+   Stack on entry (POP order): maxLen, b, buf_ofs, buf_seg.
+   POP CX=maxLen; POP AX=b; POP DI=buf_ofs; POP ES=buf_seg; MOV DX,CX (save
+   maxLen); CLD; OR CX,CX; JZ done (maxLen=0 -> AX:=DX=0); REPNE SCASB;
+   JNZ done (not found -> AX:=DX=maxLen); INC CX (undo the match's own
+   decrement); SUB DX,CX (DX := index of match); done: MOV AX,DX —
+   SP balanced. *)
+PROCEDURE FINDBYTE*(VAR buf; b: BYTE; maxLen: WORD): WORD;
+  INLINE(059H,058H,05FH,007H,089H,0CAH,0FCH,009H,0C9H,074H,007H,
+         0F2H,0AEH,075H,003H,041H,029H,0CAH,089H,0D0H);
+
 (* COMPARE(VAR Mem1, Mem2; len: WORD): BOOLEAN
    Word-compare variant: len DIV 2 words via REPE CMPSW, then the odd trailing
    byte via CMPSB.  Unlike MOVE/FILL, CMPSW clobbers CF, so the odd bit is

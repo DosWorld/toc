@@ -421,7 +421,14 @@ BEGIN
     IF hasHex THEN ScanError(s, "hex digit in decimal literal") END;
     v := 0; i := 0;
     WHILE i < n DO
-      v := v * 10 + LONGINT(ORD(buf[i]) - ORD("0"));
+      (* Overflow check before the multiply: v*10+d overflows a signed
+         32-bit LONGINT (max 2147483647) iff v > (MaxLongint-d) DIV 10.
+         Checked pre-multiply so the comparison itself never overflows. *)
+      IF v > (LONGINT(2147483647) - LONGINT(ORD(buf[i]) - ORD("0"))) DIV LONGINT(10) THEN
+        ScanError(s, "numeric literal too large"); v := LONGINT(2147483647)
+      ELSE
+        v := v * 10 + LONGINT(ORD(buf[i]) - ORD("0"))
+      END;
       INC(i)
     END;
     s.ival := v;

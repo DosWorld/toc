@@ -589,7 +589,12 @@ BEGIN
       IF Strings.Equal(kw, "CONST") THEN
         v := ReadLong(line, i);
         s := Syms.SymNew(qname, Syms.KConst);
-        s.val := v; s.type := Syms.TypeInteger;
+        s.val := v;
+        IF (v < LONGINT(-32768)) OR (v > LONGINT(32767)) THEN
+          s.type := Syms.TypeLongint
+        ELSE
+          s.type := Syms.TypeInteger
+        END;
         s.exported := TRUE; s.modId := StrTab.Intern(alias)
       ELSIF Strings.Equal(kw, "VAR") THEN
         (* Two formats:

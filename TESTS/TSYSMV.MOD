@@ -142,6 +142,40 @@ BEGIN
   Test.AssertTrue(~SYSTEM.COMPARE(src[0], dst[0], 1), "COMPARE n=1 mismatch")
 END TCompare;
 
+PROCEDURE TFindByte*;
+  VAR r: WORD;
+BEGIN
+  InitBufs;                                 (* src[i] = i+1, i.e. bytes 1..40 *)
+  r := SYSTEM.FINDBYTE(src[0], BYTE(1), WORD(40));
+  Test.AssertTrue(r = WORD(0), "FINDBYTE found at start");
+  r := SYSTEM.FINDBYTE(src[0], BYTE(40), WORD(40));
+  Test.AssertTrue(r = WORD(39), "FINDBYTE found at end");
+  r := SYSTEM.FINDBYTE(src[0], BYTE(21), WORD(40));
+  Test.AssertTrue(r = WORD(20), "FINDBYTE found in middle");
+  r := SYSTEM.FINDBYTE(src[0], BYTE(99), WORD(40));
+  Test.AssertTrue(r = WORD(40), "FINDBYTE not found returns maxLen");
+  r := SYSTEM.FINDBYTE(src[0], BYTE(1), WORD(0));
+  Test.AssertTrue(r = WORD(0), "FINDBYTE maxLen=0 returns 0");
+  r := SYSTEM.FINDBYTE(src[5], BYTE(10), WORD(35));  (* odd start ofs *)
+  Test.AssertTrue(r = WORD(4), "FINDBYTE odd start offset");
+  r := SYSTEM.FINDBYTE(src[0], BYTE(5), WORD(3));    (* match past scan window *)
+  Test.AssertTrue(r = WORD(3), "FINDBYTE match beyond maxLen not found")
+END TFindByte;
+
+PROCEDURE TStringsPos*;
+  VAR s: ARRAY 16 OF CHAR; r: INTEGER;
+BEGIN
+  Strings.Copy("hello,world", s);
+  r := Strings.Pos(",", s, 0);
+  Test.AssertTrue(r = 5, "Pos single-char found");
+  r := Strings.Pos("x", s, 0);
+  Test.AssertTrue(r = -1, "Pos single-char not found");
+  r := Strings.Pos("d", s, 0);
+  Test.AssertTrue(r = 10, "Pos single-char at end");
+  r := Strings.Pos(",", s, 6);
+  Test.AssertTrue(r = -1, "Pos single-char start past match")
+END TStringsPos;
+
 PROCEDURE RunAllTests*;
 BEGIN
   Test.AddTest(TMove,       "TSYSMV/move");
@@ -149,6 +183,8 @@ BEGIN
   Test.AddTest(TFill,       "TSYSMV/fill");
   Test.AddTest(TCompare,    "TSYSMV/compare");
   Test.AddTest(TEqual,      "TSYSMV/equal");
+  Test.AddTest(TFindByte,   "TSYSMV/findByte");
+  Test.AddTest(TStringsPos, "TSYSMV/stringsPos");
   Test.RunTests
 END RunAllTests;
 

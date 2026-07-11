@@ -8,7 +8,7 @@ MODULE TPRSR;
    (test_src.sh Section 18) copies each fixture into the workdir before
    running the test. *)
 
-IMPORT Test, Files, Scan, Parser;
+IMPORT Test, Files, Scan, Parser, Strings;
 
 VAR
   defText: ARRAY 4096 OF CHAR;
@@ -71,7 +71,7 @@ PROCEDURE TSimpleModule*;
 BEGIN
   ok := parseFixture(sc, "PRSR01.MOD");
   Test.AssertTrue(ok, "PRSR01 parses without errors");
-  Test.AssertTrue(Parser.parserModName = "Prsr01", "PRSR01 module name");
+  Test.AssertTrue(Strings.Equal(Parser.parserModName, "Prsr01"), "PRSR01 module name");
   (* ParseModule writes Prsr01.om and removes Prsr01.rdf / Prsr01.def. *)
   Test.AssertTrue(slurp("Prsr01.om"), "PRSR01 produced .om");
   Test.AssertTrue(findBytes("PRSR01.DEF"), "PRSR01.om contains PRSR01.DEF entry");

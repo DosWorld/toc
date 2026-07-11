@@ -4,10 +4,10 @@ MODULE Err;
 IMPORT IO, Files, Strings;
 
 CONST
-LERROR* = 1;
-LINFO*  = 2;
-LWARN*  = 3;
-LDEBUG* = 4;
+LERROR* = 100;
+LINFO*  = 200;
+LWARN*  = 300;
+LDEBUG* = 400;
 
 VAR
 err      : BOOLEAN;
@@ -185,7 +185,7 @@ END DebugInFile;
 BEGIN
   IO.StdErr(errRider);
   IO.StdOut(outRider);
-  SetLevel(LDEBUG);
+  SetLevel(LINFO);
   logOpen := FALSE;
   err := FALSE
 END Err.

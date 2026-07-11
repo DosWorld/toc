@@ -231,7 +231,8 @@ BEGIN
        later with a misleading "undefined identifier" (or worse, corrupts
        the IVT via the NIL far write below).  This exact silent-OOM path is
        what broke self-hosting when a $M-less build ran with the 256 KB
-       default heap — see opt.md §8 (2026-07-11). *)
+       default heap (fixed 2026-07-11; see DOCS/IMPLRULE.MD §"Allocation
+       failure is FATAL"). *)
     Err.Error("out of memory (ident list)");
     RETURN head
   END;
@@ -439,9 +440,9 @@ BEGIN
     out.isFar := TRUE; out.size := Syms.SzPointer;
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, modWord);
-      IF modWord = "FAR" THEN
+      IF Strings.Equal(modWord, "FAR") THEN
         Scan.Next(PExpr.sc)
-      ELSIF modWord = "NEAR" THEN
+      ELSIF Strings.Equal(modWord, "NEAR") THEN
         PExpr.Error("PROCEDURE NEAR type is not supported — proc-typed VARs are always FAR");
         Scan.Next(PExpr.sc)
       END
@@ -639,9 +640,9 @@ BEGIN
     wordA := "";
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, wordA);
-      IF wordA = "FAR" THEN
+      IF Strings.Equal(wordA, "FAR") THEN
         pt.isFar := TRUE; Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi)
-      ELSIF wordA = "NEAR" THEN
+      ELSIF Strings.Equal(wordA, "NEAR") THEN
         IF exported THEN PExpr.Error("exported procedure cannot be NEAR") END;
         pt.isFar := FALSE; Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi)
       END
@@ -650,19 +651,19 @@ BEGIN
     (* FORWARD / EXTERNAL / INLINE — one token peek, one dispatch *)
     IF PExpr.sc.sym = Scan.TIdent THEN
       Strings.Copy(PExpr.sc.id, wordA);
-      IF wordA = "FORWARD" THEN
+      IF Strings.Equal(wordA, "FORWARD") THEN
         Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi);
         Syms.TypeCalcArgSize(pt);
         sym.fwdDecl := TRUE;
         Syms.SymCloseScope(); RETURN
-      ELSIF wordA = "EXTERNAL" THEN
+      ELSIF Strings.Equal(wordA, "EXTERNAL") THEN
         Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi);
         Syms.TypeCalcArgSize(pt);
         Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname);
         sym.rdoffId := Rdoff.RdfAddImport(Cgen.CgObj, gname);
         sym.codeOfs := 0;
         Syms.SymCloseScope(); RETURN
-      ELSIF wordA = "INLINE" THEN
+      ELSIF Strings.Equal(wordA, "INLINE") THEN
         Scan.Next(PExpr.sc); PExpr.Expect(Scan.TLparen);
         inlNode := NIL; inlTail := NIL; nInl := 0;
         WHILE (PExpr.sc.sym # Scan.TRparen) & (PExpr.sc.sym # Scan.TEof) DO
@@ -733,7 +734,7 @@ BEGIN
   END;
   PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
-    IF PExpr.sc.id # name THEN PExpr.Error("procedure name mismatch") END;
+    IF ~Strings.Equal(PExpr.sc.id, name) THEN PExpr.Error("procedure name mismatch") END;
     Scan.Next(PExpr.sc)
   END;
 
@@ -1047,12 +1048,12 @@ BEGIN
         Scan.Next(PExpr.sc);
         Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc)
       END;
-      IF ~parserSystemMode & (iname = "SYSTEM") THEN
+      IF ~parserSystemMode & Strings.Equal(iname, "SYSTEM") THEN
         PExpr.Error("SYSTEM is implicitly imported")
       ELSE
         isym := Syms.SymNew(alias, Syms.KImport);
         isym.modId := StrTab.Intern(iname);
-        IF iname # "SYSTEM" THEN
+        IF ~Strings.Equal(iname, "SYSTEM") THEN
           NEW(ip); Strings.Copy(iname, ip^.name); ip^.next := NIL;
           IF initImpsTail # NIL THEN initImpsTail^.next := ip ELSE initImpsHead := ip END;
           initImpsTail := ip; INC(nInitImps)
@@ -1131,7 +1132,7 @@ BEGIN
 
   PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
-    IF PExpr.sc.id # modName THEN PExpr.Error("module name mismatch at END") END;
+    IF ~Strings.Equal(PExpr.sc.id, modName) THEN PExpr.Error("module name mismatch at END") END;
     Scan.Next(PExpr.sc)
   END;
   PExpr.Expect(Scan.TDot);

@@ -45,7 +45,7 @@ OBERON.OM: $(BIN_OM)
 # Single-command self-host: toc /ENTRY=Run TOC.MOD scans deps, compiles every
 # stale module and links TOC.exe in one process.
 TOC.exe: $(OC_SRCS) $(OCBOOT) OBERON.OM
-	time $(XTRUN) $(OCBOOT) /ENTRY=Run TOC.MOD /M
+	time $(XTRUN) $(OCBOOT) /LOG=debug /ENTRY=Run TOC.MOD /M
 
 install: TOC.exe
 	mkdir -p ../../BIN

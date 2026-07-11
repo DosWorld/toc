@@ -35,14 +35,14 @@ all: $(TOOLS)
 $(BINDIR)/RDFGREP.EXE: RDFGREP.MOD $(BIN_OC)
 	mkdir -p $(BINDIR)
 	$(XTRUN) -e 'OBERON_LIB=$(OBERON_LIB)' $(BIN_OC) \
-	    /ENTRY=Run SRC/TOOLS/RDFGREP.MOD
+	    /LOG=debug /ENTRY=Run SRC/TOOLS/RDFGREP.MOD
 	mv ../../RDFGREP.exe $(BINDIR)/RDFGREP.EXE
 
 # ── testall ────────────────────────────────────────────────────────────
 $(BINDIR)/TESTALL.EXE: $(TESTDIR)/TESTALL.MOD $(BIN_OC)
 	mkdir -p $(BINDIR)
 	$(XTRUN) -e 'OBERON_LIB=$(OBERON_LIB)' $(BIN_OC) \
-	    /ENTRY=Run TESTS/TESTALL.MOD
+	    /LOG=debug /ENTRY=Run TESTS/TESTALL.MOD
 	mv ../../TESTALL.exe $(BINDIR)/TESTALL.EXE
 
 # ── tdinfo ─────────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ $(BINDIR)/TESTALL.EXE: $(TESTDIR)/TESTALL.MOD $(BIN_OC)
 $(BINDIR)/TDINFO.EXE: TDINFO.MOD $(BIN_OC)
 	mkdir -p $(BINDIR)
 	$(XTRUN) -e 'OBERON_LIB=$(OBERON_LIB)' $(BIN_OC) \
-	    /ENTRY=Run SRC/TOOLS/TDINFO.MOD
+	    /LOG=debug /ENTRY=Run SRC/TOOLS/TDINFO.MOD
 	mv ../../TDINFO.exe $(BINDIR)/TDINFO.EXE
 
 
@@ -60,7 +60,7 @@ $(BINDIR)/TDINFO.EXE: TDINFO.MOD $(BIN_OC)
 $(BINDIR)/TOSTRIP.EXE: TOSTRIP.MOD $(BIN_OC)
 	mkdir -p $(BINDIR)
 	$(XTRUN) -e 'OBERON_LIB=$(OBERON_LIB)' $(BIN_OC) \
-	    /ENTRY=Run SRC/TOOLS/TOSTRIP.MOD
+	    /LOG=debug /ENTRY=Run SRC/TOOLS/TOSTRIP.MOD
 	mv ../../TOSTRIP.exe $(BINDIR)/TOSTRIP.EXE
 
 # ── tolib ──────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ $(BINDIR)/TOSTRIP.EXE: TOSTRIP.MOD $(BIN_OC)
 $(BINDIR)/TOLIB.EXE: TOLIB.MOD $(BIN_OC)
 	mkdir -p $(BINDIR)
 	$(XTRUN) -e 'OBERON_LIB=$(OBERON_LIB)' $(BIN_OC) \
-	    /ENTRY=Run SRC/TOOLS/TOLIB.MOD
+	    /LOG=debug /ENTRY=Run SRC/TOOLS/TOLIB.MOD
 	mv ../../TOLIB.exe $(BINDIR)/TOLIB.EXE
 
 clean:

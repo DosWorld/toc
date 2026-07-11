@@ -75,7 +75,7 @@ That means:
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
-- **272-row regression manifest** plus DOS-side executable and unit-test
+- **280-row regression manifest** plus DOS-side executable and unit-test
   suites — every codegen change is checked against real compiled/linked/run
   output, not just "it compiled."
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
@@ -232,7 +232,7 @@ Fourteen modules, merged into one `BIN/OBERON.OM` archive:
 | `Mem` | Raw heap: `Alloc`/`Free` with a 65 KB guard |
 | `Dos` | Args, `Exec`, `FindFirst`, date/time, interrupts |
 | `Time` | DOS packed date/time <-> `DateTime` record conversion (`PackTime`/`UnpackTime`) |
-| `Crt` | Terminal control via INT 10h: cursor, clear, colour |
+| `Crt` | ANSI-Terminal control: cursor, clear, colour |
 | `Math` | FPU math: sin, cos, sqrt, exp, ln, abs, … |
 | `EMS` | Expanded-memory page-frame management |
 | `Test` | Unit-test framework: `AddTest`, `RunTests`, `Assert*` |
@@ -243,7 +243,7 @@ Fourteen modules, merged into one `BIN/OBERON.OM` archive:
 ## Test suite
 
 ```bash
-make test     # 294-row manifest — codegen bytes, RDOFF structure, error messages, exit codes
+make test     # 280-row manifest — codegen bytes, RDOFF structure, error messages, exit codes
 make testall  # + DOS-side executables (Section 17) and unit tests (Section 18)
 ```
 

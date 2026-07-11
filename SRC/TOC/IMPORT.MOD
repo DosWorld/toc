@@ -51,7 +51,12 @@ BEGIN
     IF Strings.Equal(p^.alias, alias) THEN RETURN TRUE END;
     p := p^.next
   END;
-  NEW(p); Strings.Copy(alias, p^.alias); p^.next := loadedHead; loadedHead := p;
+  NEW(p);
+  IF p = NIL THEN
+    Err.Error("out of memory (loaded-import list)");
+    RETURN FALSE
+  END;
+  Strings.Copy(alias, p^.alias); p^.next := loadedHead; loadedHead := p;
   RETURN FALSE
 END AlreadyLoaded;
 

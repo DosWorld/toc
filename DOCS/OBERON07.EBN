@@ -388,7 +388,13 @@ expr        = SimpleExpr [ relOp SimpleExpr ] .
    "IN": i IN s → BOOLEAN; i must be INTEGER/BYTE, s must be SET.
    "IS": type test — LHS must be POINTER TO RECORD; RHS must be a RECORD type name.
          Folds to TRUE if static type of LHS^ extends RHS, FALSE if unrelated.
-         Runtime tag check emitted when RHS extends LHS (requires heap allocation via NEW). *)
+         Runtime tag check emitted when RHS extends LHS (requires heap allocation via NEW).
+   DEVIATION: relOps on ARRAY OF CHAR are NOT implemented as a string compare
+         (standard Oberon-07 defines them so). Only `s = ""` (RHS a size-1
+         empty-string literal) is accepted, via a byte-mask special case; any
+         other array-of-char relop operand is a fatal compile error ("use
+         Strings.Equal") rather than a silent 2-byte word compare of the first
+         two characters. See DOCS/OBERLANG.MD §"Known limitations". *)
 
 relOp       = "=" | "#" | "<" | "<=" | ">" | ">=" | "IN" | "IS" .
 (* "IN": SET membership — implemented. i IN s: test bit i in set s.
@@ -497,6 +503,9 @@ SysIdent    = "LSL" | "LSR" | "ASR" | "ROR" | "AND" | "IOR" | "XOR" .
 (* FILL(VAR dst; n: INTEGER; b: BYTE) — POP-based inline: REP STOSB fill (any segment). *)
 (* PORTOUT(port: INTEGER; val: BYTE) — POP-based inline: OUT DX, AL. *)
 (* PORTIN(port: INTEGER; VAR val: BYTE) — POP-based inline: IN AL, DX; MOV ES:[BX], AL. *)
+(* FINDBYTE(VAR buf; b: BYTE; maxLen: WORD): WORD — POP-based inline: REPNE SCASB scan;
+                            returns 0-based offset of first match, or maxLen if not found.
+                            Zero-length guard uses OR CX,CX/JZ, not JCXZ (project rule). *)
 (* Note: SYSTEM.GET, SYSTEM.PUT, and SYSTEM.VAL are NOT available in this dialect.
          Use POINTER TO T and p^ to read/write through an ADDRESS value.
          Use standard type casts INTEGER(x), BYTE(x), CHR(x), ORD(x) instead of VAL. *)

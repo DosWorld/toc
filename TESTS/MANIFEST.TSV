@@ -33,17 +33,17 @@ init/1e2-used-hello-init-imported	USEHELLO.MOD+HELLO.OM		has-import	Hello__init
 init/1e2-used-hello-main-imported	USEHELLO.MOD+HELLO.OM		has-import	Hello_Main
 sanitize/import-only-no-init	SANIONLY.MOD+HELLO.OM		no-import	Hello__init
 sanitize/nops-where-call-was	SANIONLY.MOD+HELLO.OM		code-contains	90 90 90 90 90
-dead/var-global-unused	DEAD1.MOD		stderr-contains	unused' declared but never used
-dead/var-global-used-no-warn	DEAD1.MOD		stderr-no-contains	'used' declared
-dead/var-local-unused	DEAD2.MOD		stderr-contains	'tmp' declared but never used
-dead/var-local-used-no-warn	DEAD2.MOD		stderr-no-contains	'i' declared
-dead/param-unused	DEAD3.MOD		stderr-contains	parameter 'y' declared but never used
-dead/proc-unused	DEAD4.MOD		stderr-contains	procedure 'NeverCalled' declared but never used
-dead/var-param-write-only-no-warn	DEAD5.MOD		stderr-no-contains	'x' declared
-dead/exported-no-warn	DEAD6.MOD		stderr-no-contains	'ExpVar' declared
-dead/return-counts-as-read	DEAD7.MOD		stderr-no-contains	'used' declared
-dead/case-label-counts-as-read	DEAD8.MOD		stderr-no-contains	'K' declared
-dead/system-adr-counts-as-read	DEAD9.MOD	/SYSTEM	stderr-no-contains	declared but never used
+dead/var-global-unused	DEAD1.MOD	/LOG=debug	stderr-contains	unused' declared but never used
+dead/var-global-used-no-warn	DEAD1.MOD	/LOG=debug	stderr-no-contains	'used' declared
+dead/var-local-unused	DEAD2.MOD	/LOG=debug	stderr-contains	'tmp' declared but never used
+dead/var-local-used-no-warn	DEAD2.MOD	/LOG=debug	stderr-no-contains	'i' declared
+dead/param-unused	DEAD3.MOD	/LOG=debug	stderr-contains	parameter 'y' declared but never used
+dead/proc-unused	DEAD4.MOD	/LOG=debug	stderr-contains	procedure 'NeverCalled' declared but never used
+dead/var-param-write-only-no-warn	DEAD5.MOD	/LOG=debug	stderr-no-contains	'x' declared
+dead/exported-no-warn	DEAD6.MOD	/LOG=debug	stderr-no-contains	'ExpVar' declared
+dead/return-counts-as-read	DEAD7.MOD	/LOG=debug	stderr-no-contains	'used' declared
+dead/case-label-counts-as-read	DEAD8.MOD	/LOG=debug	stderr-no-contains	'K' declared
+dead/system-adr-counts-as-read	DEAD9.MOD	/SYSTEM /LOG=debug	stderr-no-contains	declared but never used
 coerce/real-from-int-rejected	INTREAL1.MOD	fails	compile-fails
 coerce/int-from-real-rejected	INTREAL2.MOD	fails	compile-fails
 coerce/longreal-from-longint-rejected	INTREAL3.MOD	fails	compile-fails
@@ -297,3 +297,6 @@ dbg/om-has-dbg-member	DBGINFO.MOD		om-has-file	DBGINFO.DBG
 dbg/dbg-member-modname	DBGINFO.MOD		om-member-contains	DBGINFO.DBG DbgInfo
 dbg/link-g-runs	DBGINFO.MOD	/G /ENTRY=Run	errorlevel	0
 dbg/off-dbg-member-empty	DBGOFF.MOD		om-no-file	DBGOFF.DBG
+arrcmp/general-case-rejected	ARRCMP1.MOD	fails	compile-fails
+arrcmp/empty-string-still-ok	ARRCMP2.MOD		has-global	Arrcmp2__init
+constimp/big-const-not-truncated	USEBIG.MOD+CSTBIG.OM	/ENTRY=Run	errorlevel	0

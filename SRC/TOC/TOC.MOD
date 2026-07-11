@@ -362,7 +362,13 @@ BEGIN
       Strings.Copy(alias, realName)
     END;
     IF ~Strings.Equal(realName, "SYSTEM") THEN
-      NEW(n); Strings.Copy(realName, n^.name); n^.next := NIL;
+      NEW(n);
+      IF n = NIL THEN
+        Err.Error("out of memory (import list)");
+        WHILE head # NIL DO nx := head^.next; DISPOSE(head); head := nx END;
+        Scan.Close(sc); RETURN FALSE
+      END;
+      Strings.Copy(realName, n^.name); n^.next := NIL;
       IF tail = NIL THEN head := n ELSE tail^.next := n END;
       tail := n
     END;
@@ -512,6 +518,7 @@ PROCEDURE GenEntryStub(modName, procName: ARRAY OF CHAR; minPara, maxPara: LONGI
       procSym: ARRAY 66 OF CHAR;
 BEGIN
   NEW(obj);
+  IF obj = NIL THEN Err.Error("out of memory (entry stub)"); RETURN FALSE END;
   Rdoff.RdfInit(obj);
   IF Err.HaveErr() THEN DISPOSE(obj); RETURN FALSE END;
   sysInitId := Rdoff.RdfAddImport(obj, "SYSTEM_INIT");
@@ -686,6 +693,7 @@ BEGIN
      NOW — before the module scan opens each .rdf through an 8 KB Files buffer and
      fragments the arena so no 65000-byte hole survives. *)
   NEW(ls);
+  IF ls = NIL THEN Err.Error("out of memory (link state)"); RETURN END;
   Link.InitState(ls);
   ls^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
   IF ~Link.ReserveBuffers(ls) THEN
@@ -780,18 +788,19 @@ PROCEDURE RunBody(): INTEGER;
       srcFile: ARRAY 128 OF CHAR;
       outExe:  ARRAY 128 OF CHAR;
       entryProc: ARRAY NameLen OF CHAR;
+      logLevel: ARRAY NameLen OF CHAR;
       hasEntry, hasSystem, force, genDbg: BOOLEAN;
       stem: ARRAY NameLen OF CHAR;
       omPath: ARRAY MaxPath OF CHAR;
       memBefore: WORD;
 BEGIN
+  Err.SetLevel(Err.LINFO);
   argc := Dos.ParamCount();
-
   IF argc < 1 THEN
     Out.String("Trubo Oberon Compiler. (c) Copyright DosWorld"); Out.Ln;
     Out.String("License: Unlicense (public domain)"); Out.Ln;
     Out.Ln;
-    Out.String("usage: toc [/ENTRY=Proc] [/SYSTEM] [/M] [/G] <file.Mod>"); Out.Ln;
+    Out.String("usage: toc [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <file.Mod>"); Out.Ln;
     Out.String("  /ENTRY=Proc  compile + link: build <file.Mod> and all its"); Out.Ln;
     Out.String("               imports, then link an .EXE whose entry point"); Out.Ln;
     Out.String("               calls the exported procedure Proc. Without"); Out.Ln;
@@ -806,6 +815,8 @@ BEGIN
     Out.String("  /G           append a Turbo-Debugger (TDS/TDINFO) debug-info"); Out.Ln;
     Out.String("               block to the linked .EXE, merged from every"); Out.Ln;
     Out.String("               module compiled with (*$D+*). Requires /ENTRY=."); Out.Ln;
+    Out.String("  /LOG=level   set diagnostic verbosity: debug, info, warn"); Out.Ln;
+    Out.String("               (default), or error. Case-insensitive."); Out.Ln;
     Err.Error("missing <file.Mod> argument");
     RETURN 1
   END;
@@ -817,6 +828,15 @@ BEGIN
     Dos.ParamStr(i, arg);
     IF MatchSwitchVal(arg, "/ENTRY=", entryProc) THEN
       hasEntry := TRUE
+    ELSIF MatchSwitchVal(arg, "/LOG=", logLevel) THEN
+      IF Strings.EqualICase(logLevel, "debug") THEN Err.SetLevel(Err.LDEBUG)
+      ELSIF Strings.EqualICase(logLevel, "info") THEN Err.SetLevel(Err.LINFO)
+      ELSIF Strings.EqualICase(logLevel, "warn") THEN Err.SetLevel(Err.LWARN)
+      ELSIF Strings.EqualICase(logLevel, "error") THEN Err.SetLevel(Err.LERROR)
+      ELSE
+        Err.Error2("oc: /LOG=: unknown level (want debug/info/warn/error) ", logLevel);
+        RETURN 1
+      END
     ELSIF Strings.EqualICase(arg, "/SYSTEM") THEN
       hasSystem := TRUE
     ELSIF Strings.EqualICase(arg, "/M") THEN

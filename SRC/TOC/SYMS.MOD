@@ -241,6 +241,15 @@ VAR
   typeCount: WORD;
   bodyI: INTEGER;     (* module-body init loop counter *)
 
+  (* Fallback OOM targets for AllocSym/AllocType: "return the most recent
+     record" underflows when the very FIRST allocation fails (symCount/
+     typeCount = 0, so `symCount - 1` wraps a WORD to 65535 -> symDir[255],
+     8x past the 32-entry directory -> wild pointer).  These static nodes
+     (allocated once at module init, outside the arena) are the safe target
+     for that specific case. *)
+  symOom:  Symbol;
+  typeOom: TypeDesc;
+
   (* allocation chains for the heap nodes hung off arena records, so
      SymsFree can release them (the records are freed wholesale by chunk). *)
   allInline: InlineNode;
@@ -299,7 +308,11 @@ END FwdAppend;
    Bump-allocate the next record slot; the pointer stays valid until SymsFree
    (chunks never move).  On chunk exhaustion / OOM: latch Err and return the
    most recent record (never NIL once SymInit ran) so callers cannot NIL-deref
-   before the compile dies at the next Err boundary. *)
+   before the compile dies at the next Err boundary.  Special case: if the
+   very FIRST allocation fails (count = 0), "most recent record" has no
+   meaning (`count - 1` would wrap a WORD to 65535, indexing 8x past the
+   32-entry symDir/typeDir) — fall back to the static symOom/typeOom node
+   instead. *)
 
 PROCEDURE SymSlotPtr(idx: WORD): Symbol;
   VAR p: Symbol;
@@ -322,12 +335,14 @@ BEGIN
     c := SYSTEM.LSR(symCount, ChunkBits);
     IF c >= WORD(MaxSymChunks) THEN
       Err.Error("too many symbols");
+      IF symCount = 0 THEN RETURN symOom END;
       RETURN SymSlotPtr(symCount - 1)
     END;
     IF symDir[c] = NIL THEN
       NEW(symDir[c]);
       IF symDir[c] = NIL THEN
         Err.Error("out of memory (symbol table)");
+        IF symCount = 0 THEN RETURN symOom END;
         RETURN SymSlotPtr(symCount - 1)
       END
     END
@@ -343,12 +358,14 @@ BEGIN
     c := SYSTEM.LSR(typeCount, ChunkBits);
     IF c >= WORD(MaxTypeChunks) THEN
       Err.Error("too many types");
+      IF typeCount = 0 THEN RETURN typeOom END;
       RETURN TypeSlotPtr(typeCount - 1)
     END;
     IF typeDir[c] = NIL THEN
       NEW(typeDir[c]);
       IF typeDir[c] = NIL THEN
         Err.Error("out of memory (type table)");
+        IF typeCount = 0 THEN RETURN typeOom END;
         RETURN TypeSlotPtr(typeCount - 1)
       END
     END
@@ -665,7 +682,8 @@ BEGIN
   IF sc = NIL THEN
     (* Fatal: continuing with a NIL scope silently redirects every following
        declaration (NIL far writes land in the IVT under xt) and produces
-       "undefined identifier" cascades much later.  See opt.md §8. *)
+       "undefined identifier" cascades much later.  See DOCS/IMPLRULE.MD
+       §"Allocation failure is FATAL". *)
     Err.Error("out of memory (scope)");
     RETURN
   END;
@@ -981,5 +999,6 @@ BEGIN
   NoSym := NIL; NoType := NIL;
   symCount := 0; typeCount := 0;
   bodyI := 0; WHILE bodyI < MaxSymChunks  DO symDir[bodyI]  := NIL; INC(bodyI) END;
-  bodyI := 0; WHILE bodyI < MaxTypeChunks DO typeDir[bodyI] := NIL; INC(bodyI) END
+  bodyI := 0; WHILE bodyI < MaxTypeChunks DO typeDir[bodyI] := NIL; INC(bodyI) END;
+  NEW(symOom); NEW(typeOom)
 END Syms.

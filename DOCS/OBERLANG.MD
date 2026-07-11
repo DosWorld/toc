@@ -1268,6 +1268,7 @@ pushes `{segment, offset}` = 4 bytes; the INLINE byte pattern then POPs them.
 | `SYSTEM.FILL(dst, n, b)` | `VAR dst; n: INTEGER; b: BYTE` | `58 59 5F 07 FC F3 AA` | Fill `n` bytes at `dst` with byte `b` |
 | `SYSTEM.PORTOUT(p, b)` | `p: INTEGER; b: BYTE` | `58 5A EE` | Write byte `b` to port `p` (OUT DX, AL) |
 | `SYSTEM.PORTIN(p, v)` | `p: INTEGER; VAR v: BYTE` | `58 5B 5A EC 26 88 07` | Read byte from port `p` into `v` (IN AL, DX) |
+| `SYSTEM.FINDBYTE(buf, b, maxLen)` | `VAR buf; b: BYTE; maxLen: WORD): WORD` | `59 58 5F 07 89 CA FC 09 C9 74 07 F2 AE 75 03 41 29 CA 89 D0` | Scan up to `maxLen` bytes at `buf` for byte `b` via `REPNE SCASB`; returns 0-based offset of first match, or `maxLen` if not found. Zero-length guard uses `OR CX,CX`/`JZ` instead of `JCXZ` (project rule: no JCXZ/LOOP) |
 
 **INLINE + VAR / open-array params — push width MUST match the POPs.**  An INLINE
 proc with *no named params in the `INLINE(...)` list* gets its arguments pushed on
@@ -1707,7 +1708,36 @@ Tests: manifest rows `dbg/*` + `TESTS/test_dbg.sh` (see DOCS/TESTS.MD).
 
 | Feature | Workaround |
 |---------|------------|
-| (no current entries — Wirth-style strictness now enforced on all numeric paths) | — |
+| `ARRAY OF CHAR` relational operators (`=`,`#`,`<`,`>`,`<=`,`>=`) beyond `s = ""` | Use `Strings.Equal` (no `<`/`>` string-ordering primitive exists yet) |
+
+Standard Oberon-07 defines relops on `ARRAY OF CHAR` operands as a full string
+comparison.  This compiler has no such codegen — comparing two array-of-char
+operands would fall through to `PEXPR.MOD`'s generic relop path, which loads
+only the first two bytes via a plain 16-bit compare (`Cgen.CgCmp`).  Rather
+than silently return the wrong answer for `s1 = s2` / `s1 < s2` etc., `s = ""`
+(RHS is a size-1 empty-string literal — the one case this compiler DOES
+special-case, via a byte-mask-and-compare) and a single-CHAR-vs-single-char-
+string-literal comparison (e.g. `c = "0"`, `c: CHAR` — the string side is a
+2-byte array but not actually array-shaped at runtime, so the existing 2-byte
+compare is correct) are the only accepted array-of-char relops; every other
+array-of-char/array-of-char or array-of-char/multi-char-literal combination is
+a fatal `"relational operators on ARRAY OF CHAR are not supported (except
+comparing to an empty string literal); use Strings.Equal"`.
+
+**STRONG RULE — always compare `ARRAY OF CHAR` values with `Strings.Equal`,
+never `=`/`#`.**  This is not just a style preference: a bare `=`/`#` on two
+array operands is a **fatal compile error** in this dialect (see above), so
+code that reads correctly by ordinary Oberon-07 rules will not compile here.
+This bit the compiler's own source during the 2026-07-11 stability pass: five
+sites in `PARSER.MOD` (`modWord = "FAR"`, `wordA = "FORWARD"`/`"EXTERNAL"`/
+`"INLINE"`, `iname = "SYSTEM"`) and one in the `TESTS/FIX/UPSTR.MOD` /
+`TESTS/TPRSR.MOD` fixtures all used the literal-Oberon-07 `=`/`#` form and
+had to be rewritten to `Strings.Equal(a, b)` / `~Strings.Equal(a, b)` once the
+finding-2.1 fatal-error guard landed. When writing or reviewing any new
+compiler/tool/test source, grep for `[a-zA-Z_][a-zA-Z0-9_.]*\s*[#=]\s*"[^"]{2,}"`
+(a bare identifier compared against a 2+ char string literal) before trusting
+it compiles — a single-CHAR variable compared to a 1-char string literal is
+fine (see above), everything wider needs `Strings.Equal`.
 
 ### Actual-parameter type checking
 

@@ -445,9 +445,9 @@ END InitState;
    allocation fails. *)
 PROCEDURE ReserveBuffers*(ls: State): BOOLEAN;
 BEGIN
-  NEW(ls^.dataBuf);
+  NEW(ls^.dataBuf, Rdoff.SegLimit);
   IF ls^.dataBuf = NIL THEN Err.Error("Out of memory (data buffer)"); RETURN FALSE END;
-  NEW(ls^.codeBuf);
+  NEW(ls^.codeBuf, Rdoff.SegLimit);
   IF ls^.codeBuf = NIL THEN Err.Error("Out of memory (code buffer)"); RETURN FALSE END;
   RETURN TRUE
 END ReserveBuffers;
