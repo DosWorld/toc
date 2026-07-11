@@ -6,8 +6,12 @@
 #   toc1.exe     →  SRC/TOC/*.om  →  toc2.exe   (must be byte-identical to toc1.exe)
 #
 # Module layout:
-#   SRC/TOC/     Scan Syms Cgen Def Import PExpr PStmt Parser
-#                Link Main  Rdoff Tar
+#   SRC/TOC/     Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link TOC
+#   SRC/LIB/     Rdoff Tar LogErr (moved here 2026-07-11, renamed from Err) —
+#                stdlib modules merged into OBERON.OM, NOT part of this
+#                script's per-module recompile set: they're built once by
+#                `make lib` (outside this script) and consumed here purely
+#                via OBERON.OM, exactly like Strings/Files/IO always were.
 #
 # Pre-requisites:
 #   - BOOT/TOC.EXE             (bootstrap DOS binary, immutable)
@@ -37,8 +41,9 @@ if [ -z "$XT" ] || ! [ -x "$XT" ]; then
     exit 0
 fi
 
-# All modules in SRC/TOC/ in dependency order
-ALL_MODS="Err Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link TOC"
+# All modules in SRC/TOC/ in dependency order (Rdoff/Tar/LogErr excluded —
+# they live in SRC/LIB now and are resolved purely via OBERON.OM, see above)
+ALL_MODS="Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link TOC"
 
 # Scratch dirs live under the project TMP/ (not the system tmpfs).
 mkdir -p "$ROOT/TMP"
@@ -88,7 +93,7 @@ recompile_mod() {
     [ -s "$WORK/$out_upper" ] || [ -s "$WORK/$m.om" ]
 }
 
-for m in Err Rdoff Tar Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link; do
+for m in Scan StrTab Syms Cgen Def Import PExpr PStmt Parser Link; do
     echo "  - $m"
     recompile_mod "$m" || { echo "FAIL: $m.om not produced"; exit 1; }
 done
