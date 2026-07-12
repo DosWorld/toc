@@ -418,7 +418,11 @@ PROCEDURE RdfAddGlobal*(obj: ObjFile; name: ARRAY OF CHAR; segId: BYTE; offset: 
   VAR g: GlobalNode;
 BEGIN
   NEW(g);
-  g^.flags := BYTE(1);
+  (* flags=0 matches real NASM's RDOFF2 writer (verified against
+     SRC/LIB/SYS.RDF); LINK.MOD never reads this byte (grep found zero
+     references), so the value has no linking effect either way -- kept at
+     0 purely so a TASM-produced .rdf can byte-diff against a NASM oracle. *)
+  g^.flags := BYTE(0);
   g^.segId := segId; g^.offset := offset;
   Strings.Copy(name, g^.name);
   g^.next := NIL;
@@ -516,10 +520,51 @@ BEGIN
 
   modSize := LONGINT(14) + hlen + LONGINT(10) + LONGINT(obj^.codeLen) + LONGINT(10);
   IF obj^.dataLen > 0 THEN INC(modSize, LONGINT(10) + LONGINT(obj^.dataLen)) END;
+  (* Real NASM's own RDOFF2 writer under-reports modSize by exactly 10
+     bytes (the trailing type=0 EOF segment marker's own 10-byte header is
+     always present on disk but excluded from the recorded module size) --
+     verified against SYS.RDF: both a NASM-built file and a from-scratch
+     byte-count agree the real file is 10 bytes longer than its own
+     modSize field claims.  DOCS/RDOFF2.MD doesn't document this as
+     intentional, and no reader in this codebase (RdfLoad/ScanHeader) uses
+     modSize for anything but bounding a header-record scan that already
+     stops earlier at hlen, so it's inert either way -- kept bug-compatible
+     purely so a TASM-produced .rdf can byte-diff against a NASM oracle. *)
+  DEC(modSize, LONGINT(10));
 
   Files.Write(f, "RDOFF2");
   Files.WriteDWord(f, modSize);
   Files.WriteDWord(f, hlen);
+
+  (* Record order: GLOBAL, then IMPORT, then RELOC/SEGRELOC (interleaved in
+     original emission order), then BSS -- matches real NASM's own RDOFF2
+     writer (verified against SRC/LIB/SYS.RDF, an oracle built by real NASM:
+     all GLOBAL records first, then the RELOC/SEGRELOC stream in emission
+     order). The linker (ScanHeader/ScanRelocs) reads records by type, not
+     position, so this ordering has no effect on linking -- it exists purely
+     so a TASM-produced .rdf can byte-diff against a NASM-produced oracle. *)
+  g := obj^.globalHead;
+  WHILE g # NIL DO
+    nlen := Strings.Length(g^.name);
+    Files.WriteByte(f, BYTE(RecGlobal));
+    Files.WriteByte(f, BYTE(6 + nlen + 1));
+    Files.WriteByte(f, g^.flags);
+    Files.WriteByte(f, g^.segId);
+    Files.WriteDWord(f, g^.offset);
+    Ws(f, g^.name);
+    g := g^.next
+  END;
+
+  imp := obj^.importHead;
+  WHILE imp # NIL DO
+    nlen := Strings.Length(imp^.name);
+    Files.WriteByte(f, BYTE(RecImport));
+    Files.WriteByte(f, BYTE(3 + nlen + 1));
+    Files.WriteByte(f, imp^.flags);
+    Files.WriteWord(f, imp^.segId);
+    Ws(f, imp^.name);
+    imp := imp^.next
+  END;
 
   r := obj^.relocHead;
   WHILE r # NIL DO
@@ -543,29 +588,6 @@ BEGIN
       INC(k)
     END;
     r := r^.next
-  END;
-
-  imp := obj^.importHead;
-  WHILE imp # NIL DO
-    nlen := Strings.Length(imp^.name);
-    Files.WriteByte(f, BYTE(RecImport));
-    Files.WriteByte(f, BYTE(3 + nlen + 1));
-    Files.WriteByte(f, imp^.flags);
-    Files.WriteWord(f, imp^.segId);
-    Ws(f, imp^.name);
-    imp := imp^.next
-  END;
-
-  g := obj^.globalHead;
-  WHILE g # NIL DO
-    nlen := Strings.Length(g^.name);
-    Files.WriteByte(f, BYTE(RecGlobal));
-    Files.WriteByte(f, BYTE(6 + nlen + 1));
-    Files.WriteByte(f, g^.flags);
-    Files.WriteByte(f, g^.segId);
-    Files.WriteDWord(f, g^.offset);
-    Ws(f, g^.name);
-    g := g^.next
   END;
 
   IF obj^.bssSize > 0 THEN

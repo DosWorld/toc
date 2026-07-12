@@ -1049,6 +1049,41 @@ BEGIN
         IF rhs.mode = Cgen.MLocal THEN Cgen.Emit1(01FH) END;  (* POP DS *)
         RETURN
       END;
+      (* Record assign: plain local/global dest, VAR-param source (isRef).
+         Mirror image of the branch above (dest/source roles swapped):
+         DI = dest near addr; DS:SI = src far ptr (via ES:BX then DS<-ES
+         swap); ES = SS if dest is local (CgEsFromMode).
+         Missing case found while implementing SRC/TASM: without this
+         branch, "other := b" (other: local RECORD, b: VAR RECORD param)
+         silently fell through to the generic scalar CgLoadItem/CgStoreItem
+         path below, which only transfers ONE WORD (the record's first
+         field) instead of the whole record -- a silent data-corruption
+         bug for any record-typed local assigned from a VAR parameter.
+         DS must be swapped to the source's far segment for the MOVSB (SI
+         addresses a far pointer's offset, not something DS already points
+         at), then restored -- always (not conditionally like the sibling
+         branch above, since the source here is ALWAYS far/isRef, never
+         local-relative). *)
+      IF (item.type # Syms.NoType) & (iform = Syms.TFRecord) &
+         (rhs.type # Syms.NoType) & (rform = Syms.TFRecord) &
+         ~item.isRef & rhs.isRef &
+         ((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal)) &
+         ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
+        count := item.type.size;
+        Cgen.Emit1(01EH);                      (* PUSH DS (restore after MOVSB) *)
+        Cgen.CgLesBxItem(rhs.mode, rhs.adr);    (* ES:BX = src far addr *)
+        Cgen.Emit2(08BH, 0F3H);                 (* MOV SI, BX *)
+        Cgen.Emit1(006H);                       (* PUSH ES (save src seg -- CgEsFromMode below clobbers ES/DX) *)
+        Cgen.CgLoadAddrItem(item.mode, item.adr);
+        Cgen.Emit2(08BH, 0F8H);                 (* MOV DI, AX -- dest near addr *)
+        Cgen.CgEsFromMode(item.mode);           (* ES = dest segment (SS or DS) *)
+        Cgen.EmitCodeStr("58,8E,D8");            (* POP AX (src seg); MOV DS, AX *)
+        Cgen.CgLoadImm(INTEGER(count)); Cgen.Emit2(08BH, 0C8H);  (* MOV CX, AX *)
+        Cgen.Emit1(BYTE(Cgen.OpCld));
+        Cgen.Emit2(0F3H, 0A4H);                 (* REP MOVSB: DS:SI -> ES:DI *)
+        Cgen.Emit1(01FH);                       (* POP DS *)
+        RETURN
+      END;
       (* Record-through-far-pointer assignment: REP MOVSB with DS-swap.
          Load dest FIRST while DS still points at the data segment; only
          then swap DS for the src segment.
