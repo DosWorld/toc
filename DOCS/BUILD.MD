@@ -6,15 +6,24 @@
 |--------|--------|---------|
 | `BOOT/TOC.EXE` | checked-in MS-DOS binary | Bootstrap compiler — seeds the self-hosted build; **never modified by `make`** |
 | `BOOT/TOLIB.EXE` | checked-in MS-DOS binary | Bootstrap archive manager — used only during stdlib merge; **never modified by `make`** |
+| `BOOT/TASM.EXE` | checked-in MS-DOS binary | Bootstrap NASM-subset assembler — tool of record for `SYS.ASM`→`SYS.RDF` / `EMSAPI.ASM`→`EMSAPI.RDF`; **never modified by `make`** |
 | `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `SRC/TOOLS/` (Oberon) | .OM archive manager (list/extract/create/merge); supports `@listfile` |
 | `BIN/RDFGREP.EXE` | `SRC/TOOLS/` (Oberon) | RDOFF/.om/.exe introspection for tests |
 | `BIN/TDINFO.EXE` | `SRC/TOOLS/` (Oberon) | TDS/TDINFO (0x52FB) debug-block inspector for `.exe` files |
 | `BIN/TOSTRIP.EXE` | `SRC/TOOLS/` (Oberon) | Strips debug info from `.exe` (TDS block) or `.om` (`.DBG` member) files |
+| `BIN/TASM.EXE` | `SRC/TASM/` (Oberon) | Self-hosted NASM-subset assembler (`.asm` → RDOFF2 `.rdf`); see `DOCS/TASM_PLAN.MD` |
 
 All binaries are MS-DOS MZ executables that run on real MS-DOS or under `xt`.
-`BOOT/TOC.EXE` and `BOOT/TOLIB.EXE` are the only pre-built binaries in the repository;
-everything else is built from Oberon source by the bootstrap.
+`BOOT/TOC.EXE`, `BOOT/TOLIB.EXE`, and `BOOT/TASM.EXE` are the only pre-built
+binaries in the repository; everything else is built from Oberon source by
+the bootstrap.  `BOOT/TASM.EXE` is a bootstrap binary (not rebuilt by `make
+all`) for a structural reason, not just caution: TASM itself needs a
+fully-built `OBERON.OM` (Files/Strings/LogErr/Rdoff/Out/Dos) to run, and
+`OBERON.OM`'s own `SYSTEM.OM` is built *from* `SYS.RDF` — so TASM cannot be
+a hard prerequisite of the stdlib build without a circular dependency. See
+`SRC/LIB/Makefile`'s `regen-asm` target and the `SYS.RDF`/`EMSAPI.RDF`
+sections below.
 
 ---
 
@@ -30,7 +39,9 @@ make testall  # full DOS-side suite via xt: manifest + Section 17/18 (~9 min)
 
 ```
 BOOT/TOC.EXE (via xt)
-  └─ SRC/LIB/*.MOD  →  SRC/LIB/*.om   (standard library)
+  └─ SRC/LIB/*.MOD  →  SRC/LIB/*.om   (standard library; SYSTEM.om/EMS.om
+                                        consume the checked-in SYS.RDF/
+                                        EMSAPI.RDF, NOT rebuilt here)
   └─ SRC/TOC/*.MOD   →  SRC/TOC/*.om   →  BIN/TOC.EXE  (compiler/linker)
 
 BIN/TOC.EXE (via xt)
@@ -39,9 +50,20 @@ BIN/TOC.EXE (via xt)
   └─ TESTS/TESTALL.MOD     → BIN/TESTALL.EXE
   └─ SRC/TOOLS/TDINFO.MOD  → BIN/TDINFO.EXE
   └─ SRC/TOOLS/TOSTRIP.MOD → BIN/TOSTRIP.EXE
+  └─ SRC/TASM/*.MOD        → BIN/TASM.EXE
 
 BOOT/TOLIB.EXE (via xt)
   └─ SRC/LIB/*.om  →  BIN/OBERON.OM   (merged standard library; individual .om removed)
+```
+
+**Separate, manual step (not part of `make all`)** — regenerating
+`SYS.RDF`/`EMSAPI.RDF` from their `.ASM` sources via the bootstrap
+assembler:
+
+```
+BOOT/TASM.EXE (via xt, run manually: cd SRC/LIB && make regen-asm)
+  └─ SRC/LIB/SYS.ASM     → SRC/LIB/SYS.RDF
+  └─ SRC/LIB/EMSAPI.ASM  → SRC/LIB/EMSAPI.RDF
 ```
 
 ### Per sub-project
@@ -92,11 +114,18 @@ half-written `.exe`/`.om`** behind.
 xt run --max=50000000 -c . 'BOOT/TOC.EXE' /SYSTEM 'SRC/LIB\SYSTEM.MOD'
 ```
 
-**IMPORTANT — `SYS.RDF` is a checked-in binary:**
-`SRC/LIB/SYS.RDF` is the pre-assembled RDOFF2 object for `SRC/LIB/SYS.ASM`.
-`SRC/LIB/Makefile` has **no rule** to rebuild it from `SYS.ASM`.
-After editing `SYS.ASM`, you must manually reassemble with a RDOFF2-capable NASM
-(older version) or patch the binary directly, then run `cd SRC/LIB && make install`.
+**IMPORTANT — `SYS.RDF` is a checked-in binary, built by TASM:**
+`SRC/LIB/SYS.RDF` is the pre-assembled RDOFF2 object for `SRC/LIB/SYS.ASM`,
+produced by `BOOT/TASM.EXE` (the self-hosted assembler — see
+`DOCS/TASM_PLAN.MD`), the tool of record for this `.asm`→`.rdf` step.
+`SRC/LIB/Makefile` has **no rule** to rebuild it automatically as part of
+`make all`/`make install` (TASM needs a fully-built `OBERON.OM` to run,
+which itself needs `SYS.RDF` — see the toolchain-binaries table above for
+why this can't be a normal build dependency). After editing `SYS.ASM`, run
+`cd SRC/LIB && make regen-asm` to regenerate both `SYS.RDF` and
+`EMSAPI.RDF` via `BOOT/TASM.EXE`, verify `bash TESTS/test_tasm.sh` still
+passes, then `make install` and commit the regenerated `.rdf` alongside
+the `.asm` change.
 
 ### Compile the EMS module
 
@@ -118,10 +147,11 @@ After editing `SYS.ASM`, you must manually reassemble with a RDOFF2-capable NASM
   packed into the output `.om` via a `(*$L EMSAPI.RDF*)` directive in
   `EMS.MOD`
 
-**IMPORTANT — `EMSAPI.RDF` is a checked-in binary**, same as `SYS.RDF`:
-`SRC/LIB/Makefile` has **no rule** to rebuild it from `EMSAPI.ASM`. After
-editing `EMSAPI.ASM`, reassemble with a RDOFF2-capable NASM (older version)
-or patch the binary directly, then run `cd SRC/LIB && make install`.
+**IMPORTANT — `EMSAPI.RDF` is a checked-in binary, built by TASM**, same
+as `SYS.RDF`: `SRC/LIB/Makefile` has no rule to rebuild it automatically
+as part of `make all`/`make install`. After editing `EMSAPI.ASM`, run
+`cd SRC/LIB && make regen-asm`, verify `bash TESTS/test_tasm.sh` still
+passes, then `make install` and commit the regenerated `.rdf`.
 
 Every LIM EMS 4.0 function code (`AH=43h` Allocate Pages, `45h` Deallocate,
 `4Ch`/`51h` Get/Reallocate Pages, `57h` Move Memory Region, `44h` Map
@@ -227,6 +257,8 @@ oberonc/
   BOOT/               Bootstrap DOS binaries (immutable — updated manually)
     TOC.EXE              All-in-one compiler/linker/dep-scan (MS-DOS MZ)
     TOLIB.EXE            Archive manager (MS-DOS MZ)
+    TASM.EXE             NASM-subset assembler; tool of record for SYS.ASM/
+                          EMSAPI.ASM -> .RDF (MS-DOS MZ, see DOCS/TASM_PLAN.MD)
   SRC/                Oberon source for all tools
     TOC/                Compiler + linker (Main, Parser, Link, …)
       SCAN.MOD          Scanner (Scan)
@@ -497,3 +529,21 @@ After a Parser-affecting fix (e.g. a new BUG 2-class leak fix), the **old**
 `error: cannot write Parser.rdf`).  Refresh it as above so the normal `make`
 path works again.  Keep a known-good `BIN/TOC.EXE` (or one of the `BIN/*.bak-*`
 backups) on hand as the source for such a refresh.
+
+## Refreshing `BOOT/TASM.EXE` (maintainer step)
+
+Same discipline as `BOOT/TOC.EXE`: once `BIN/TASM.EXE` (or a freshly-built
+`SRC/TASM/TASM.exe`) has been verified against `TESTS/test_tasm.sh`
+(byte-identical `SYS.RDF`/`EMSAPI.RDF` output), copy it over the bootstrap:
+
+```bash
+cd SRC/TASM && make        # builds TASM.exe via BOOT/TOC.EXE
+bash ../../TESTS/test_tasm.sh   # verify byte-diff against the oracles
+cp TASM.exe ../../BOOT/TASM.EXE   # manual; never done by make
+```
+
+`BOOT/TASM.EXE` is only ever consumed by `SRC/LIB/Makefile`'s `regen-asm`
+target (see above) — it is not part of the `make all`/`make test` build
+graph, so a stale `BOOT/TASM.EXE` cannot break the normal build; it only
+affects `make regen-asm`'s output next time someone edits `SYS.ASM` or
+`EMSAPI.ASM`.

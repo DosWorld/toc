@@ -35,7 +35,7 @@ CONST
   MMov* = 50; MPush* = 51; MPop* = 52; MLea* = 53; MLes* = 54; MXchg* = 55;
   MAdd* = 56; MSub* = 57; MAdc* = 58; MSbb* = 59; MAnd* = 60; MOr* = 61;
   MXor* = 62; MCmp* = 63; MTest* = 64;
-  MNot* = 65; MNeg* = 66; MMul* = 67;
+  MNot* = 65; MNeg* = 66; MMul* = 67; MImul* = 122; MDiv* = 123; MIdiv* = 124;
   MInc* = 68; MDec* = 69;
   MShl* = 70; MShr* = 71; MRcl* = 72; MRcr* = 73;
   MInt* = 74; MInt3* = 75;
@@ -51,6 +51,7 @@ CONST
   MJs* = 108; MJns* = 109;
   MMovsb* = 110; MMovsw* = 111; MScasb* = 112; MScasw* = 113;
   MCmpsb* = 114; MCmpsw* = 115; MIn* = 116; MOut* = 117;
+  MLodsb* = 118; MLodsw* = 119; MStosb* = 120; MStosw* = 121;
 
   (* ---- directives (150..179) ---- *)
   DBits* = 150; DCpu* = 151; DSection* = 152; DGlobal* = 153;
@@ -130,9 +131,11 @@ BEGIN
       ELSIF Strings.Equal(name, "POPF")  THEN RETURN MPopf
       END
   | "L":
-      IF    Strings.Equal(name, "LEA")  THEN RETURN MLea
-      ELSIF Strings.Equal(name, "LES")  THEN RETURN MLes
-      ELSIF Strings.Equal(name, "LOOP") THEN RETURN MLoop
+      IF    Strings.Equal(name, "LEA")    THEN RETURN MLea
+      ELSIF Strings.Equal(name, "LES")    THEN RETURN MLes
+      ELSIF Strings.Equal(name, "LOOP")   THEN RETURN MLoop
+      ELSIF Strings.Equal(name, "LODSB")  THEN RETURN MLodsb
+      ELSIF Strings.Equal(name, "LODSW")  THEN RETURN MLodsw
       END
   | "X":
       IF Strings.Equal(name, "XCHG") THEN RETURN MXchg
@@ -152,6 +155,8 @@ BEGIN
       ELSIF Strings.Equal(name, "STC")    THEN RETURN MStc
       ELSIF Strings.Equal(name, "SCASB")  THEN RETURN MScasb
       ELSIF Strings.Equal(name, "SCASW")  THEN RETURN MScasw
+      ELSIF Strings.Equal(name, "STOSB")  THEN RETURN MStosb
+      ELSIF Strings.Equal(name, "STOSW")  THEN RETURN MStosw
       END
   | "O":
       IF    Strings.Equal(name, "OR")  THEN RETURN MOr
@@ -179,9 +184,13 @@ BEGIN
       ELSIF Strings.Equal(name, "INT3") THEN RETURN MInt3
       ELSIF Strings.Equal(name, "IRET") THEN RETURN MIret
       ELSIF Strings.Equal(name, "IN")   THEN RETURN MIn
+      ELSIF Strings.Equal(name, "IMUL") THEN RETURN MImul
+      ELSIF Strings.Equal(name, "IDIV") THEN RETURN MIdiv
       END
   | "D":
-      IF Strings.Equal(name, "DEC") THEN RETURN MDec END
+      IF    Strings.Equal(name, "DEC") THEN RETURN MDec
+      ELSIF Strings.Equal(name, "DIV") THEN RETURN MDiv
+      END
   | "R":
       IF    Strings.Equal(name, "RCL")  THEN RETURN MRcl
       ELSIF Strings.Equal(name, "RCR")  THEN RETURN MRcr

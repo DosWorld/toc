@@ -12,7 +12,7 @@
 objects will produce false results. `make test` enforces this automatically.
 
 ```bash
-make test      # clean, full rebuild, run 280 manifest rows (host-side, fast)
+make test      # clean, full rebuild, run 280 manifest rows + TASM regression (host-side, fast)
 make testall   # full DOS-side suite via xt: manifest + Section 17/18 + SYSTEM.DEF checks (~9 min)
 ```
 
@@ -446,6 +446,35 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 > overwrite the running binary mid-link and corrupt gen-2 (symptom: `OC.om` differs
 > by 1 byte, `toc2.exe` not produced).  Keep the staged compiler name distinct from
 > the `OC` output module.
+
+---
+
+## TASM assembler regression test
+
+`TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
+`.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7 and `DOCS/TASM_PLAN.MD`) by byte-diffing
+its output against expected `.rdf` files:
+
+1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
+   compiler's own self-host).
+2. **Real-NASM oracles** — assembles `SRC/LIB/SYS.ASM` and `SRC/LIB/EMSAPI.ASM` and
+   byte-diffs the result against the checked-in `SYS.RDF`/`EMSAPI.RDF`, which were
+   originally produced by real NASM. This is the authoritative correctness signal.
+3. **Synthetic fixtures** — assembles `TESTS/FIX/TSTRUC.ASM` (STRUC/ENDSTRUC field-offset
+   and `_size` arithmetic) and `TESTS/FIX/TEXTERN.ASM` (EXTERN/IMPORT cross-module
+   relocations) and byte-diffs against `TESTS/FIX/TSTRUC.RDF`/`TEXTERN.RDF`. No
+   independent NASM oracle exists for these two — the expected `.rdf` is TASM's own
+   previously-verified output, so this is a regression guard, not an independent
+   correctness proof. Re-derive the expected `.rdf` by hand whenever the fixture changes.
+
+Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
+
+```bash
+bash TESTS/test_tasm.sh
+# Results: 4 passed, 0 failed
+```
+
+Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
 ---
 

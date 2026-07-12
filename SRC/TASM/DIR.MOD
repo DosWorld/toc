@@ -63,7 +63,24 @@ BEGIN
   curStruc.ofs := curStruc.ofs + sizeBytes * count
 END AddField;
 
-(* EndStruc: define STRUCNAME_size = total byte size. *)
+(* Upper: uppercase a string in place (ASCII a..z only) -- used only for
+   the STRUCNAME_size key below, to match how it's actually looked up. *)
+PROCEDURE Upper(VAR s: ARRAY OF CHAR);
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE s[i] # 0X DO s[i] := SYSTEM.UCASE(s[i]); INC(i) END
+END Upper;
+
+(* EndStruc: define STRUCNAME_size = total byte size.  Unlike AddField's
+   "STRUCT.field" keys (only ever looked up via TryResolveField using
+   original case, consistently on both sides), STRUCNAME_size is used as
+   a BARE identifier in source (e.g. "mov cx, TPoint_size") and resolved
+   by Parse.MOD's TokNext via the generic Sym.Expand(tId, ...) path, which
+   always looks up the UPPERCASED scanned identifier -- so the key must be
+   stored uppercase here too, or the two never match (found via a real
+   TESTS/FIX/TSTRUC.ASM fixture: "TPoint_size" stored mixed-case, looked
+   up as "TPOINT_SIZE", silently resolved to 0 instead of erroring). *)
 PROCEDURE EndStruc*(fname: ARRAY OF CHAR; line: LONGINT);
   VAR key: ARRAY 80 OF CHAR; val: ARRAY 16 OF CHAR;
 BEGIN
@@ -72,6 +89,7 @@ BEGIN
   END;
   Strings.Copy(curStruc.name, key);
   Strings.Append("_size", key);
+  Upper(key);
   Strings.Str(curStruc.ofs, val);
   Sym.Define(key, val);
   curStruc.active := FALSE

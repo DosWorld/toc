@@ -21,6 +21,16 @@ Command line to produce RDOFF2 object file:
     nasm -f rdf myfile.asm
 ```
 
+This project's own toolchain also produces RDOFF2 directly: `toc.exe` (the Oberon-07
+compiler, `SRC/TOC/`) writes it for every compiled module, and `tasm.exe` (a self-hosted
+NASM-subset assembler, `SRC/TASM/`) writes it for hand-written `.asm` sources:
+
+```
+    tasm.exe myfile.asm
+```
+
+See [PORTING.MD](PORTING.MD) §1.7 for `tasm.exe`'s CLI and coverage.
+
 ---
 
 ## 2. RDF File Structure

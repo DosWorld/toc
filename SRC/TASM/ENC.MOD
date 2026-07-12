@@ -839,6 +839,12 @@ BEGIN
       IF n # 1 THEN Err("NEG requires 1 operand") ELSE EncUnaryGroup(3, ops[0]) END
   | Lex.MMul:
       IF n # 1 THEN Err("MUL requires 1 operand") ELSE EncUnaryGroup(4, ops[0]) END
+  | Lex.MImul:
+      IF n # 1 THEN Err("IMUL requires 1 operand") ELSE EncUnaryGroup(5, ops[0]) END
+  | Lex.MDiv:
+      IF n # 1 THEN Err("DIV requires 1 operand") ELSE EncUnaryGroup(6, ops[0]) END
+  | Lex.MIdiv:
+      IF n # 1 THEN Err("IDIV requires 1 operand") ELSE EncUnaryGroup(7, ops[0]) END
   | Lex.MInc:
       IF n # 1 THEN Err("INC requires 1 operand") ELSE EncIncDec(0, ops[0]) END
   | Lex.MDec:
@@ -879,6 +885,10 @@ BEGIN
   | Lex.MScasw: EncStrOp(BYTE(0AFH))
   | Lex.MCmpsb: EncStrOp(BYTE(0A6H))
   | Lex.MCmpsw: EncStrOp(BYTE(0A7H))
+  | Lex.MLodsb: EncStrOp(BYTE(0ACH))
+  | Lex.MLodsw: EncStrOp(BYTE(0ADH))
+  | Lex.MStosb: EncStrOp(BYTE(0AAH))
+  | Lex.MStosw: EncStrOp(BYTE(0ABH))
   | Lex.MIn:
       IF n # 2 THEN Err("IN requires 2 operands") ELSE EncIn(ops[0], ops[1]) END
   | Lex.MOut:

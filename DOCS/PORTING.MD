@@ -15,8 +15,10 @@ library modules, and the command-line toolchain.
 |--------|---------|
 | `BOOT/TOC.EXE` | Bootstrap MS-DOS compiler — seeds the build; **never modified by `make`** |
 | `BOOT/TOLIB.EXE` | Bootstrap archive manager — used during stdlib merge; **never modified by `make`** |
+| `BOOT/TASM.EXE` | Bootstrap MS-DOS assembler (NASM subset, `.asm`→`.rdf`) — seeds `SRC/LIB/Makefile`'s `regen-asm` step; **never modified by `make`**, installed manually by the maintainer only |
 | `BIN/TOC.EXE` | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `.om` archive manager (list / extract / create / merge); supports `@listfile` |
+| `BIN/TASM.EXE` | Self-hosted MS-DOS assembler, built via `SRC/TASM/Makefile` from `BOOT/TASM.EXE` |
 | `BIN/RDFGREP.EXE` | RDOFF/.om/.exe introspection tool (used in tests) |
 | `xt` | DOS emulator; runs MS-DOS `.exe` files on Linux/Mac |
 
@@ -114,6 +116,40 @@ olib merge   Out.om  In1.om In2.om ...
 Used to inspect or manipulate `.om` archives.  `merge` combines multiple archives into one,
 copying all members (`.RDF` and `.DEF`).  When the argument list exceeds the 127-character
 DOS command-line limit, pass `@listfile` with one path per line.
+
+### 1.7 `tasm.exe` — self-hosted NASM-subset assembler
+
+```
+tasm.exe [/LOG=level] File.asm
+```
+
+`BIN/TASM.EXE` assembles a NASM-subset `.asm` source file straight to a single RDOFF2
+`.rdf` object — **no other output format**.  Exactly one positional argument is accepted
+(the `.asm` path); the output filename is auto-derived (`File.asm` → `File.rdf`).  `/LOG=`
+works exactly like `toc.exe`'s (`/LOG=debug|info|warn|error`, case-insensitive).
+
+Covers a practical 8086 subset: the general-purpose/segment/string instructions, `BITS`/
+`CPU`/`SECTION .text|.data`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added synonym)/
+`STRUC`/`ENDSTRUC`/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`DB`/`DW`/`TIMES`, plus
+`SEG`/`BYTE`/`WORD`/`FAR`/`SHORT`/`NEAR` operand qualifiers and character-literal
+immediates.  `EXTERN`/`IMPORT` symbols resolve through RDOFF2 `RDFREC_IMPORT` records, so
+a `.rdf` produced by `tasm` can reference symbols defined in another module exactly like
+one produced by real NASM.
+
+`tasm` is the tool of record for this repo's two hand-written `.asm` files:
+`SRC/LIB/SYS.ASM` → `SYS.RDF` and `SRC/LIB/EMSAPI.ASM` → `EMSAPI.RDF`.  It is **not** a
+prerequisite of `make all` — `tasm` itself needs a fully-built `OBERON.OM`, which in turn
+is built from `SYS.RDF`, so making `tasm` a hard build dependency would be circular.
+Instead, `SYS.RDF`/`EMSAPI.RDF` are checked into the repo, and regenerated only via the
+manual `SRC/LIB/Makefile` target `regen-asm` (uses `BOOT/TASM.EXE`, not `BIN/TASM.EXE`).
+See [BUILD.MD](BUILD.MD) §"Refreshing `BOOT/TASM.EXE`" for the maintainer-only install
+step — like `BOOT/TOC.EXE`, `BOOT/TASM.EXE` is never touched by `make` and is installed
+manually by the maintainer only.
+
+Source: `SRC/TASM/{SCAN,SYM,LEX,DIR,ENC,PARSE,TASM}.MOD`.  Tests:
+`TESTS/test_tasm.sh` (byte-diff against real-NASM output for `SYS.ASM`/`EMSAPI.ASM`, plus
+`TESTS/FIX/TSTRUC.ASM`/`TEXTERN.ASM` fixtures for `STRUC`/`EXTERN` coverage), run as part
+of `make test`.
 
 ---
 
