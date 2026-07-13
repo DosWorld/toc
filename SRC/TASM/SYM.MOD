@@ -19,6 +19,7 @@ CONST
 
   SegCode* = 0;
   SegData* = 1;
+  SegBss*  = 2;
 
 TYPE
   GlobalVisitProc* = PROCEDURE(name: ARRAY OF CHAR; seg: INTEGER; offset: LONGINT);
@@ -290,7 +291,7 @@ END MarkGlobal;
    .rdf byte-diff clean against a real-NASM oracle.
    Implementation: repeated "find the smallest remaining defOrder not yet
    visited" -- O(n^2) in label count, fine here (the label tables in
-   SYS.ASM/EMSAPI.ASM are a few dozen entries, not thousands). *)
+   SYS.ASM/EMS.ASM are a few dozen entries, not thousands). *)
 PROCEDURE EnumGlobals*(visit: GlobalVisitProc);
   VAR l: LabelNode; i: INTEGER;
       lastVisited, bestOrder: LONGINT;

@@ -76,7 +76,7 @@ PROCEDURE MapPtr*(handle: WORD; emsOffset: LONGINT; physWin: WORD): SYSTEM.ADDRE
 
 PROCEDURE Detect(); FAR; EXTERNAL;
 
-(*$L EMSAPI.RDF*)
+(*$L EMS.RDF*)
 
 BEGIN
   Detect;

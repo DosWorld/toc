@@ -308,6 +308,72 @@ Regression coverage: `TESTS/NUM.MOD` `LgTIncDecStep` (Section 17) exercises
 `LONGINT` target with `LONGINT`/`WORD`(bit-15-set)/`BYTE`/`INTEGER` steps and
 the 1-arg form.
 
+### Record assignment: two missing far-source (`MReg`) cases — FIXED (2026-07-13)
+
+`PSTMT.MOD`'s whole-record `:=` codegen (`ParseStatement`) dispatches on
+`(item.mode, item.isRef, rhs.mode, rhs.isRef)` across several branches, one
+per shape. Two shapes were missing entirely and silently fell through to
+the generic scalar `CgLoadItem(rhs); CgStoreItem(item)` path, which
+transfers only the record's **first WORD field** — every other field is
+left as whatever garbage was already in the destination. Found while
+implementing `SRC/TLINK` (`ImpFind`'s `e := n.sym[i]`, an array-of-RECORD
+element read through a chunked-node pointer, assigned to a `VAR` record
+out-parameter).
+
+Both missing shapes have `rhs.mode = Cgen.MReg` (the RHS is an array-of-
+RECORD element or a pointer/far-deref — see `PEXPR.MOD`'s `TLbrak`/`TArrow`
+handling, which sets `item.mode := Cgen.MReg; item.isRef := TRUE` after
+indexing/dereferencing) — a shape the existing branches never anticipated
+because `Cgen.CgLesBxItem(mode, adr)` treats **any** non-`MGlobal` mode as
+`MLocal` (BP-relative `LES BX,[BP+adr]`), so calling it on an `MReg` source
+loads a garbage stack slot instead of using the ES:BX far address the
+index/deref codegen already computed:
+
+1. **Plain dest, `MReg` far-ref source** (`~item.isRef & rhs.isRef`, e.g.
+   `localRec := arr[i]`): the branch's guard required
+   `rhs.mode ∈ {MLocal, MGlobal}`, excluding `MReg` outright. Extended the
+   guard to accept `MReg` too, with a bare `MOV SI,BX` (no load — ES:BX is
+   already the source) instead of `CgLesBxItem`.
+2. **Far-ref dest, `MReg` far-ref source** (`item.isRef & rhs.isRef &
+   item.mode # MReg`, e.g. `varParam := arr[i]` where `varParam: VAR
+   RecordType`): same `CgLesBxItem` misuse. Fixing this one is trickier —
+   the destination's own `CgLesBxItem(item.mode, item.adr)` call runs
+   *first* in this branch and clobbers ES:BX before the (already-computed)
+   source address can be used, so the source's ES:BX must be stashed in
+   DX:SI *before* loading the destination, then restored afterward.
+   `CgLesBxBp`/`CgLesBxMem` (what `CgLesBxItem` dispatches to) touch only
+   ES:BX, so DX:SI is safe to use as the stash.
+
+Both fixes verified via `TESTS.MD`'s manifest (280/280, no regression) and
+the single-command self-host fixpoint (`gen2 == gen3` byte-identical).
+Minimal repro pattern for future reference: a `POINTER TO RECORD` holding
+`ARRAY N OF SomeRecord`, `e := n.someArray[i]` where `e` is first a plain
+local (shape 1) then a `VAR SomeRecord` parameter (shape 2) — both
+silently returned only the first field before this fix.
+
+### `Strings.Append` truncation off-by-one — FIXED (2026-07-13)
+
+`Strings.Append(s, VAR d)`'s length clamp was
+`len := MIN(NearLength(s)+1, LEN(d)-1-dl)` — folding the source's own NUL
+terminator into the *same* `MIN` as the actual character count. When the
+destination had **exactly 1 byte of room left** (the common case: an
+8-char buffer already holding a 7-char string), this clamped `len` down to
+1, but the subsequent `d[dl+len-1] := 0X` then overwrote that single
+just-copied character with a NUL at the *same* index — the appended
+character was silently dropped and `d`'s length never changed. A caller
+that pads a fixed-width field via `WHILE Strings.Length(d) < N DO
+Strings.Append(" ", d) END` (e.g. `SRC/TLINK`'s `/N:` device-name padding,
+an 8-char field in a 9-byte buffer) hung forever, since the loop condition
+could never become true.
+
+Fix: separate the "characters to copy" clamp from the NUL write —
+`len := MIN(NearLength(s), LEN(d)-1-dl)` (no `+1`), then write the
+terminator at `d[dl+len]` (always in bounds, since `len <= LEN(d)-1-dl`)
+instead of `d[dl+len-1]`. Verified against the exact-fit case (string
+fills the buffer with zero bytes to spare), the one-byte-of-room case (the
+bug), and the plenty-of-room case, all producing correct truncation and a
+correct final NUL either way.
+
 ---
 
 ## DOS memory model constraints  ← CRITICAL
@@ -409,11 +475,11 @@ survives the process.  `OC.RunBody` returns the exit code (0/1); `OC.Run` does
 
 ### Error handling: module LogErr  ← CRITICAL
 
-**`SRC/LIB/LOGERR.MOD` (module `LogErr`, renamed from `LogErr` and moved from
+**`SRC/LIB/LOGERR.MOD` (module `LogErr`, renamed from `Err` and moved from
 `SRC/TOC` to `SRC/LIB` 2026-07-11 — now a stdlib module, merged into
 `OBERON.OM` like `Strings`/`Files`) is the SINGLE error state and the SINGLE
 place any message is printed** for the whole toolchain (compiler, linker,
-olib, tools). No other module keeps its own error flag or writes diagnostics
+tolib, tools). No other module keeps its own error flag or writes diagnostics
 directly.
 
 - **One latch.** `LogErr.Error`/`LogErr.Error2`/`LogErr.ErrorInFile` set an
@@ -442,19 +508,19 @@ directly.
   then call `LogErr.ErrorInFile`), not pass-throughs — keep them.  Need a new
   wrapper? Ask first.  `LogErr.Info2`/`Warn2` were added *inside* LOGERR.MOD
   (not an external wrapper).
-- **Tool DATA stays on stdout.** olib's `list` member table and rdfgrep's query
+- **Tool DATA stays on stdout.** tolib's `list` member table and rdfgrep's query
   results are program output, not diagnostics — they stay on `IO`/`Out`; only
   their error/usage messages go through `LogErr`.  The manifest harness greps
   `output.log` for `stderr-contains` rows so it sees diagnostics regardless of
   stream.
 - **Build graph.** `Rdoff`/`Tar`/`LogErr` all live in `SRC/LIB` now and are
-  merged into `OBERON.OM` — any tool linking them (olib, rdfgrep, toc.exe
+  merged into `OBERON.OM` — any tool linking them (tolib, rdfgrep, toc.exe
   itself, and future tools like TASM) gets them automatically via the normal
   `OBERON_LIB=...OBERON.OM` entry; no separate per-module `.OM` path is
   needed on `OBERON_LIB` any more (the old `SRC/TOC/RDOFF.OM;SRC/TOC/TAR.OM;
   SRC/TOC/ERR.OM` entries were removed from the tools Makefile).
 
-The same one-Halt shape applies to the standalone tools: `olib` has its body in
+The same one-Halt shape applies to the standalone tools: `tolib` has its body in
 `TOLib.RunBody(): INTEGER`, and its `Run` wraps it with the log lifecycle —
 `LogErr.Open; rc := RunBody(); LogErr.Close; SYSTEM.Halt(rc)` (rdfgrep opens the
 logs at the top of `Run` and closes them in its single `Halt` choke point;

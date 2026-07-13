@@ -139,8 +139,10 @@ PROCEDURE AddReloc(patchOfs: LONGINT; labelSeg: INTEGER; width: INTEGER);
 BEGIN
   IF labelSeg = Sym.SegCode THEN
     Rdoff.RdfAddReloc(obj, Rdoff.SegCode, patchOfs, width, Rdoff.SegCode, FALSE)
-  ELSE
+  ELSIF labelSeg = Sym.SegData THEN
     Rdoff.RdfAddReloc(obj, Rdoff.SegCode, patchOfs, width, Rdoff.SegData, FALSE)
+  ELSE
+    Rdoff.RdfAddReloc(obj, Rdoff.SegCode, patchOfs, width, Rdoff.SegBss, FALSE)
   END
 END AddReloc;
 
@@ -158,6 +160,23 @@ END SegPrefixByte;
 PROCEDURE EmitSegPrefix(seg: INTEGER);
 BEGIN IF seg # NoSeg THEN B(SegPrefixByte(seg)) END
 END EmitSegPrefix;
+
+(* PrefixByteFor: LOCK/REP* pseudo-mnemonic id -> its x86 prefix byte.
+   LOCK=F0H; REP/REPE/REPZ share F3H (REP for string-store/move ops, REPE/
+   REPZ for string-compare/scan ops -- same opcode byte on real 8086, NASM
+   accepts all three spellings); REPNE/REPNZ share F2H.  Called from
+   Parse.MOD once a leading LOCK/REP* token is recognized; the resulting
+   byte is threaded through to Encode* as `prefixByte` and emitted first,
+   before the segment-override prefix. *)
+PROCEDURE PrefixByteFor*(mnemId: INTEGER): BYTE;
+BEGIN
+  CASE mnemId OF
+    Lex.MLock: RETURN BYTE(0F0H)
+  | Lex.MRep, Lex.MRepe, Lex.MRepz: RETURN BYTE(0F3H)
+  | Lex.MRepne, Lex.MRepnz: RETURN BYTE(0F2H)
+  ELSE RETURN BYTE(0)
+  END
+END PrefixByteFor;
 
 PROCEDURE ModRmByte(modv, regField, rm: INTEGER): BYTE;
 BEGIN RETURN BYTE(modv * 64 + regField * 8 + rm)
@@ -229,8 +248,10 @@ BEGIN
         IF op.isSegOf THEN
           IF lseg = Sym.SegCode THEN
             Rdoff.RdfAddSegReloc(obj, Rdoff.SegCode, patchOfs, Rdoff.SegCode)
-          ELSE
+          ELSIF lseg = Sym.SegData THEN
             Rdoff.RdfAddSegReloc(obj, Rdoff.SegCode, patchOfs, Rdoff.SegData)
+          ELSE
+            Rdoff.RdfAddSegReloc(obj, Rdoff.SegCode, patchOfs, Rdoff.SegBss)
           END
         ELSE
           AddReloc(patchOfs, lseg, 2)
@@ -308,6 +329,23 @@ END EncPushPopReg;
 PROCEDURE EncPushMem(VAR op: Operand);
 BEGIN EmitModRm(6, op)
 END EncPushMem;
+
+(* PUSH imm16 (68H, genuine 8086) / PUSH imm8 (6AH, sign-extended --
+   technically an 80186+ opcode, included anyway per maintainer request
+   even though it's outside the project's stated pure-8086 scope). Labels
+   as push operands are not supported (PUSH imm on 8086 has no relocation
+   use case in this codebase's fixtures; a bare "push label" already
+   parses as OKImm with hasLabel and would need EmitDisp16 -- left
+   unimplemented until a real .asm needs it). *)
+PROCEDURE EncPushImm(VAR op: Operand);
+BEGIN
+  IF op.hasLabel THEN Err("PUSH label immediate not supported"); RETURN END;
+  IF op.size = SzByte THEN
+    B(BYTE(06AH)); B(BYTE(op.disp))
+  ELSE
+    B(BYTE(068H)); W(INTEGER(op.disp))
+  END
+END EncPushImm;
 
 PROCEDURE EncPopMem(VAR op: Operand);
 BEGIN EmitModRm(0, op)
@@ -469,8 +507,9 @@ BEGIN
   EmitModRm(ext, op)
 END EncUnaryGroup;
 
-(* ---- shift/rotate group D0/D1 (by 1) or D2/D3 (by CL): SHL=/4 SHR=/5
-   RCL=/2 RCR=/3.  8086 has no immediate-count shift (that's a 186+
+(* ---- shift/rotate group D0/D1 (by 1) or D2/D3 (by CL): ROL=/0 ROR=/1
+   RCL=/2 RCR=/3 SHL=/4 (SAL is a pure assembler alias for SHL, same /4)
+   SHR=/5 SAR=/7.  8086 has no immediate-count shift (that's a 186+
    extension) -- only "by 1" or "by CL" forms exist here. *)
 PROCEDURE EncShift(ext: INTEGER; VAR dst, cnt: Operand);
   VAR wide: BOOLEAN;
@@ -525,6 +564,16 @@ BEGIN
   ELSE B(BYTE(0C4H)); EmitModRm(dst.reg, src)
   END
 END EncLes;
+
+(* EncLds: identical to EncLes but opcode C5H instead of C4H -- LDS
+   loads DS:reg from a far pointer in memory, LES loads ES:reg; same
+   ModRM semantics either way. *)
+PROCEDURE EncLds(VAR dst, src: Operand);
+BEGIN
+  IF (dst.kind # OKReg) OR (src.kind # OKMem) THEN Err("LDS requires reg, mem")
+  ELSE B(BYTE(0C5H)); EmitModRm(dst.reg, src)
+  END
+END EncLds;
 
 (* ---- INT imm8 ---- *)
 PROCEDURE EncInt(VAR op: Operand);
@@ -719,15 +768,25 @@ BEGIN
 END EncCallIndirect;
 
 (* EncJmpFarDirect: JMP/CALL far ptr16:16 -- EA/9A followed by offset then
-   segment word.  Segment word needs a RDFREC_SEGRELOC against the target
-   label's group (import or same-module code group), per DOCS/RDOFF2.MD
-   Type 6 / large-model address calc.  Used for `call far [ProcPtr_off]`-
-   style indirect forms only when the operand is a label naming a FAR proc
-   pointer variable read from memory -- direct far CALL/JMP to a label (not
-   through a pointer) does not occur in SYS.ASM/EMSAPI.ASM (both only use
-   `call far [mem]`, the indirect form above), so this direct-immediate
-   far form is not required for v1's two oracle files and is intentionally
-   left unimplemented (Simplicity First) until a real .asm needs it. *)
+   segment word.  Does not occur in SYS.ASM/EMS.ASM (both only use
+   `call far [mem]`, the indirect form above) but is part of the base 8086
+   instruction set (v2 "full 8086 coverage" plan, batch 4).  Reuses
+   EmitDisp16 twice against two Operand copies of the same label target --
+   one plain (isSegOf=FALSE, emits the offset word via a normal RELOC) and
+   one isSegOf=TRUE (emits the segment word via a SEGRELOC) -- exactly the
+   same offset/segment split EmitDisp16 already performs for `SEG label`
+   elsewhere, just both halves of the same instruction instead of two
+   separate instructions. *)
+PROCEDURE EncJmpFarDirect(opcode: BYTE; VAR target: Operand);
+  VAR segOp: Operand;
+BEGIN
+  IF ~target.hasLabel THEN Err("far JMP/CALL target must be a label"); RETURN END;
+  B(opcode);
+  EmitDisp16(target);
+  segOp := target;
+  segOp.isSegOf := TRUE;
+  EmitDisp16(segOp)
+END EncJmpFarDirect;
 
 (* EncStrOp: no-operand string instructions MOVSB/MOVSW/SCASB/SCASW/
    CMPSB/CMPSW -- single opcode byte each, no ModRM. *)
@@ -774,10 +833,16 @@ END EncOut;
    `n` is the actual operand count Parse.MOD parsed; operands beyond `n`
    are unused placeholders.  CASE on the integer id compiles to a jump
    table (matching SRC/TOC/SCAN.MOD's own LookupKeyword-style dispatch
-   idiom), replacing the former Strings.Equal(mnem, "MOV") chain. *)
-PROCEDURE Encode*(mnemId: INTEGER; VAR ops: ARRAY OF Operand; n: INTEGER);
+   idiom), replacing the former Strings.Equal(mnem, "MOV") chain.
+   `prefixByte` (0 = none) is a LOCK/REP* prefix Parse.MOD already
+   recognized as a separate leading token on the same source line and
+   resolved via PrefixByteFor -- emitted first, before the segment-
+   override scan, per real 8086 prefix-byte ordering (v2 "full 8086
+   coverage" plan, batch 5). *)
+PROCEDURE Encode*(mnemId: INTEGER; VAR ops: ARRAY OF Operand; n: INTEGER; prefixByte: BYTE);
   VAR imm0: Operand; i: INTEGER;
 BEGIN
+  IF prefixByte # BYTE(0) THEN B(prefixByte) END;
   (* A segment-override prefix must be the FIRST byte of the whole
      instruction (prefix, opcode, ModRM, disp) -- not just before the
      ModRM byte -- so it is emitted here, once, ahead of any mnemonic-
@@ -797,6 +862,7 @@ BEGIN
       IF n # 1 THEN Err("PUSH requires 1 operand")
       ELSIF ops[0].kind = OKSegReg THEN B(BYTE(ops[0].reg * 8 + 6))
       ELSIF ops[0].kind = OKReg THEN EncPushPopReg(BYTE(050H), ops[0])
+      ELSIF (ops[0].kind = OKImm) & ~ops[0].hasLabel THEN EncPushImm(ops[0])
       ELSE B(BYTE(0FFH)); EncPushMem(ops[0])
       END
   | Lex.MPop:
@@ -813,6 +879,8 @@ BEGIN
       IF n # 2 THEN Err("LEA requires 2 operands") ELSE EncLea(ops[0], ops[1]) END
   | Lex.MLes:
       IF n # 2 THEN Err("LES requires 2 operands") ELSE EncLes(ops[0], ops[1]) END
+  | Lex.MLds:
+      IF n # 2 THEN Err("LDS requires 2 operands") ELSE EncLds(ops[0], ops[1]) END
   | Lex.MXchg:
       IF n # 2 THEN Err("XCHG requires 2 operands") ELSE EncXchg(ops[0], ops[1]) END
   | Lex.MAdd:
@@ -857,6 +925,14 @@ BEGIN
       IF n # 2 THEN Err("RCL requires 2 operands") ELSE EncShift(2, ops[0], ops[1]) END
   | Lex.MRcr:
       IF n # 2 THEN Err("RCR requires 2 operands") ELSE EncShift(3, ops[0], ops[1]) END
+  | Lex.MRol:
+      IF n # 2 THEN Err("ROL requires 2 operands") ELSE EncShift(0, ops[0], ops[1]) END
+  | Lex.MRor:
+      IF n # 2 THEN Err("ROR requires 2 operands") ELSE EncShift(1, ops[0], ops[1]) END
+  | Lex.MSar:
+      IF n # 2 THEN Err("SAR requires 2 operands") ELSE EncShift(7, ops[0], ops[1]) END
+  | Lex.MSal:
+      IF n # 2 THEN Err("SAL requires 2 operands") ELSE EncShift(4, ops[0], ops[1]) END
   | Lex.MInt:
       IF n # 1 THEN Err("INT requires 1 operand") ELSE EncInt(ops[0]) END
   | Lex.MRet, Lex.MRetn:
@@ -902,15 +978,28 @@ BEGIN
       ELSE B(BYTE(09BH)); B(BYTE(0D9H)); EmitModRm(7, ops[0])
       END
   | Lex.MFwait: EncNoOperand(BYTE(09BH))
+  | Lex.MCbw:  EncNoOperand(BYTE(098H))
+  | Lex.MCwd:  EncNoOperand(BYTE(099H))
+  | Lex.MHlt:  EncNoOperand(BYTE(0F4H))
+  | Lex.MXlat: EncNoOperand(BYTE(0D7H))
+  | Lex.MInto: EncNoOperand(BYTE(0CEH))
+  | Lex.MAaa:  EncNoOperand(BYTE(037H))
+  | Lex.MAas:  EncNoOperand(BYTE(03FH))
+  | Lex.MDaa:  EncNoOperand(BYTE(027H))
+  | Lex.MDas:  EncNoOperand(BYTE(02FH))
+  | Lex.MAam:  B(BYTE(0D4H)); B(BYTE(00AH))
+  | Lex.MAad:  B(BYTE(0D5H)); B(BYTE(00AH))
   | Lex.MJmp:
       IF n # 1 THEN Err("JMP requires 1 operand")
       ELSIF ops[0].kind = OKMem THEN EncJmpIndirect(ops[0])
+      ELSIF (ops[0].kind = OKImm) & ops[0].isFar THEN EncJmpFarDirect(BYTE(0EAH), ops[0])
       ELSIF ops[0].isShort THEN EncJmpShort(BYTE(0EBH), ops[0])
       ELSE EncJmpAuto(ops[0])
       END
   | Lex.MCall:
       IF n # 1 THEN Err("CALL requires 1 operand")
       ELSIF ops[0].kind = OKMem THEN EncCallIndirect(ops[0])
+      ELSIF (ops[0].kind = OKImm) & ops[0].isFar THEN EncJmpFarDirect(BYTE(09AH), ops[0])
       ELSE EncNearRel(BYTE(0E8H), ops[0])
       END
   | Lex.MLoop:
@@ -931,6 +1020,22 @@ BEGIN
       IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(078H), ops[0]) END
   | Lex.MJns:
       IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(079H), ops[0]) END
+  | Lex.MJo:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(070H), ops[0]) END
+  | Lex.MJno:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(071H), ops[0]) END
+  | Lex.MJp, Lex.MJpe:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07AH), ops[0]) END
+  | Lex.MJnp, Lex.MJpo:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07BH), ops[0]) END
+  | Lex.MJl, Lex.MJnge:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07CH), ops[0]) END
+  | Lex.MJge, Lex.MJnl:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07DH), ops[0]) END
+  | Lex.MJle, Lex.MJng:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07EH), ops[0]) END
+  | Lex.MJg, Lex.MJnle:
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07FH), ops[0]) END
   ELSE
     Err("unknown mnemonic")
   END

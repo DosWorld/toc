@@ -69,7 +69,7 @@ endstruc
 ; 32-bit divide kernel already exists as SYS.ASM's SYSTEM_S32DIV/S32MOD, but
 ; it is not reachable from here: separate $L .rdf blobs are appended into
 ; the .om archive as opaque data, not symbol-resolved against each other,
-; so EMSAPI.RDF cannot call into SYS.RDF.)  Every routine below saves/
+; so EMS.RDF cannot call into SYS.RDF.)  Every routine below saves/
 ; restores DS around its own access to the module's .data state
 ; (driverPresent/pageFrameObtained/pageFrameSeg/errorCode/moveDesc), loading
 ; DS via `mov ax, seg driverPresent` -- the same idiom SYS.ASM uses for its

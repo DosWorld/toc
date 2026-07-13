@@ -34,8 +34,11 @@ CONST
 
 PROCEDURE Usage;
 BEGIN
+  Out.Ln;
   Out.String("usage: tasm [/LOG=level] file.asm"); Out.Ln;
+  Out.Ln;
   Out.String("  Assembles file.asm (NASM subset) to file.rdf (RDOFF2)."); Out.Ln;
+  Out.Ln;
   Out.String("  /LOG=level   set diagnostic verbosity: debug, info, warn"); Out.Ln;
   Out.String("               (default), or error. Case-insensitive."); Out.Ln
 END Usage;

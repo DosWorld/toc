@@ -19,6 +19,7 @@ library modules, and the command-line toolchain.
 | `BIN/TOC.EXE` | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `.om` archive manager (list / extract / create / merge); supports `@listfile` |
 | `BIN/TASM.EXE` | Self-hosted MS-DOS assembler, built via `SRC/TASM/Makefile` from `BOOT/TASM.EXE` |
+| `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
 | `BIN/RDFGREP.EXE` | RDOFF/.om/.exe introspection tool (used in tests) |
 | `xt` | DOS emulator; runs MS-DOS `.exe` files on Linux/Mac |
 
@@ -103,14 +104,14 @@ xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=Run MyProg.Mod
 `toc.exe` automatically recompiles only stale modules (pass `/M` to recompile
 everything).  `OBERON.OM` is found automatically in CWD or in the exe directory.
 
-### 1.6 `olib` — archive manager
+### 1.6 `tolib` — archive manager
 
 ```
-olib list    File.om
-olib extract File.om MemberName OutFile
-olib create  File.om member1 member2 ...
-olib merge   Out.om  In1.om In2.om ...
-@listfile    (any command: expand file with one argument per line)
+tolib list    File.om
+tolib extract File.om MemberName OutFile
+tolib create  File.om member1 member2 ...
+tolib merge   Out.om  In1.om In2.om ...
+@listfile     (any command: expand file with one argument per line)
 ```
 
 Used to inspect or manipulate `.om` archives.  `merge` combines multiple archives into one,
@@ -128,28 +129,70 @@ tasm.exe [/LOG=level] File.asm
 (the `.asm` path); the output filename is auto-derived (`File.asm` → `File.rdf`).  `/LOG=`
 works exactly like `toc.exe`'s (`/LOG=debug|info|warn|error`, case-insensitive).
 
-Covers a practical 8086 subset: the general-purpose/segment/string instructions, `BITS`/
-`CPU`/`SECTION .text|.data`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added synonym)/
-`STRUC`/`ENDSTRUC`/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`DB`/`DW`/`TIMES`, plus
-`SEG`/`BYTE`/`WORD`/`FAR`/`SHORT`/`NEAR` operand qualifiers and character-literal
-immediates.  `EXTERN`/`IMPORT` symbols resolve through RDOFF2 `RDFREC_IMPORT` records, so
-a `.rdf` produced by `tasm` can reference symbols defined in another module exactly like
-one produced by real NASM.
+Covers a practical 8086 subset: the general-purpose/segment/string instructions
+(including `LDS`/`LES`), shift/rotate (by 1 or `CL` only, matching real 8086),
+`MUL`/`DIV`/`IMUL`/`IDIV`, `Jcc`, `LOCK`/`REP` prefixes, `BITS`/`CPU`/
+`SECTION .text|.data|.bss`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added
+synonym)/`STRUC`/`ENDSTRUC`/`RESB`/`RESW`/`RESD` (valid only inside
+`SECTION .bss`)/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`DB`/`DW`/`TIMES`,
+plus `SEG`/`BYTE`/`WORD`/`FAR`/`SHORT`/`NEAR` operand qualifiers and
+character-literal immediates.  `EXTERN`/`IMPORT` symbols resolve through
+RDOFF2 `RDFREC_IMPORT` records, so a `.rdf` produced by `tasm` can reference
+symbols defined in another module exactly like one produced by real NASM
+(`CALL FAR`, not a bare `CALL`, is required for such cross-module calls — see
+§16.1 below). **Not supported:** `[label+register]` combined addressing (a
+data-segment label combined with a base register in one bracket) — load the
+label address into a register first, then add the index register separately.
 
-`tasm` is the tool of record for this repo's two hand-written `.asm` files:
-`SRC/LIB/SYS.ASM` → `SYS.RDF` and `SRC/LIB/EMSAPI.ASM` → `EMSAPI.RDF`.  It is **not** a
-prerequisite of `make all` — `tasm` itself needs a fully-built `OBERON.OM`, which in turn
-is built from `SYS.RDF`, so making `tasm` a hard build dependency would be circular.
-Instead, `SYS.RDF`/`EMSAPI.RDF` are checked into the repo, and regenerated only via the
-manual `SRC/LIB/Makefile` target `regen-asm` (uses `BOOT/TASM.EXE`, not `BIN/TASM.EXE`).
-See [BUILD.MD](BUILD.MD) §"Refreshing `BOOT/TASM.EXE`" for the maintainer-only install
-step — like `BOOT/TOC.EXE`, `BOOT/TASM.EXE` is never touched by `make` and is installed
-manually by the maintainer only.
+`tasm` is the tool of record for six hand-written `SRC/LIB/*.asm` files:
+`SYS.ASM`→`SYS.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`,
+`WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, and
+`SCREEN.ASM`→`SCREEN.RDF`.  It is **not** a prerequisite of `make all` —
+`tasm` itself needs a fully-built `OBERON.OM`, which in turn is built from
+`SYS.RDF`, so making `tasm` a hard build dependency would be circular.
+Instead, all six `.RDF` files are checked into the repo, and regenerated only
+via the manual `SRC/LIB/Makefile` target `regen-asm` (uses `BOOT/TASM.EXE`,
+not `BIN/TASM.EXE`). See [BUILD.MD](BUILD.MD) §"Refreshing `BOOT/TASM.EXE`"
+for the maintainer-only install step — like `BOOT/TOC.EXE`, `BOOT/TASM.EXE`
+is never touched by `make` and is installed manually by the maintainer only.
+`SYS.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM` are fully byte-identical to real
+NASM output; `DETECT.ASM`/`SCREEN.ASM` are byte-identical in code/data with
+only a benign header-record ordering difference (see `DOCS/TASM_PLAN.MD`).
 
 Source: `SRC/TASM/{SCAN,SYM,LEX,DIR,ENC,PARSE,TASM}.MOD`.  Tests:
-`TESTS/test_tasm.sh` (byte-diff against real-NASM output for `SYS.ASM`/`EMSAPI.ASM`, plus
-`TESTS/FIX/TSTRUC.ASM`/`TEXTERN.ASM` fixtures for `STRUC`/`EXTERN` coverage), run as part
-of `make test`.
+`TESTS/test_tasm.sh` — 16 checks: 3 real-NASM oracles (`SYS.ASM`/`EMS.ASM`/
+`DETECT.ASM`), 11 byte-diff self-consistency/synthetic fixtures (incl.
+`WINCB.ASM`/`KMOUSE.ASM`/`SCREEN.ASM` and the `TESTS/FIX/*.ASM` STRUC/EXTERN/
+shift/Jcc/no-operand/REP/`.bss` fixtures), 2 `check_fails` error-path
+fixtures — run as part of `make test`. See `DOCS/TESTS.MD` §"TASM assembler
+regression test" for the full breakdown.
+
+### 1.8 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
+
+```
+tlink [/T=com|sys|exe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
+```
+
+`BIN/TLINK.EXE` links RDOFF2 objects into a tiny-model `.COM`/`.SYS` image
+(`/T=com`, the default, or `/T=sys` with `/A:`/`/N:` for a device driver —
+a 3-byte `JMP start` stub or an 18-byte device header, single contiguous
+code+data+bss segment, no relocation table) or a small-model `.EXE`
+(`/T=exe` — paragraph-aligned code/data/bss regions plus an MZ relocation
+table). These are memory models `toc.exe`'s own embedded linker does not
+target (it always produces a full/large-model-style single-segment image
+sized to the compiler's own conventions).
+
+Keeps the logic shared between tiny and small model (module/symbol
+scanning, RDOFF2/RDLIB2/TAR auto-detection by content signature,
+smart-link marking from an entry symbol — only `start`, or both
+`strategy` and `interrupt` for `/T=sys`) once, branching only at
+layout/output time on the target mode. AR (`.a`) archive support was
+intentionally not implemented — not needed by anything in this repo.
+`/LOG=` works exactly like `toc.exe`'s/`tasm.exe`'s (`LogErr.SetLevel`).
+
+Source: `SRC/TLINK/TLINK.MOD`. Build: `cd SRC/TLINK && make && make
+install`. See [BUILD.MD](BUILD.MD) §"Using tlink" for the full CLI
+reference.
 
 ---
 
@@ -713,9 +756,20 @@ FAR proc variables are 4 bytes (segment:offset); NEAR are 2 bytes (offset only, 
 ## 5. Standard library — `OBERON.OM`
 
 After `make`, `BIN/OBERON.OM` is a single merged archive of all
-13 standard library modules (`Out`, `Out87`, `In`, `Strings`, `Files`, `IO`, `Mem`,
-`Dos`, `Crt`, `Math`, `Test`, `RdfLoad`, `SYSTEM`).  Individual `.om` files are
-built as intermediates, merged, then removed. Only `BIN/OBERON.OM` remains.
+20 standard library modules: `SYSTEM`, `Out`, `Out87`, `In`, `Strings`,
+`Files`, `Crt`, `Dos`, `IO`, `RdfLoad`, `Math`, `Test`, `Ems`, `Time`,
+`LogErr`, `Rdoff`, `Tar`, `Detect`, `WinCB`, `KMouse`, `Screen`.  Individual
+`.om` files are built as intermediates, merged, then removed. Only
+`BIN/OBERON.OM` remains.
+
+`Detect` (hardware/environment probing — EGA/VGA/mono, redirected stdio,
+FreeDOS, CPU class), `WinCB` (Windows 3.x clipboard access via WinOldAp
+INT 2Fh), `KMouse` (extended-keyboard + Microsoft-mouse INT 33h driver),
+and `Screen` (text-mode shadow-buffer driver: colour print/scroll, cursor,
+a background spinner, VGA palette fades) are all ports of small Turbo
+Pascal `UNIT`s — see §16 below for the porting conventions they establish
+(EXTERNAL leaf routines in a companion `.ASM` file, `%define`/`%undef`
+stack-argument aliasing, `PCHAR` → `SYSTEM.ADDRESS`).
 
 `BIN/TOC.EXE` finds `OBERON.OM` automatically in CWD or in the same directory as `toc.exe`.
 One command handles compile and link — no individual `.om` files needed:
@@ -1372,6 +1426,80 @@ When porting code from C, Pascal, or another language:
 18. **Split large files** — each module's code must fit in ~64 KB; its data likewise.
 19. **Use 8.3 filenames** for all module names and all files on DOS.
 20. **Build with `toc.exe /ENTRY=`** — one command handles dep-scan, incremental compile, and link.  There is no separate linker or build-script generator.
+
+### 16.1 Porting Turbo Pascal `ASM ... END` blocks
+
+Turbo Pascal `UNIT`s that wrap DOS/BIOS interrupts often write each routine
+as `PROCEDURE Foo; ASSEMBLER; ASM ... END;` — inline MASM-syntax assembly is
+not valid Oberon-07 input in this dialect (no inline-assembly proc bodies at
+all beyond the `INLINE(...)` byte-list form). The established pattern for
+porting these, used by `Detect`/`WinCB`/`KMouse`/`Screen` (all four ported
+from small Turbo Pascal `UNIT`s this way), is a **companion `.ASM` file**:
+
+1. **Split each Pascal `UNIT` into two files**: a `Foo.MOD` with `EXTERNAL`
+   procedure declarations (no bodies) plus any pure-Oberon control flow the
+   original had, and a `Foo.ASM` with the actual NASM-syntax routine bodies
+   — one per Pascal `ASM` block, name-prefixed `Foo_RoutineName` (module
+   name, underscore, original name) since that's how the linker resolves
+   `EXTERNAL` procedures against `.ASM` globals.
+2. **Translate MASM syntax to NASM syntax**: `BYTE PTR [x]` → `BYTE[x]`,
+   `@label` → a plain NASM local label, `$hex` → `hexH`, etc. — see
+   `DOCS/TASM_PLAN.MD`'s "Scope: NASM subset actually used in this repo"
+   for the exact accepted subset (this compiler's own assembler, TASM,
+   only understands NASM syntax, and even where `SRC/LIB/*.RDF` files are
+   built with real NASM instead, the source must still be NASM-syntax).
+3. **Stack arguments use a `%define`/`%undef` bracket, not manual offset
+   arithmetic**: every parameterized routine follows
+   `PUSH BP; MOV BP,SP; %define argName [BP+RSIZE+N]; ...body...; %undef
+   argName; POP BP; RETMACRO N`, where `RSIZE`=4 for a `FAR` proc (the
+   normal case — Oberon calls cross-module `EXTERNAL` procs far) and `N` in
+   `RETMACRO` is the total byte count of stack arguments to pop. This keeps
+   the routine body readable (`MOV AX, x_arg` instead of `MOV AX,
+   [BP+6]`) and self-documents the calling convention at a glance.
+4. **`PCHAR` (Pascal's typed far pointer) maps to `SYSTEM.ADDRESS`.**
+   Typeless `VAR` parameters (Pascal's untyped `VAR d` used for raw memory
+   access) map the same way `Ems.MOD`'s `CopyToEMS`/`CopyToDos` already do:
+   a `VAR d` far-pointer load via `LES BX, [BP+RSIZE+N]` inside the `.ASM`
+   routine, and `SYSTEM.ADR`/`SYSTEM.MOVE`/`SYSTEM.FILL` (never
+   `SYSTEM.GET`/`PUT` — not present in this dialect) on the Oberon side
+   when the untyped block needs touching from `.MOD` code directly.
+5. **Any `INTERRUPT`-modifier Pascal procedure (a raw ISR, e.g. a timer-tick
+   handler) has no Oberon equivalent** — this dialect has no `INTERRUPT`
+   proc modifier at all. Port it as hand-written raw assembly ending in
+   `IRET` (not `RETF`/`RETN`) inside the `.ASM` file, saving/restoring every
+   register it touches, and install it via `Dos.SetIntVec`/`GetIntVec` with
+   `SYSTEM.ADR(procName)` from the Oberon side (`procName` declared
+   `EXTERNAL; FAR;` with no Oberon body — see `Screen.MOD`'s
+   `SpinnerStart`/`Stop` and `Screen.ASM`'s `Screen_Spinner1c`).
+6. **Cross-module calls inside the `.ASM` file must be `CALL FAR`, not a
+   bare `CALL`.** A same-module call to a local label in the same `.ASM`
+   file stays a near `CALL` (`E8`, no relocation needed); a call to another
+   module's `EXTERNAL`-linked routine — including a plain `SYSTEM.MOD`
+   procedure like `SYSTEM.Seg0040` — needs `CALL FAR labelName` (`9A`, with
+   a `RELOC`+`SEGRELOC` against the import ID). Getting this wrong doesn't
+   fail to assemble; it silently produces a near call that jumps to the
+   wrong address at runtime, so it's easy to miss without careful review.
+7. **Never hardcode "magic" segment constants** (`0040h` BIOS data area,
+   `A000h`/`B000h`/`B800h` video segments) as a local `%define` in the new
+   `.ASM` file — call the corresponding `SYSTEM.Seg0040`/`SegA000`/
+   `SegB000`/`SegB800` `EXTERNAL` procedure (`CALL FAR`, per point 6)
+   instead. This is a deliberate project-wide architectural rule, not a
+   style preference.
+8. **Every exported `PROCEDURE` needs a doc comment** immediately above its
+   declaration: what it does, each parameter's meaning, and what the result
+   means — see `Detect.MOD` for the reference style.
+9. **Verify against real NASM if available**: assemble the new `.ASM` with
+   an independent NASM build and byte-diff its `.rdf` against TASM's own
+   output. A pure content match with only header-record-*ordering*
+   differences (NASM interleaves `IMPORT` records at their point of
+   declaration; TASM groups them after all `GLOBAL`s) is expected and fine
+   — see `DOCS/TASM_PLAN.MD`'s "Real-NASM cross-verification" note. A
+   genuine code/data byte difference is not.
+10. **Wire the new module into `SRC/LIB/Makefile`** (`STDLIB_OMS`, the
+    `regen-asm` target, and a per-module `.OM` build rule depending on its
+    checked-in `.RDF`) and, if it's assembled by TASM as part of the
+    project's own regression coverage, into `TESTS/test_tasm.sh` — follow
+    any existing entry (e.g. `KMOUSE.OM`/`KMOUSE.ASM`) as the template.
 
 ---
 

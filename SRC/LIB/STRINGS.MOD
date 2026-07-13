@@ -48,10 +48,18 @@ PROCEDURE Append*(s: ARRAY OF CHAR; VAR d: ARRAY OF CHAR);
 VAR dl, len: INTEGER;
 BEGIN
   dl := NearLength(d);
-  len := SYSTEM.MIN(NearLength(s) + 1, LEN(d) - 1 - dl);
+  (* len = number of CHARACTERS to copy (excludes the NUL terminator,
+     written separately below at d[dl+len] -- always in bounds since
+     len <= LEN(d)-1-dl).  The previous formula folded the terminator into
+     len's own MIN clamp (NearLength(s)+1 vs available room), which stole
+     the last available character slot for a NUL when the destination had
+     exactly 1 byte of room left, silently dropping the appended character
+     entirely (e.g. an 8-char string in a 9-byte buffer appending a single
+     space) -- found while porting SRC/TLINK's /N: device-name padding. *)
+  len := SYSTEM.MIN(NearLength(s), LEN(d) - 1 - dl);
   IF len > 0 THEN
     SYSTEM.MOVE(s[0], d[dl], len);
-    d[dl + len - 1] := 0X
+    d[dl + len] := 0X
   END
 END Append;
 

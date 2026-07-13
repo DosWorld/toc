@@ -482,7 +482,7 @@ and runtime shutdown.
 
 ## Standard library reference
 
-Fourteen modules, merged into one `BIN\OBERON.OM` archive by `make`.
+Twenty-one modules, merged into one `BIN\OBERON.OM` archive by `make`.
 Every procedure below is exported (`*`) and callable after `IMPORT`.
 
 ### `SYSTEM` — see [above](#system--low-level-access)
@@ -797,6 +797,115 @@ PROCEDURE FreeLibrary*(module: RDFModule);
 See [`examples/RDFLOAD/`](examples/RDFLOAD) for a worked example that loads
 a hand-assembled `.rdf` and calls an exported function through a procedure
 variable.
+
+### `LogErr` — toolchain-wide error/diagnostic state
+
+The single error state and single place any message is printed, used
+internally by `toc.exe`/`tolib.exe`/`rdfgrep.exe`/`tasm.exe`/`tlink.exe`
+(and available to any user program that wants the same fail-fast
+diagnostic convention).
+
+```oberon
+PROCEDURE Open*;                                   (* opens output.log / error.log *)
+PROCEDURE Close*;
+PROCEDURE SetLevel*(level: INTEGER);               (* LDEBUG/LINFO/LWARN/LERROR *)
+PROCEDURE Error*(msg: ARRAY OF CHAR);               (* stderr + latches HaveErr *)
+PROCEDURE Error2*(msg, arg: ARRAY OF CHAR);
+PROCEDURE ErrorInFile*(fileName: ARRAY OF CHAR; line: INTEGER; msg: ARRAY OF CHAR);
+PROCEDURE Warn*/Info*/Debug*(msg: ARRAY OF CHAR);   (* stdout, gated by SetLevel *)
+PROCEDURE HaveErr*(): BOOLEAN;
+```
+
+There is no reset — the first `Error*` call latches `HaveErr()` permanently
+for the process, matching this toolchain's fail-fast convention (see
+`DOCS/IMPLRULE.MD` §"Error handling: module LogErr").
+
+### `Rdoff` — RDOFF2 object file reader/writer
+
+Reads and writes RDOFF2 `.rdf` object files (segments, GLOBAL/IMPORT/RELOC/
+SEGRELOC/BSS records) — the format `toc.exe`'s code generator emits and its
+linker consumes. See [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) for the binary
+layout this module implements.
+
+### `Tar` — ustar archive reader/writer
+
+Reads and writes the ustar-subset archive format used for `.om` files (each
+`.om` is a tar archive of `MODNAME.RDF`/`MODNAME.DEF` members, all-uppercase
+8.3 names).
+
+### `Detect` — hardware/environment probing
+
+```oberon
+PROCEDURE IsEga*(): BOOLEAN;
+PROCEDURE IsVga*(): BOOLEAN;
+PROCEDURE IsMonochrome*(): BOOLEAN;
+PROCEDURE IsInputRedirected*(): BOOLEAN;
+PROCEDURE IsOutputRedirected*(): BOOLEAN;
+PROCEDURE IsAnsiSys*(): BOOLEAN;
+PROCEDURE IsFreeDos*(): BOOLEAN;
+PROCEDURE GetFreeDosVer*(): WORD;
+PROCEDURE Cpu*(): INTEGER;          (* CPU86/CPU286/CPU386/CPU486/CPU586 *)
+PROCEDURE IsAT*(): BOOLEAN;
+```
+
+Video adapter, console redirection, FreeDOS, and CPU-class detection. Used
+internally by `Screen` (video segment/VGA choice) and `KMouse` (extended
+keyboard availability).
+
+### `WinCB` — Windows 3.x clipboard access
+
+```oberon
+PROCEDURE CopyText*(s: ARRAY OF CHAR): BOOLEAN;
+PROCEDURE PasteText*(VAR s: ARRAY OF CHAR; maxLen: WORD): BOOLEAN;
+```
+
+Reads/writes the Windows 3.x WinOldAp (INT 2Fh AX=17xxh) clipboard from a
+DOS box. Returns `FALSE` (rather than faulting) when no compatible Windows
+session is running.
+
+### `KMouse` — extended keyboard + Microsoft Mouse driver
+
+```oberon
+PROCEDURE KbdGetKey*(): WORD;
+PROCEDURE KbdHasKey*(): BOOLEAN;
+PROCEDURE KbdGetFlags*(): BYTE;
+PROCEDURE KbdFast*;
+PROCEDURE KbdReset*;
+PROCEDURE IsCtrl*/IsAlt*/IsShift*(flags: BYTE): BOOLEAN;
+
+PROCEDURE MouseAvail*(): BOOLEAN;
+PROCEDURE MouseShow*; PROCEDURE MouseHide*;
+PROCEDURE MouseVisible*(): BOOLEAN;
+PROCEDURE MouseButtons*(): BYTE;
+PROCEDURE MouseGetX*/MouseGetY*(): INTEGER;
+```
+
+Extended (101/102/122-key) BIOS keyboard access via INT 16h, plus a
+Microsoft Mouse (INT 33h)-compatible driver. `~90` `ScanXxx` CONSTs cover
+the full scan-code set (`ScanF1`, `ScanCtrlHome`, `ScanAltF10`, …). Ported
+from the Turbo Pascal `KMOUSE.PAS` UNIT.
+
+### `Screen` — text-mode shadow-buffer driver
+
+```oberon
+PROCEDURE GetWidth*/GetHeight*(): INTEGER;
+PROCEDURE Cls*(clr: BYTE);
+PROCEDURE Print*(x, y: INTEGER; clr: BYTE; s: SYSTEM.ADDRESS);
+PROCEDURE PrintHl*(x, y: INTEGER; clr, hlclr: BYTE; s: SYSTEM.ADDRESS);
+PROCEDURE Show*;                              (* blit shadow buffer to video *)
+PROCEDURE Push*; PROCEDURE Pop*; PROCEDURE Pick*;   (* save/restore screen stack *)
+PROCEDURE ScrollUp*/ScrollDown*(stx, sty, w, h, lines: INTEGER);
+PROCEDURE CursorOff*/CursorOn*/CursorBig*;
+PROCEDURE SpinnerStart*; PROCEDURE SpinnerStop*;    (* INT 1Ch background animation *)
+PROCEDURE FadeIn*; PROCEDURE FadeOut*;              (* VGA palette fades *)
+```
+
+A shadow-buffer text-mode driver: colour print/scroll, a save/restore
+screen stack, cursor control, a background spinner animation (installed as
+a real INT 1Ch handler), and VGA DAC palette fades. Ported from the Turbo
+Pascal `SCR.PAS` UNIT — see `DOCS/PORTING.MD` §16.1 for the general
+Pascal-`ASM`-block porting pattern this module (along with `Detect`/
+`WinCB`/`KMouse`) established.
 
 ---
 

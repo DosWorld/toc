@@ -12,7 +12,7 @@
 objects will produce false results. `make test` enforces this automatically.
 
 ```bash
-make test      # clean, full rebuild, run 280 manifest rows + TASM regression (host-side, fast)
+make test      # clean, full rebuild, run 281 manifest rows + TASM regression (host-side, fast)
 make testall   # full DOS-side suite via xt: manifest + Section 17/18 + SYSTEM.DEF checks (~9 min)
 ```
 
@@ -135,7 +135,7 @@ and `testall.exe` (T5/T6 — SYSTEM.DEF absent checks).  The old
 
 A TSV-driven test runner — one row per test, no shell heredocs.  Each row
 names a fixture in `TESTS/FIX/`, optional compiler flags, an EXPECT
-predicate, and an argument.  **280 rows, all passing.**
+predicate, and an argument.  **281 rows, all passing.**
 
 Driven by two runners:
 - **Host-side (POSIX):** `make -f TESTS/Makefile.man test` — GNU make, calls xt per row.  Per-row scratch dirs are created under the project `TMP/` (not the system tmpfs); see `TMPROOT` in `TESTS/Makefile.man`.
@@ -204,7 +204,7 @@ form and survives all codegen reshuffles.
 
 ## Integration tests
 
-All integration tests are now in `TESTS/MANIFEST.TSV` (280 rows) or run by
+All integration tests are now in `TESTS/MANIFEST.TSV` (281 rows) or run by
 `BIN/TESTALL.EXE` (Section 17/18 executables + SYSTEM.DEF artefact checks).
 The old bash drivers (`test_src.sh`, `test_system_intrinsics.sh`) have been deleted —
 their content is fully covered by the manifest and testall.
@@ -375,7 +375,7 @@ Regressions of historical compiler bugs are preserved in the corresponding modul
   codegen (G7, `DOCS/IMPLRULE.MD` §"CASE jump-table dispatch"); it caught a
   real out-of-range-dispatch bug (values outside the label range fell into
   arm 1's body instead of the `ELSE`/fall-through target) that `make test`'s
-  280-row manifest cannot catch, since the manifest only checks compile-time
+  281-row manifest cannot catch, since the manifest only checks compile-time
   byte/symbol patterns, not runtime dispatch correctness. Also runnable
   standalone, bypassing `make testall`'s harness bugs:
   `toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe`.
@@ -453,25 +453,50 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
 `TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
 `.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7 and `DOCS/TASM_PLAN.MD`) by byte-diffing
-its output against expected `.rdf` files:
+its output against expected `.rdf` files. 16 checks total:
 
 1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
    compiler's own self-host).
-2. **Real-NASM oracles** — assembles `SRC/LIB/SYS.ASM` and `SRC/LIB/EMSAPI.ASM` and
-   byte-diffs the result against the checked-in `SYS.RDF`/`EMSAPI.RDF`, which were
-   originally produced by real NASM. This is the authoritative correctness signal.
-3. **Synthetic fixtures** — assembles `TESTS/FIX/TSTRUC.ASM` (STRUC/ENDSTRUC field-offset
-   and `_size` arithmetic) and `TESTS/FIX/TEXTERN.ASM` (EXTERN/IMPORT cross-module
-   relocations) and byte-diffs against `TESTS/FIX/TSTRUC.RDF`/`TEXTERN.RDF`. No
-   independent NASM oracle exists for these two — the expected `.rdf` is TASM's own
-   previously-verified output, so this is a regression guard, not an independent
-   correctness proof. Re-derive the expected `.rdf` by hand whenever the fixture changes.
+2. **Real-NASM oracles** (3) — assembles `SRC/LIB/SYS.ASM`, `SRC/LIB/EMS.ASM`, and
+   `SRC/LIB/DETECT.ASM`, byte-diffing against the checked-in `SYS.RDF`/`EMS.RDF`/
+   `DETECT.RDF`, all originally produced by real NASM. This is the authoritative
+   correctness signal. `DETECT.ASM` is the only `.text`-only oracle (no `SECTION
+   .data`) — it caught a real bug (`RDOFF.MOD`'s `RdfWriteTo` used to skip the
+   `.data` segment header entirely when `dataLen=0`, but real NASM always emits
+   it) that `SYS.ASM`/`EMS.ASM`'s real `.data` sections never exercised. A later
+   independent full re-verification against fresh real-NASM builds of every
+   `SRC/LIB/*.ASM` file confirmed `SYS.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM`
+   are fully byte-identical to NASM, and `DETECT.ASM`/`SCREEN.ASM` are
+   byte-identical in their code/data segments with only a benign header-record
+   *ordering* difference (NASM interleaves `IMPORT` records at their point of
+   declaration; TASM groups them after all `GLOBAL` records — semantically inert,
+   see `DOCS/TASM_PLAN.MD`).
+3. **Synthetic / self-consistency fixtures** (11) — `TESTS/FIX/TSTRUC.ASM`
+   (STRUC/ENDSTRUC field-offset and `_size` arithmetic), `TEXTERN.ASM`
+   (EXTERN/IMPORT cross-module relocations), `TMULDIV.ASM` (IMUL/DIV/IDIV
+   F6/F7-group encoding), `TSHIFT.ASM` (shift/rotate-by-1-or-CL), `TJCC2.ASM`
+   (Jcc encoding), `TNOOP4.ASM` (no-operand opcodes), `TREP.ASM` (LOCK/REP
+   prefixes + LODSB/LODSW/STOSB/STOSW), `TBSS.ASM` (`SECTION .bss`
+   RESB/RESW/RESD + `RDFREC_BSS` + BSS-target RELOC coverage), plus
+   `SRC/LIB/WINCB.ASM` (stack-argument LES/RETF-imm16 pattern),
+   `SRC/LIB/KMOUSE.ASM` (direct-memory `MOV [label],AL` / stack-argument
+   byte-flag pattern), and `SRC/LIB/SCREEN.ASM` (`CALL FAR` cross-module
+   relocations to `SYSTEM.Seg0040`/`KMouse_Mouse*`, and `LDS` encoding). No
+   independent NASM oracle backed these when first written — the expected
+   `.rdf` was TASM's own previously-verified output, a regression guard rather
+   than an independent correctness proof — but `WINCB`/`KMOUSE`/`SCREEN` have
+   since also been confirmed against real NASM (see point 2 above). Re-derive
+   the expected `.rdf` by hand whenever a fixture changes.
+4. **Error-path fixtures** (2, `check_fails`) — `TESTS/FIX/TBADIF.ASM` (an
+   unterminated `%ifdef` must be a fatal error, not silently accepted) and
+   `TESTS/FIX/TBADRES.ASM` (`RESB`/`RESW`/`RESD` outside `SECTION .bss` must be
+   a fatal error).
 
 Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
 
 ```bash
 bash TESTS/test_tasm.sh
-# Results: 4 passed, 0 failed
+# Results: 16 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
@@ -491,7 +516,7 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
    expected module, source file, proc + global symbols, and a line table.
 3. **Always-present `.DBG` member**: `$D+` `.om` carries a non-empty
    `MODNAME.DBG`; a no-`$D` `.om` carries a **0-byte** one (checked with
-   `olib list`).
+   `tolib list`).
 4. **Mixed build**: only the `$D+` module contributes records (`modules:1`).
 
 Run manually (not part of `make test`):

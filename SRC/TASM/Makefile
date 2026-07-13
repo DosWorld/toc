@@ -5,7 +5,7 @@
 # in the CWD.  BOOT/TOC.EXE is NEVER modified by the build.
 #
 # Not part of the top-level `make all` build graph: TASM is a standalone
-# leaf tool, not yet trusted to replace the checked-in SYS.RDF/EMSAPI.RDF
+# leaf tool, not yet trusted to replace the checked-in SYS.RDF/EMS.RDF
 # (see DOCS/TASM_PLAN.MD "Non-goals").  Byte-diff regression lives in
 # TESTS/test_tasm.sh, run as an extra step of the top-level `make test`.
 #

@@ -58,14 +58,31 @@ VAR
   tLine:     LONGINT;
 
   curPass:   INTEGER;
-  curSeg:    INTEGER;             (* Sym.SegCode / Sym.SegData -- current SECTION *)
+  curSeg:    INTEGER;             (* Sym.SegCode / Sym.SegData / Sym.SegBss -- current SECTION *)
   codeOfs:   LONGINT;             (* running code offset, both passes (Pass 2 mirrors Rdoff.CodeLen) *)
   dataOfs:   LONGINT;
+  bssOfs:    LONGINT;             (* running BSS offset -- RESB/RESW/RESD reserve space here without
+                                      emitting any bytes; total becomes Rdoff.RdfSetBss's argument. *)
   anyErr:    BOOLEAN;
 
 PROCEDURE Fail(msg: ARRAY OF CHAR);
 BEGIN LogErr.ErrorInFile(fname, tLine, msg); anyErr := TRUE
 END Fail;
+
+(* DefineCurLabel: define a label at the current position in whichever
+   segment (curSeg) is active -- SegCode/codeOfs, SegData/dataOfs, or
+   SegBss/bssOfs.  Factors out the SegCode/SegData/SegBss three-way
+   dispatch that both label-definition sites in ParseLine need. *)
+PROCEDURE DefineCurLabel(nameOrig: ARRAY OF CHAR);
+BEGIN
+  IF curSeg = Sym.SegCode THEN
+    Sym.DefineLabel(nameOrig, Sym.SegCode, codeOfs, FALSE, fname, tLine)
+  ELSIF curSeg = Sym.SegData THEN
+    Sym.DefineLabel(nameOrig, Sym.SegData, dataOfs, FALSE, fname, tLine)
+  ELSE
+    Sym.DefineLabel(nameOrig, Sym.SegBss, bssOfs, FALSE, fname, tLine)
+  END
+END DefineCurLabel;
 
 (* ---- token stream with %define expansion ---- *)
 
@@ -185,7 +202,7 @@ END McNextTok;
    for the identifier immediately following %define/%undef/%ifdef: that
    name is being declared or tested, not used as a value, so it must never
    itself be macro-expanded -- e.g. "%define IS_FAR" (empty-bodied, used
-   purely as an %ifdef flag in SYS.ASM/EMSAPI.ASM) followed later by
+   purely as an %ifdef flag in SYS.ASM/EMS.ASM) followed later by
    "%ifdef IS_FAR" would otherwise have TokNext silently expand IS_FAR to
    its (empty) substitution before DoIfdef ever saw an identifier token,
    desyncing the whole token stream. *)
@@ -690,6 +707,36 @@ BEGIN
   END
 END DoTimes;
 
+(* ParseTopLevelRes: RESB/RESW/RESD n as a statement-level directive
+   inside SECTION .bss (as opposed to Dir.MOD's ParseStrucField, the same
+   keywords used as STRUC field declarations) -- reserves n*size bytes of
+   uninitialized space by advancing bssOfs, without emitting anything
+   (BSS content lives outside the RDOFF2 code/data segment streams
+   entirely -- see Rdoff.RdfSetBss). A label immediately before the
+   directive (e.g. "buf: resb 100") is defined by ParseLine's normal
+   colon-terminated-label handling before TryDirective ever runs, so no
+   special label logic is needed here. Only valid in SECTION .bss --
+   RESB/RESW/RESD in .text/.data would silently do nothing useful (no
+   bytes end up in the segment stream either way), so it's rejected as a
+   fatal error instead of a silent no-op. *)
+PROCEDURE ParseTopLevelRes(d: INTEGER);
+  VAR szBytes, count: LONGINT; neg: BOOLEAN;
+BEGIN
+  IF curSeg # Sym.SegBss THEN
+    Fail("RESB/RESW/RESD only valid in SECTION .bss"); RETURN
+  END;
+  IF d = Lex.DResb THEN szBytes := LONGINT(1)
+  ELSIF d = Lex.DResw THEN szBytes := LONGINT(2)
+  ELSE szBytes := LONGINT(4)
+  END;
+  neg := FALSE;
+  IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
+  IF tSym # Scan.TInt THEN Fail("expected count after RESB/RESW/RESD"); RETURN END;
+  count := tIval; IF neg THEN count := -count END;
+  TokNext;
+  bssOfs := bssOfs + szBytes * count
+END ParseTopLevelRes;
+
 (* TryDirective: handles the directive named by `kw` (already scanned and
    uppercased, current token already advanced past it).  Returns TRUE if
    `kw` was recognized. *)
@@ -702,14 +749,15 @@ BEGIN
     Lex.DBits, Lex.DCpu:
       SkipToEol
   | Lex.DSection:
-      IF tSym # Scan.TDot THEN Fail("expected .text/.data after SECTION")
+      IF tSym # Scan.TDot THEN Fail("expected .text/.data/.bss after SECTION")
       ELSE
         TokNext;
-        IF tSym # Scan.TIdent THEN Fail("expected .text/.data after SECTION")
+        IF tSym # Scan.TIdent THEN Fail("expected .text/.data/.bss after SECTION")
         ELSE
           IF Strings.Equal(tId, "TEXT") THEN curSeg := Sym.SegCode
           ELSIF Strings.Equal(tId, "DATA") THEN curSeg := Sym.SegData
-          ELSE Fail("unknown section (want .text or .data)")
+          ELSIF Strings.Equal(tId, "BSS") THEN curSeg := Sym.SegBss
+          ELSE Fail("unknown section (want .text, .data, or .bss)")
           END;
           TokNext
         END
@@ -753,6 +801,8 @@ BEGIN
       IF tSym # Scan.TInt THEN Fail("expected repeat count after TIMES")
       ELSE DoTimes(tIval)
       END
+  | Lex.DResb, Lex.DResw, Lex.DResd:
+      ParseTopLevelRes(d)
   ELSE RETURN FALSE
   END;
   RETURN TRUE
@@ -827,8 +877,10 @@ END IsDataDirectiveNext;
    0..3 comma-separated operands, then hand off to Enc.Encode.  Enc's own
    pass gating (see ENC.MOD SetContext/B/W) means calling Encode
    identically in both passes is exactly what keeps Pass 1's byte count
-   and Pass 2's real emission from ever drifting apart. *)
-PROCEDURE ParseInstruction(mnemId: INTEGER);
+   and Pass 2's real emission from ever drifting apart.  `prefixByte` (0 =
+   none) is a LOCK/REP* prefix ParseLine already consumed as a separate
+   leading token on this same source line. *)
+PROCEDURE ParseInstruction(mnemId: INTEGER; prefixByte: BYTE);
   VAR ops: ARRAY Enc.MaxOperands OF Enc.Operand; n: INTEGER; more: BOOLEAN;
 BEGIN
   n := 0; more := (tSym # Scan.TEol) & (tSym # Scan.TEof);
@@ -838,7 +890,7 @@ BEGIN
     IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
   END;
   Enc.SetContext(fname, tLine, curPass, codeOfs);
-  Enc.Encode(mnemId, ops, n);
+  Enc.Encode(mnemId, ops, n, prefixByte);
   codeOfs := codeOfs + Enc.Emitted();
   IF Enc.Failed() THEN anyErr := TRUE END
 END ParseInstruction;
@@ -853,7 +905,7 @@ END ParseInstruction;
    instead -- STRUC field names are never colon-terminated labels. *)
 PROCEDURE ParseLine;
   VAR name: ARRAY Scan.MaxIdent OF CHAR; nameOrig: ARRAY Scan.MaxIdent OF CHAR;
-      more: BOOLEAN; mnemId: INTEGER;
+      more: BOOLEAN; mnemId, prefixId: INTEGER;
 BEGIN
   IF tSym = Scan.TEol THEN RETURN END;
   IF tSym = Scan.TPercent THEN
@@ -903,29 +955,39 @@ BEGIN
     mnemId := Lex.LookupMnem(name);
     IF tSym = Scan.TColon THEN
       TokNext;
-      IF curSeg = Sym.SegCode THEN
-        Sym.DefineLabel(nameOrig, Sym.SegCode, codeOfs, FALSE, fname, tLine)
-      ELSE
-        Sym.DefineLabel(nameOrig, Sym.SegData, dataOfs, FALSE, fname, tLine)
-      END
+      DefineCurLabel(nameOrig)
     ELSIF (mnemId = Lex.LNone) & IsDataDirectiveNext() THEN
       (* NASM allows a colon-less label immediately followed by a data
          directive on the same line, e.g. "MemStartSeg  dw 0" -- `name`
          (already consumed) is that implicit label; `tSym` is now
          positioned at DB/DW/TIMES itself. Only recognized for the data-
          directive keywords (not general directives/mnemonics), matching
-         the one real occurrence in SYS.ASM/EMSAPI.ASM -- a colon-less
+         the one real occurrence in SYS.ASM/EMS.ASM -- a colon-less
          label before an instruction or SECTION/GLOBAL/etc. does not occur
          in either oracle file, so is intentionally not supported
          (Simplicity First). *)
       more := FALSE;
-      IF curSeg = Sym.SegCode THEN
-        Sym.DefineLabel(nameOrig, Sym.SegCode, codeOfs, FALSE, fname, tLine)
-      ELSE
-        Sym.DefineLabel(nameOrig, Sym.SegData, dataOfs, FALSE, fname, tLine)
-      END;
+      DefineCurLabel(nameOrig);
       Strings.Copy(tId, name); TokNext;
       IF ~TryDirective(name) THEN Fail("unknown directive or mnemonic") END;
+      RETURN
+    ELSIF Lex.IsPrefixMnem(mnemId) THEN
+      (* LOCK/REP* leading token: not a label, not itself an instruction --
+         stash its prefix byte and re-read the NEXT identifier as the real
+         mnemonic (e.g. "rep movsb"; label-before-prefix, "L: rep movsb",
+         is handled naturally since this ELSIF is only reached after the
+         label-consuming iterations above already ran). *)
+      more := FALSE;
+      prefixId := mnemId;
+      IF tSym # Scan.TIdent THEN
+        Fail("expected instruction mnemonic after LOCK/REP prefix"); RETURN
+      END;
+      Strings.Copy(tId, name); TokNext;
+      mnemId := Lex.LookupMnem(name);
+      IF mnemId = Lex.LNone THEN
+        Fail("unknown mnemonic after LOCK/REP prefix"); RETURN
+      END;
+      ParseInstruction(mnemId, Enc.PrefixByteFor(prefixId));
       RETURN
     ELSE
       (* not a label: `name` (already consumed, token stream positioned
@@ -934,7 +996,7 @@ BEGIN
       IF TryDirective(name) THEN
         (* handled *)
       ELSIF mnemId # Lex.LNone THEN
-        ParseInstruction(mnemId)
+        ParseInstruction(mnemId, BYTE(0))
       ELSE
         Fail("unknown directive or mnemonic")
       END;
@@ -960,13 +1022,23 @@ BEGIN
   curPass := passNo;
   Scan.Init(s, f2, fname);
   curSeg := Sym.SegCode;
-  codeOfs := LONGINT(0); dataOfs := LONGINT(0);
+  codeOfs := LONGINT(0); dataOfs := LONGINT(0); bssOfs := LONGINT(0);
   mtop := -1; ifDepth := 0;
   IF passNo = 1 THEN Enc.ResetJmpDecisions ELSE Enc.ResetJmpReplay END;
   TokNext;
   WHILE (tSym # Scan.TEof) & ~LogErr.HaveErr() & ~anyErr DO
     ParseLine;
     IF tSym = Scan.TEol THEN TokNext END
+  END;
+  (* EOF reached with an %ifdef still open: without this check, a missing
+     %endif is a silent no-op -- everything inside the never-closed block
+     (taken or skipped) either gets assembled or dropped based on whatever
+     %ifdef condition was last true, with no diagnostic either way, since
+     SkipToEndifOrElse only ever fires on an explicit %else/%endif token
+     that never arrives.  Caught here rather than at each %ifdef site so
+     it applies uniformly regardless of nesting depth. *)
+  IF (tSym = Scan.TEof) & (ifDepth > 0) & ~LogErr.HaveErr() & ~anyErr THEN
+    Fail("%ifdef without matching %endif")
   END
 END RunPass;
 
@@ -979,8 +1051,10 @@ PROCEDURE EmitGlobal(name: ARRAY OF CHAR; seg: INTEGER; offset: LONGINT); FAR;
 BEGIN
   IF seg = Sym.SegCode THEN
     Rdoff.RdfAddGlobal(obj, name, BYTE(Rdoff.SegCode), offset)
-  ELSE
+  ELSIF seg = Sym.SegData THEN
     Rdoff.RdfAddGlobal(obj, name, BYTE(Rdoff.SegData), offset)
+  ELSE
+    Rdoff.RdfAddGlobal(obj, name, BYTE(Rdoff.SegBss), offset)
   END
 END EmitGlobal;
 
@@ -1012,6 +1086,7 @@ BEGIN
   Files.Close(f1);
   IF anyErr OR LogErr.HaveErr() THEN Sym.Free; RETURN FALSE END;
 
+  IF bssOfs > LONGINT(0) THEN Rdoff.RdfSetBss(obj, bssOfs) END;
   Sym.EnumGlobals(EmitGlobal);
   Sym.Free;
   RETURN ~(anyErr OR LogErr.HaveErr())

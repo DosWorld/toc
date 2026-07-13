@@ -1,4 +1,5 @@
 BOOT_OC = ../../BOOT/TOC.EXE
+BOOT_TASM = ../../BOOT/TASM.EXE
 OC = toc.exe
 OCFLAGS = /LOG=debug
 XT      = xt
@@ -13,7 +14,7 @@ XTRUN = $(XT) run
 
 STDLIB_OMS = SYSTEM.OM OUT.OM OUT87.OM IN.OM STRINGS.OM FILES.OM \
              CRT.OM DOS.OM IO.OM RDFLOAD.OM MATH.OM TEST.OM EMS.OM TIME.OM \
-             LOGERR.OM RDOFF.OM TAR.OM
+             LOGERR.OM RDOFF.OM TAR.OM DETECT.OM WINCB.OM KMOUSE.OM SCREEN.OM
 
 all: $(STDLIB_OMS)
 
@@ -30,8 +31,35 @@ $(OC): $(BOOT_OC)
 
 # SYSTEM is special: /SYSTEM flag, no dep-scan.
 # (*$L SYS.RDF*) inside SYSTEM.MOD is resolved from the CWD (this dir).
+# SYS.RDF itself is a CHECKED-IN binary, same discipline as BOOT/TOC.EXE:
+# it is the tool of record's OUTPUT, not rebuilt as part of `make all`
+# (TASM needs a fully-built OBERON.OM -- Files/Strings/LogErr/Rdoff/Out/Dos
+# -- to run at all, and OBERON.OM's own SYSTEM.OM is built FROM SYS.RDF, so
+# TASM cannot be a hard prerequisite here without a circular dependency).
+# BOOT/TASM.EXE (an immutable bootstrap binary, same status as
+# BOOT/TOC.EXE/BOOT/TOLIB.EXE) is the tool of record for SYS.ASM->SYS.RDF,
+# EMS.ASM->EMS.RDF, DETECT.ASM->DETECT.RDF, WINCB.ASM->WINCB.RDF,
+# KMOUSE.ASM->KMOUSE.RDF, and SCREEN.ASM->SCREEN.RDF: run `make regen-asm`
+# after editing any .ASM file, verify TESTS/test_tasm.sh still agrees,
+# then commit the regenerated .RDF alongside the .ASM change.
 SYSTEM.OM: SYS.RDF SYSTEM.MOD $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) /SYSTEM SYSTEM.MOD
+
+# regen-asm: rebuild SYS.RDF/EMS.RDF/DETECT.RDF/WINCB.RDF/KMOUSE.RDF from
+# their .ASM sources via BOOT/TASM.EXE, overwriting the checked-in files.
+# Not part of `all`/`install` (see the SYSTEM.OM comment above for why) --
+# run manually after editing any .ASM file, then re-run `make all` to pick
+# up the regenerated .RDF and TESTS/test_tasm.sh to confirm TASM's own
+# output still agrees with itself.
+regen-asm:
+	cp $(BOOT_TASM) tasm.exe
+	$(XTRUN) tasm.exe $(OCFLAGS) SYS.ASM
+	$(XTRUN) tasm.exe $(OCFLAGS) EMS.ASM
+	$(XTRUN) tasm.exe $(OCFLAGS) DETECT.ASM
+	$(XTRUN) tasm.exe $(OCFLAGS) WINCB.ASM
+	$(XTRUN) tasm.exe $(OCFLAGS) KMOUSE.ASM
+	$(XTRUN) tasm.exe $(OCFLAGS) SCREEN.ASM
+	rm -f tasm.exe
 
 RDFLOAD.OM: RDFLOAD.MOD FILES.OM STRINGS.OM SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) RDFLOAD.MOD
@@ -48,10 +76,11 @@ OUT87.OM: OUT87.MOD OUT.OM SYSTEM.OM $(OC)
 IN.OM: IN.MOD SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) IN.MOD
 
-# (*$L EMSAPI.RDF*) inside EMS.MOD is resolved from the CWD (this dir) --
-# same pattern as SYSTEM.OM + SYS.RDF.  EMSAPI.RDF is a checked-in binary,
-# same as SYS.RDF: no rule here to rebuild it from EMSAPI.ASM.
-EMS.OM: EMSAPI.RDF EMS.MOD SYSTEM.OM $(OC)
+# (*$L EMS.RDF*) inside EMS.MOD is resolved from the CWD (this dir) --
+# same pattern as SYSTEM.OM + SYS.RDF.  EMS.RDF is a checked-in binary
+# for the same circular-dependency reason as SYS.RDF (see SYSTEM.OM's
+# comment above) -- regenerate it via `make regen-asm`, not this rule.
+EMS.OM: EMS.RDF EMS.MOD SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) EMS.MOD
 
 FILES.OM: FILES.MOD EMS.OM SYSTEM.OM $(OC)
@@ -89,7 +118,38 @@ RDOFF.OM: RDOFF.MOD FILES.OM LOGERR.OM STRINGS.OM SYSTEM.OM $(OC)
 TAR.OM: TAR.MOD FILES.OM LOGERR.OM STRINGS.OM SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) TAR.MOD
 
+# (*$L DETECT.RDF*) inside DETECT.MOD is resolved from the CWD (this dir)
+# -- same pattern as SYSTEM.OM + SYS.RDF.  DETECT.RDF is a checked-in
+# binary for the same circular-dependency reason as SYS.RDF (see
+# SYSTEM.OM's comment above) -- regenerate it via `make regen-asm`, not
+# this rule.
+DETECT.OM: DETECT.MOD DETECT.RDF SYSTEM.OM $(OC)
+	$(XTRUN) $(OC) $(OCFLAGS) DETECT.MOD
+
+# (*$L WINCB.RDF*) inside WINCB.MOD is resolved from the CWD (this dir) --
+# same pattern as SYSTEM.OM + SYS.RDF.  WINCB.RDF is a checked-in binary
+# for the same circular-dependency reason as SYS.RDF (see SYSTEM.OM's
+# comment above) -- regenerate it via `make regen-asm`, not this rule.
+WINCB.OM: WINCB.MOD WINCB.RDF SYSTEM.OM $(OC)
+	$(XTRUN) $(OC) $(OCFLAGS) WINCB.MOD
+
+# (*$L KMOUSE.RDF*) inside KMOUSE.MOD is resolved from the CWD (this dir)
+# -- same pattern as SYSTEM.OM + SYS.RDF.  KMOUSE.RDF is a checked-in
+# binary for the same circular-dependency reason as SYS.RDF (see
+# SYSTEM.OM's comment above) -- regenerate it via `make regen-asm`, not
+# this rule.
+KMOUSE.OM: KMOUSE.MOD KMOUSE.RDF SYSTEM.OM $(OC)
+	$(XTRUN) $(OC) $(OCFLAGS) KMOUSE.MOD
+
+# (*$L SCREEN.RDF*) inside SCREEN.MOD is resolved from the CWD (this dir)
+# -- same pattern as SYSTEM.OM + SYS.RDF.  SCREEN.RDF is a checked-in
+# binary for the same circular-dependency reason as SYS.RDF (see
+# SYSTEM.OM's comment above) -- regenerate it via `make regen-asm`, not
+# this rule.
+SCREEN.OM: SCREEN.MOD SCREEN.RDF DETECT.OM KMOUSE.OM DOS.OM SYSTEM.OM $(OC)
+	$(XTRUN) $(OC) $(OCFLAGS) SCREEN.MOD
+
 clean:
 	rm -f $(STDLIB_OMS) ../../BIN/OBERON.OM
 
-.PHONY: all install clean
+.PHONY: all install clean regen-asm

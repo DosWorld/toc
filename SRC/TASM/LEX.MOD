@@ -10,9 +10,11 @@ MODULE Lex;
   categories, or a caller can range-check "is this a register" etc.):
     0        = LNone      (not a recognized lexeme)
     1..49    = registers
-    50..149  = mnemonics
-    150..179 = directives (BITS/CPU/SECTION/GLOBAL/STRUC/... and DB/DW/TIMES)
-    180..189 = keyword-like operand qualifiers (BYTE/WORD/FAR/SHORT/NEAR/SEG)
+    50..169  = mnemonics (widened from 50..149 during the v2 "full 8086
+               coverage" plan's batch 4 -- the original 100-slot range
+               filled up exactly at MAas=149)
+    170..199 = directives (BITS/CPU/SECTION/GLOBAL/STRUC/... and DB/DW/TIMES)
+    200..209 = keyword-like operand qualifiers (BYTE/WORD/FAR/SHORT/NEAR/SEG)
 
   Lookup uses the same "dispatch on first letter, then a short
   Strings.Equal chain" idiom as SRC/TOC/SCAN.MOD's LookupKeyword -- the
@@ -38,6 +40,7 @@ CONST
   MNot* = 65; MNeg* = 66; MMul* = 67; MImul* = 122; MDiv* = 123; MIdiv* = 124;
   MInc* = 68; MDec* = 69;
   MShl* = 70; MShr* = 71; MRcl* = 72; MRcr* = 73;
+  MRol* = 125; MRor* = 126; MSar* = 127; MSal* = 128;
   MInt* = 74; MInt3* = 75;
   MRet* = 76; MRetn* = 77; MRetf* = 78; MIret* = 79;
   MCld* = 80; MCli* = 81; MSti* = 82; MClc* = 83; MStc* = 84; MNop* = 85;
@@ -52,15 +55,29 @@ CONST
   MMovsb* = 110; MMovsw* = 111; MScasb* = 112; MScasw* = 113;
   MCmpsb* = 114; MCmpsw* = 115; MIn* = 116; MOut* = 117;
   MLodsb* = 118; MLodsw* = 119; MStosb* = 120; MStosw* = 121;
+  MJo* = 129; MJno* = 130; MJp* = 131; MJpe* = 132; MJnp* = 133; MJpo* = 134;
+  MJl* = 135; MJnge* = 136; MJge* = 137; MJnl* = 138;
+  MJle* = 139; MJng* = 140; MJg* = 141; MJnle* = 142;
+  MCbw* = 143; MCwd* = 144; MHlt* = 145; MXlat* = 146; MInto* = 147;
+  MAaa* = 148; MAas* = 149; MAam* = 150; MAad* = 151; MDaa* = 152; MDas* = 153;
+  MLds* = 154;
 
-  (* ---- directives (150..179) ---- *)
-  DBits* = 150; DCpu* = 151; DSection* = 152; DGlobal* = 153;
-  DStruc* = 154; DEndstruc* = 155; DDb* = 156; DDw* = 157; DTimes* = 158;
-  DResb* = 159; DResw* = 160; DResd* = 161; DEndStrucAlt* = 162;
-  DText* = 163; DData* = 164; DExtern* = 165;
+  (* ---- prefix pseudo-mnemonics (160..169) -- LOCK/REP* precede the real
+     mnemonic as a separate leading token on the same source line (e.g.
+     "rep movsb", "lock inc [x]"); Parse.MOD's ParseLine recognizes one via
+     Lex.LookupMnem exactly like a real mnemonic, but instead of calling
+     ParseInstruction directly it stashes the corresponding prefix byte
+     (see Enc.PrefixByteFor) and re-dispatches on the next token. *)
+  MLock* = 160; MRep* = 161; MRepe* = 162; MRepz* = 163; MRepne* = 164; MRepnz* = 165;
 
-  (* ---- operand qualifiers (180..189) ---- *)
-  QByte* = 180; QWord* = 181; QFar* = 182; QShort* = 183; QNear* = 184; QSeg* = 185;
+  (* ---- directives (170..199) ---- *)
+  DBits* = 170; DCpu* = 171; DSection* = 172; DGlobal* = 173;
+  DStruc* = 174; DEndstruc* = 175; DDb* = 176; DDw* = 177; DTimes* = 178;
+  DResb* = 179; DResw* = 180; DResd* = 181; DEndStrucAlt* = 182;
+  DText* = 183; DData* = 184; DExtern* = 185;
+
+  (* ---- operand qualifiers (200..209) ---- *)
+  QByte* = 200; QWord* = 201; QFar* = 202; QShort* = 203; QNear* = 204; QSeg* = 205;
 
 (* LookupReg: name (already uppercased) -> Reg* id, or LNone. *)
 PROCEDURE LookupReg*(name: ARRAY OF CHAR): INTEGER;
@@ -107,6 +124,13 @@ PROCEDURE IsByteReg*(r: INTEGER): BOOLEAN;
 BEGIN RETURN (r >= RegAL) & (r <= RegBH)
 END IsByteReg;
 
+(* IsPrefixMnem: classify an already-resolved M* id as one of the
+   LOCK/REP* leading-prefix pseudo-mnemonics (160..169) rather than a real
+   instruction mnemonic. *)
+PROCEDURE IsPrefixMnem*(m: INTEGER): BOOLEAN;
+BEGIN RETURN (m >= MLock) & (m <= MRepnz)
+END IsPrefixMnem;
+
 PROCEDURE IsSegReg*(r: INTEGER): BOOLEAN;
 BEGIN RETURN (r >= RegES) & (r <= RegDS)
 END IsSegReg;
@@ -133,18 +157,25 @@ BEGIN
   | "L":
       IF    Strings.Equal(name, "LEA")    THEN RETURN MLea
       ELSIF Strings.Equal(name, "LES")    THEN RETURN MLes
+      ELSIF Strings.Equal(name, "LDS")    THEN RETURN MLds
       ELSIF Strings.Equal(name, "LOOP")   THEN RETURN MLoop
       ELSIF Strings.Equal(name, "LODSB")  THEN RETURN MLodsb
       ELSIF Strings.Equal(name, "LODSW")  THEN RETURN MLodsw
+      ELSIF Strings.Equal(name, "LOCK")   THEN RETURN MLock
       END
   | "X":
-      IF Strings.Equal(name, "XCHG") THEN RETURN MXchg
-      ELSIF Strings.Equal(name, "XOR") THEN RETURN MXor
+      IF    Strings.Equal(name, "XCHG") THEN RETURN MXchg
+      ELSIF Strings.Equal(name, "XOR")  THEN RETURN MXor
+      ELSIF Strings.Equal(name, "XLAT") THEN RETURN MXlat
       END
   | "A":
       IF    Strings.Equal(name, "ADD") THEN RETURN MAdd
       ELSIF Strings.Equal(name, "ADC") THEN RETURN MAdc
       ELSIF Strings.Equal(name, "AND") THEN RETURN MAnd
+      ELSIF Strings.Equal(name, "AAA") THEN RETURN MAaa
+      ELSIF Strings.Equal(name, "AAS") THEN RETURN MAas
+      ELSIF Strings.Equal(name, "AAM") THEN RETURN MAam
+      ELSIF Strings.Equal(name, "AAD") THEN RETURN MAad
       END
   | "S":
       IF    Strings.Equal(name, "SUB")    THEN RETURN MSub
@@ -157,6 +188,8 @@ BEGIN
       ELSIF Strings.Equal(name, "SCASW")  THEN RETURN MScasw
       ELSIF Strings.Equal(name, "STOSB")  THEN RETURN MStosb
       ELSIF Strings.Equal(name, "STOSW")  THEN RETURN MStosw
+      ELSIF Strings.Equal(name, "SAR")    THEN RETURN MSar
+      ELSIF Strings.Equal(name, "SAL")    THEN RETURN MSal
       END
   | "O":
       IF    Strings.Equal(name, "OR")  THEN RETURN MOr
@@ -170,6 +203,8 @@ BEGIN
       ELSIF Strings.Equal(name, "CLC")    THEN RETURN MClc
       ELSIF Strings.Equal(name, "CMPSB")  THEN RETURN MCmpsb
       ELSIF Strings.Equal(name, "CMPSW")  THEN RETURN MCmpsw
+      ELSIF Strings.Equal(name, "CBW")    THEN RETURN MCbw
+      ELSIF Strings.Equal(name, "CWD")    THEN RETURN MCwd
       END
   | "T":
       IF Strings.Equal(name, "TEST") THEN RETURN MTest END
@@ -186,17 +221,27 @@ BEGIN
       ELSIF Strings.Equal(name, "IN")   THEN RETURN MIn
       ELSIF Strings.Equal(name, "IMUL") THEN RETURN MImul
       ELSIF Strings.Equal(name, "IDIV") THEN RETURN MIdiv
+      ELSIF Strings.Equal(name, "INTO") THEN RETURN MInto
       END
   | "D":
       IF    Strings.Equal(name, "DEC") THEN RETURN MDec
       ELSIF Strings.Equal(name, "DIV") THEN RETURN MDiv
+      ELSIF Strings.Equal(name, "DAA") THEN RETURN MDaa
+      ELSIF Strings.Equal(name, "DAS") THEN RETURN MDas
       END
   | "R":
-      IF    Strings.Equal(name, "RCL")  THEN RETURN MRcl
-      ELSIF Strings.Equal(name, "RCR")  THEN RETURN MRcr
-      ELSIF Strings.Equal(name, "RET")  THEN RETURN MRet
-      ELSIF Strings.Equal(name, "RETN") THEN RETURN MRetn
-      ELSIF Strings.Equal(name, "RETF") THEN RETURN MRetf
+      IF    Strings.Equal(name, "RCL")   THEN RETURN MRcl
+      ELSIF Strings.Equal(name, "RCR")   THEN RETURN MRcr
+      ELSIF Strings.Equal(name, "RET")   THEN RETURN MRet
+      ELSIF Strings.Equal(name, "RETN")  THEN RETURN MRetn
+      ELSIF Strings.Equal(name, "RETF")  THEN RETURN MRetf
+      ELSIF Strings.Equal(name, "ROL")   THEN RETURN MRol
+      ELSIF Strings.Equal(name, "ROR")   THEN RETURN MRor
+      ELSIF Strings.Equal(name, "REP")   THEN RETURN MRep
+      ELSIF Strings.Equal(name, "REPE")  THEN RETURN MRepe
+      ELSIF Strings.Equal(name, "REPZ")  THEN RETURN MRepz
+      ELSIF Strings.Equal(name, "REPNE") THEN RETURN MRepne
+      ELSIF Strings.Equal(name, "REPNZ") THEN RETURN MRepnz
       END
   | "J":
       IF    Strings.Equal(name, "JMP")  THEN RETURN MJmp
@@ -216,12 +261,28 @@ BEGIN
       ELSIF Strings.Equal(name, "JNBE") THEN RETURN MJnbe
       ELSIF Strings.Equal(name, "JS")   THEN RETURN MJs
       ELSIF Strings.Equal(name, "JNS")  THEN RETURN MJns
+      ELSIF Strings.Equal(name, "JO")   THEN RETURN MJo
+      ELSIF Strings.Equal(name, "JNO")  THEN RETURN MJno
+      ELSIF Strings.Equal(name, "JP")   THEN RETURN MJp
+      ELSIF Strings.Equal(name, "JPE")  THEN RETURN MJpe
+      ELSIF Strings.Equal(name, "JNP")  THEN RETURN MJnp
+      ELSIF Strings.Equal(name, "JPO")  THEN RETURN MJpo
+      ELSIF Strings.Equal(name, "JL")   THEN RETURN MJl
+      ELSIF Strings.Equal(name, "JNGE") THEN RETURN MJnge
+      ELSIF Strings.Equal(name, "JGE")  THEN RETURN MJge
+      ELSIF Strings.Equal(name, "JNL")  THEN RETURN MJnl
+      ELSIF Strings.Equal(name, "JLE")  THEN RETURN MJle
+      ELSIF Strings.Equal(name, "JNG")  THEN RETURN MJng
+      ELSIF Strings.Equal(name, "JG")   THEN RETURN MJg
+      ELSIF Strings.Equal(name, "JNLE") THEN RETURN MJnle
       END
   | "F":
       IF    Strings.Equal(name, "FNINIT") THEN RETURN MFninit
       ELSIF Strings.Equal(name, "FSTCW")  THEN RETURN MFstcw
       ELSIF Strings.Equal(name, "FWAIT")  THEN RETURN MFwait
       END
+  | "H":
+      IF Strings.Equal(name, "HLT") THEN RETURN MHlt END
   ELSE
   END;
   RETURN LNone

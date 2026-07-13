@@ -75,7 +75,7 @@ That means:
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
-- **280-row regression manifest** plus DOS-side executable and unit-test
+- **281-row regression manifest** plus DOS-side executable and unit-test
   suites — every codegen change is checked against real compiled/linked/run
   output, not just "it compiled."
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
@@ -85,6 +85,28 @@ That means:
   object files, so hand-written assembly modules assembled with NASM, YASM,
   or MSA2 (`-f rdf`) can be linked directly alongside Oberon-compiled
   `.rdf`/`.om` modules — no C shim required.
+- **Self-hosted assembler (TASM).** `SRC/TASM/` is a self-hosted NASM-subset
+  8086 assembler (`.asm` → RDOFF2 `.rdf`), verified against real-NASM-built
+  oracles for every hand-assembled `.ASM` file in the standard library
+  (`SYS.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
+  `SCREEN.ASM`) — four fully byte-identical, two identical in code/data with
+  only a benign header-record-ordering difference. It's the toolchain's tool
+  of record for regenerating those files — see `DOCS/TASM_PLAN.MD` and
+  `DOCS/BUILD.MD`'s `regen-asm` target.
+- **Turbo Pascal `UNIT` porting path.** Small DOS-era Turbo Pascal driver
+  units (BIOS/DOS interrupt wrappers with inline `ASM` bodies) port cleanly
+  to this toolchain: `Detect` (hardware/environment probing), `WinCB`
+  (Windows 3.x clipboard access), `KMouse` (extended keyboard + Microsoft
+  mouse), and `Screen` (text-mode shadow-buffer driver with cursor, colour
+  print/scroll, a background spinner, and VGA palette fades) are all
+  real ports shipped in the standard library — see `DOCS/PORTING.MD` §16.1
+  for the conventions (companion NASM `.ASM` file, `%define`/`%undef`
+  stack-argument aliasing, `PCHAR` → `SYSTEM.ADDRESS`).
+- **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
+  `SRC/TLINK/` is one Oberon tool (`tlink /T=com|sys|exe`) covering both
+  tiny model (`.COM`/`.SYS`, no relocation table) and small model (`.EXE`
+  with an MZ relocation table) — memory models `toc.exe`'s own embedded
+  linker does not target — see `DOCS/BUILD.MD`'s "Using tlink" section.
 
 ---
 
@@ -208,6 +230,14 @@ BIN/TOC.EXE
   |-- SRC/TOOLS/TOLIB.MOD   -> BIN/TOLIB.EXE    (archive manager)
   |-- SRC/TOOLS/RDFGREP.MOD -> BIN/RDFGREP.EXE  (RDOFF/.om/.exe inspector)
   |-- TESTS/TESTALL.MOD     -> BIN/TESTALL.EXE  (DOS-side test driver)
+  |-- SRC/TASM/*.MOD        -> BIN/TASM.EXE     (NASM-subset assembler)
+
+BOOT/TASM.EXE  (checked-in seed binary — never touched by `make`, installed
+                manually by the maintainer, same status as BOOT/TOC.EXE)
+  |-- SRC/LIB/SYS.ASM, EMS.ASM, DETECT.ASM, WINCB.ASM, KMOUSE.ASM,
+      SCREEN.ASM -> SYS.RDF, EMS.RDF, DETECT.RDF, WINCB.RDF, KMOUSE.RDF,
+      SCREEN.RDF  (`make regen-asm`, a manual step — not part of
+      `make all`, see the circular-dependency note in DOCS/BUILD.MD)
 ```
 
 Rebuilding `SRC/TOC` with `BOOT/TOC.EXE` produces `toc1.exe`; rebuilding the
@@ -219,7 +249,7 @@ regression test, not just a one-time milestone.
 
 ## Standard library
 
-Fourteen modules, merged into one `BIN/OBERON.OM` archive:
+Twenty-one modules, merged into one `BIN/OBERON.OM` archive:
 
 | Module | Purpose |
 |--------|---------|
@@ -229,21 +259,32 @@ Fourteen modules, merged into one `BIN/OBERON.OM` archive:
 | `Files` | Buffered file I/O — open, read, write, seek, close; EMS-backed temp files |
 | `Strings` | Length, Equal, Copy, Append, Pos, Insert, Delete, Extract |
 | `IO` | Raw rider-based I/O to any DOS file handle |
-| `Mem` | Raw heap: `Alloc`/`Free` with a 65 KB guard |
-| `Dos` | Args, `Exec`, `FindFirst`, date/time, interrupts |
+| `Dos` | Args, `Exec`, `FindFirst`, date/time, interrupts, interrupt vectors |
 | `Time` | DOS packed date/time <-> `DateTime` record conversion (`PackTime`/`UnpackTime`) |
 | `Crt` | ANSI-Terminal control: cursor, clear, colour |
 | `Math` | FPU math: sin, cos, sqrt, exp, ln, abs, … |
 | `EMS` | Expanded-memory page-frame management |
 | `Test` | Unit-test framework: `AddTest`, `RunTests`, `Assert*` |
 | `RdfLoad` | Runtime RDOFF2 loader — dynamic code loading from a running program |
+| `LogErr` | Single error/diagnostic state for the whole toolchain (fail-fast, `output.log`/`error.log`) |
+| `Rdoff` | RDOFF2 object file reader/writer |
+| `Tar` | ustar archive reader/writer |
+| `Detect` | Hardware/environment probing: EGA/VGA/mono, redirected stdio, FreeDOS, CPU class |
+| `WinCB` | Windows 3.x clipboard access (WinOldAp INT 2Fh) |
+| `KMouse` | Extended keyboard (101/102/122-key) + Microsoft Mouse (INT 33h) driver |
+| `Screen` | Text-mode shadow-buffer driver: colour print/scroll, cursor, background spinner, VGA palette fades |
+
+`Detect`/`WinCB`/`KMouse`/`Screen` are ports of small Turbo Pascal `UNIT`s —
+see `DOCS/PORTING.MD` §16.1 for the porting conventions (companion NASM
+`.ASM` file per module, `%define`/`%undef` stack-argument aliasing, `PCHAR`
+→ `SYSTEM.ADDRESS`, `CALL FAR` for cross-module calls).
 
 ---
 
 ## Test suite
 
 ```bash
-make test     # 280-row manifest — codegen bytes, RDOFF structure, error messages, exit codes
+make test     # 281-row manifest — codegen bytes, RDOFF structure, error messages, exit codes
 make testall  # + DOS-side executables (Section 17) and unit tests (Section 18)
 ```
 

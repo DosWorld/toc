@@ -41,6 +41,7 @@ global SYSTEM_S32DIV, SYSTEM_S32MOD, SYSTEM_S32MUL
 global SYSTEM_REQUIRE87
 global SYSTEM_Halt
 global SYSTEM_SetExitProc, SYSTEM_GetExitProc
+global SYSTEM_Seg0040, SYSTEM_SegB000, SYSTEM_SegB800, SYSTEM_SegA000
 
 check_8087:
         FNINIT
@@ -1001,3 +1002,19 @@ SYSTEM_S32MUL:
     %undef b_low
     pop bp
     RETMACRO 8
+
+SYSTEM_Seg0040:
+    mov  ax, 00040H
+    RETMACRO
+
+SYSTEM_SegB000:
+    mov  ax, 0B000H
+    RETMACRO
+
+SYSTEM_SegB800:
+    mov  ax, 0B800H
+    RETMACRO
+
+SYSTEM_SegA000:
+    mov  ax, 0A000H
+    RETMACRO

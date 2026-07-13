@@ -17,6 +17,10 @@ toc TEST.MOD
 toc LOGERR.MOD
 toc RDOFF.MOD
 toc TAR.MOD
+toc DETECT.MOD
+toc KMOUSE.MOD
+toc WINCB.MOD
+toc SCREEN.MOD
 
 echo SYSTEM.MOD > oberon.lst
 echo OUT.MOD >> oberon.lst
@@ -35,6 +39,10 @@ echo RDOFF.MOD >> oberon.lst
 echo TAR.MOD >> oberon.lst
 echo LOGERR.MOD >> oberon.lst
 echo TEST.MOD >> oberon.lst
+echo DETECT.MOD >> oberon.lst
+echo KMOUSE.MOD >> oberon.lst
+echo WINCB.MOD >> oberon.lst
+echo SCREEN.MOD >> oberon.lst
 
 del OBERON.OM
 tolib.exe merge OBERON.OM @oberon.lst

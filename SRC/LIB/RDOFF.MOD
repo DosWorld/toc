@@ -519,7 +519,7 @@ BEGIN
   IF obj^.bssSize > 0 THEN INC(hlen, 6) END;
 
   modSize := LONGINT(14) + hlen + LONGINT(10) + LONGINT(obj^.codeLen) + LONGINT(10);
-  IF obj^.dataLen > 0 THEN INC(modSize, LONGINT(10) + LONGINT(obj^.dataLen)) END;
+  INC(modSize, LONGINT(10) + LONGINT(obj^.dataLen));
   (* Real NASM's own RDOFF2 writer under-reports modSize by exactly 10
      bytes (the trailing type=0 EOF segment marker's own 10-byte header is
      always present on disk but excluded from the recorded module size) --
@@ -603,11 +603,14 @@ BEGIN
   Files.Seek(obj^.codeFile, LONGINT(0));
   cpOk := Files.BlockCopy(obj^.codeFile, f, LONGINT(obj^.codeLen));
 
+  (* real NASM always emits the .data segment header, even when dataLen=0
+     (verified against DETECT.RDF, a real-NASM-built .text-only oracle) --
+     the BlockCopy of zero bytes is a correct no-op either way. *)
+  Files.WriteWord(f, 2);
+  Files.WriteWord(f, 1);
+  Files.WriteWord(f, 0);
+  Files.WriteDWord(f, LONGINT(obj^.dataLen));
   IF obj^.dataLen > 0 THEN
-    Files.WriteWord(f, 2);
-    Files.WriteWord(f, 1);
-    Files.WriteWord(f, 0);
-    Files.WriteDWord(f, LONGINT(obj^.dataLen));
     Files.Seek(obj^.dataFile, LONGINT(0));
     cpOk := cpOk & Files.BlockCopy(obj^.dataFile, f, LONGINT(obj^.dataLen))
   END;

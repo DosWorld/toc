@@ -53,6 +53,7 @@ paramtype/int-to-real-formal-rejected	PARMTYP2.MOD	fails	compile-fails
 paramtype/open-array-accepts-fixed	PARMTYPK.MOD		file-in-workdir	Parmtypk.om
 paramtype/byval-aggr-and-var-runtime	ASGNPARM.MOD	/ENTRY=Run	errorlevel	0
 paramtype/pass-records-byval-byvar	PASSREC.MOD	/ENTRY=Run	errorlevel	0
+asgnrec/array-elem-record-assign	ASGNREC.MOD	/ENTRY=Run	errorlevel	0
 paramtype/pass-fixed-arrays-byval-byvar	PASSARR.MOD	/ENTRY=Run	errorlevel	0
 paramtype/pass-open-arrays	PASSOPEN.MOD	/ENTRY=Run	errorlevel	0
 ret/array-return-rejected	RETARR.MOD	fails	compile-fails

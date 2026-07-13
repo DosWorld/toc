@@ -1049,7 +1049,7 @@ BEGIN
         IF rhs.mode = Cgen.MLocal THEN Cgen.Emit1(01FH) END;  (* POP DS *)
         RETURN
       END;
-      (* Record assign: plain local/global dest, VAR-param source (isRef).
+      (* Record assign: plain local/global dest, far-ref source (isRef).
          Mirror image of the branch above (dest/source roles swapped):
          DI = dest near addr; DS:SI = src far ptr (via ES:BX then DS<-ES
          swap); ES = SS if dest is local (CgEsFromMode).
@@ -1063,16 +1063,27 @@ BEGIN
          addresses a far pointer's offset, not something DS already points
          at), then restored -- always (not conditionally like the sibling
          branch above, since the source here is ALWAYS far/isRef, never
-         local-relative). *)
+         local-relative).
+         Second missing case found while implementing SRC/TLINK: rhs.mode
+         = Cgen.MReg (an array-of-RECORD element or a pointer deref, e.g.
+         "tmp := arr[i]") also has rhs.isRef = TRUE but was excluded by the
+         original MLocal/MGlobal-only guard, so it hit the exact same
+         one-word-only fallback bug -- ES:BX already holds the far source
+         address in this case (set by the index/deref codegen), so no
+         CgLesBxItem load is needed at all, just MOV SI,BX directly. *)
       IF (item.type # Syms.NoType) & (iform = Syms.TFRecord) &
          (rhs.type # Syms.NoType) & (rform = Syms.TFRecord) &
          ~item.isRef & rhs.isRef &
          ((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal)) &
-         ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
+         ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MReg)) THEN
         count := item.type.size;
         Cgen.Emit1(01EH);                      (* PUSH DS (restore after MOVSB) *)
-        Cgen.CgLesBxItem(rhs.mode, rhs.adr);    (* ES:BX = src far addr *)
-        Cgen.Emit2(08BH, 0F3H);                 (* MOV SI, BX *)
+        IF rhs.mode = Cgen.MReg THEN
+          Cgen.Emit2(08BH, 0F3H)                (* MOV SI, BX -- ES:BX already = src far addr *)
+        ELSE
+          Cgen.CgLesBxItem(rhs.mode, rhs.adr);  (* ES:BX = src far addr *)
+          Cgen.Emit2(08BH, 0F3H)                (* MOV SI, BX *)
+        END;
         Cgen.Emit1(006H);                       (* PUSH ES (save src seg -- CgEsFromMode below clobbers ES/DX) *)
         Cgen.CgLoadAddrItem(item.mode, item.adr);
         Cgen.Emit2(08BH, 0F8H);                 (* MOV DI, AX -- dest near addr *)
@@ -1087,17 +1098,37 @@ BEGIN
       (* Record-through-far-pointer assignment: REP MOVSB with DS-swap.
          Load dest FIRST while DS still points at the data segment; only
          then swap DS for the src segment.
-         Excludes LHS=MReg/isRef (handled by the next branch). *)
+         Excludes LHS=MReg/isRef (handled by the next branch).
+         rhs.mode = Cgen.MReg (an array-of-RECORD element or pointer deref
+         as the source, e.g. "varParam := n.sym[i]" where varParam is a VAR
+         RECORD parameter) is a second missing case found while
+         implementing SRC/TLINK, the same class of bug as the branch
+         above: Cgen.CgLesBxItem treats any non-MGlobal mode as MLocal
+         (BP-relative), so calling it on an MReg source loaded a garbage
+         stack slot instead of using ES:BX, which the index/deref codegen
+         already set up. That ES:BX value is live only until the next far
+         load, so it must be stashed in DX:SI BEFORE loading the
+         destination (which clobbers ES:BX itself) -- unlike the
+         MLocal/MGlobal rhs case, which can re-derive its far address
+         on demand via CgLesBxItem at any point. DX:SI (not the stack) is
+         used for the stash since CgLesBxBp/CgLesBxMem touch only ES:BX. *)
       IF (item.type # Syms.NoType) & (iform = Syms.TFRecord) &
          (rhs.type # Syms.NoType) & (rform = Syms.TFRecord) &
          item.isRef & rhs.isRef &
          (item.mode # Cgen.MReg) THEN
         count := item.type.size;
         Cgen.Emit1(01EH);             (* PUSH DS *)
+        IF rhs.mode = Cgen.MReg THEN
+          Cgen.EmitCodeStr("8C,C2,89,DE")  (* MOV DX,ES; MOV SI,BX -- stash src far addr *)
+        END;
         Cgen.CgLesBxItem(item.mode, item.adr);
         Cgen.Emit2(08BH, 0FBH);       (* MOV DI, BX *)
         Cgen.Emit1(006H);             (* PUSH ES *)
-        Cgen.CgLesBxItem(rhs.mode, rhs.adr);
+        IF rhs.mode = Cgen.MReg THEN
+          Cgen.EmitCodeStr("8E,C2,89,F3")  (* MOV ES,DX; MOV BX,SI -- restore src far addr *)
+        ELSE
+          Cgen.CgLesBxItem(rhs.mode, rhs.adr)
+        END;
         Cgen.Emit2(08BH, 0F3H);       (* MOV SI, BX *)
         Cgen.EmitCodeStr("06,1F,07"); (* PUSH ES; POP DS; POP ES (DS=src, ES=dst) *)
         Cgen.CgRepMovsb(INTEGER(count), FALSE);
