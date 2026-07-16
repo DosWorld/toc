@@ -76,19 +76,17 @@ END HexDigit;
 PROCEDURE Hex*(i: INTEGER; w: INTEGER);
 VAR
   n: INTEGER;
-  buf: ARRAY 4 OF CHAR;
+  buf: ARRAY 5 OF CHAR;
 BEGIN
-  n := 0;
-  WHILE n < 4 DO
+  n := 3;
+  WHILE n >= 0 DO
     buf[n] := HexDigit(SYSTEM.AND(i, 0FH));
     i := SYSTEM.LSR(i, 4);
-    INC(n)
+    DEC(n)
   END;
   WHILE w > 4 DO Char(" "); DEC(w) END;
-  WHILE n > 0 DO
-    DEC(n);
-    Char(buf[n])
-  END
+  buf[4] := 0X;
+  String(buf);
 END Hex;
 
 (* Adr: write a SYSTEM.ADDRESS as segment:offset hex.

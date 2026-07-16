@@ -5,8 +5,8 @@
 # in the CWD.  BOOT/TOC.EXE is NEVER modified by the build.
 #
 # Not part of the top-level `make all` build graph: TASM is a standalone
-# leaf tool, not yet trusted to replace the checked-in SYS.RDF/EMS.RDF
-# (see DOCS/TASM_PLAN.MD "Non-goals").  Byte-diff regression lives in
+# leaf tool, not yet trusted to replace the checked-in SYSTEM.RDF/EMS.RDF
+# (see DOCS/IMPLRULE.MD's TASM section).  Byte-diff regression lives in
 # TESTS/test_tasm.sh, run as an extra step of the top-level `make test`.
 #
 # Usage:
@@ -39,7 +39,7 @@ OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
 TASM.exe: $(TASM_SRCS) $(OCBOOT) OBERON.OM
-	$(XTRUN) $(OCBOOT) /LOG=debug /ENTRY=Run TASM.MOD /M
+	time $(XTRUN) $(OCBOOT) /ENTRY=Run TASM.MOD /M
 
 install: TASM.exe
 	mkdir -p ../../BIN

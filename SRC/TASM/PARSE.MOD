@@ -10,11 +10,12 @@ MODULE Parse;
   from a small pushback buffer and returns tokens from there until it is
   exhausted, then resumes pulling from the real file scanner.  This mirrors
   NASM's own text-substitution semantics for the whole-token-only subset
-  DOCS/TASM_PLAN.MD scoped for v1 (no parameterized macros).
+  this assembler supports (no parameterized macros -- see DOCS/IMPLRULE.MD's
+  TASM section).
 
   %ifdef/%else/%endif are handled at the raw-line level (SkipToEndifOrElse)
-  before any %define expansion of that line's tokens, matching the "skip
-  branches wholesale" scope call in DOCS/TASM_PLAN.MD.
+  before any %define expansion of that line's tokens (skip branches
+  wholesale).
 
   Two passes: Pass 1 walks the whole source, encoding every instruction
   through Enc (Enc counts bytes but does not write them in pass 1 -- see
@@ -28,25 +29,66 @@ MODULE Parse;
 IMPORT Files, Strings, LogErr, Rdoff, Sym, Dir, Enc, Scan, Lex;
 
 CONST
-  MaxLine    = 256;
-  MacroDepth = 4;     (* nested macro-token pushback buffers *)
+  MaxSrcDepth = 8;    (* §I.3: input-source stack depth -- top-level file
+                          (always stk[0]) plus up to 7 nested %include/
+                          %macro/%define levels (§S2: %define substitutions
+                          share this same stack/bound now, retiring the
+                          separate MacroDepth=4 pushback-buffer budget --
+                          one recursion-depth authority instead of two). A
+                          DOS-target assembler's nesting is not expected to
+                          run deep (Simplicity First), and each stack slot
+                          holds a full Scan.Scanner + Files.File (well over
+                          500 bytes each -- see the module-VAR placement
+                          note below), so the bound stays modest rather
+                          than generous. *)
+
+  (* E7 fix: named markers for BaseIndexOf/CombineBaseIndex/SingleRegAm --
+     one code per 8086 base/index register legal inside [ ... ], distinct
+     from Enc's own register-number space (hence the offset, not just
+     Enc.RBX etc. directly) so BaseIndexOf's -1 "not a base/index reg"
+     sentinel can't collide with a real register code. *)
+  MkBx = 100; MkBp = 101; MkSi = 102; MkDi = 103;
 
 TYPE
-  (* One pending macro-substitution being re-lexed as a private byte
-     buffer + cursor (macro bodies are single-line text -- no file I/O). *)
-  MacroBuf = RECORD
-    text: ARRAY 256 OF CHAR;
-    pos:  INTEGER
+  (* PredefNode: one -Dname[=value] CLI predefine (§I.2). A plain linked
+     list, not a chunked Chunk=32 table like Sym's -- a DOS command line
+     holds only a handful of -D switches, so the chunk machinery's extra
+     complexity buys nothing here. *)
+  PredefNode = POINTER TO PredefNodeDesc;
+  PredefNodeDesc = RECORD
+    name:  ARRAY Sym.MaxName OF CHAR;
+    value: ARRAY 128 OF CHAR;
+    next:  PredefNode
   END;
 
-VAR
-  s:         Scan.Scanner;
-  fname:     ARRAY 128 OF CHAR;
-  obj:       Rdoff.ObjFile;
+  (* SrcSlot / SrcStack: §I.3's input-source stack -- replaces the single
+     module-global Scan.Scanner. stk[0] is always the top-level .asm file
+     (opened by RunPass); %include pushes stk[1..] for nested files.
+     isFile distinguishes a real Files.File entry (closed on pop) from a
+     memory-source entry (§I.4's %macro expansions AND §S2's %define
+     substitutions both reuse this same stack with isFile=FALSE, nothing
+     to close, just DISPOSE(scn.mem) -- see the N1 fix). isDefine further
+     distinguishes a %define substitution from a %macro expansion/
+     %include file: a %define substitution running dry must pop
+     transparently and keep reading the SAME logical line from the
+     parent slot (no synthesized TEol -- see RawTokNext's EOF handling),
+     whereas a %macro expansion or %include running dry ends its own
+     line and must synthesize exactly one TEol before falling back to
+     the parent. Each Scanner+File pair is 500+ bytes, so the array is a
+     module VAR, never a local -- the 2026-07-11 stack-frame STRONG RULE
+     (DOCS/IMPLRULE.MD) applies directly here. *)
+  SrcSlot = RECORD
+    scn:      Scan.Scanner;
+    f:        Files.File;
+    isFile:   BOOLEAN;
+    isDefine: BOOLEAN
+  END;
+  SrcStack = ARRAY MaxSrcDepth OF SrcSlot;
 
-  (* macro pushback stack *)
-  mbuf:      ARRAY MacroDepth OF MacroBuf;
-  mtop:      INTEGER;            (* -1 = no macro active, else index into mbuf *)
+VAR
+  stk:       SrcStack;
+  srcTop:    INTEGER;    (* index of the active slot; -1 = nothing open yet *)
+  obj:       Rdoff.ObjFile;
 
   (* current token, after macro expansion -- callers read these instead of
      touching s.* directly once tokenizing has started *)
@@ -56,6 +98,11 @@ VAR
   tIval:     LONGINT;
   tSval:     ARRAY Scan.MaxStr OF CHAR;
   tLine:     LONGINT;
+  tokCount:  LONGINT;   (* incremented on every RawTokNext -- RunPass's
+                            no-progress guard (BUG A2) compares this before/
+                            after ParseLine: unchanged means ParseLine
+                            returned without consuming a token, which would
+                            otherwise spin RunPass's main loop forever *)
 
   curPass:   INTEGER;
   curSeg:    INTEGER;             (* Sym.SegCode / Sym.SegData / Sym.SegBss -- current SECTION *)
@@ -65,8 +112,79 @@ VAR
                                       emitting any bytes; total becomes Rdoff.RdfSetBss's argument. *)
   anyErr:    BOOLEAN;
 
+  predefHead: PredefNode;   (* §I.2: -D command-line predefines, applied in Assemble *)
+
+  (* §I.4 %macro state. macroBodyBuf is the fixed staging buffer for
+     %macro...%endmacro raw-text capture -- a module VAR, not a stack
+     local (4096 bytes is well past the 2 KB stack-frame STRONG RULE
+     ceiling, see DOCS/IMPLRULE.MD). macroLocalCounter numbers each
+     %%ident -> ?Mk?ident substitution; RunPass resets it at the start
+     of EACH pass so both passes generate the identical sequence of
+     synthesized local-label names for the same source (§I.0's two-pass
+     replay rule) -- it does NOT reset per file/include, only per pass,
+     matching how label offsets themselves are pass-global. *)
+  macroBodyBuf: ARRAY 4096 OF CHAR;
+  macroLocalCounter: LONGINT;
+
+(* AddPredef: TASM.MOD's RunBody calls this once per -D/-Dname=value CLI
+   argument, before Assemble runs. name is already uppercased and
+   validated non-empty by the caller (matches %define's own uppercase-
+   keying convention, see TASM.MD §I.0); an absent "=value" in the
+   original switch means an empty value (a bare %ifdef flag, exactly
+   NASM's `-Dname`). *)
+PROCEDURE AddPredef*(name, value: ARRAY OF CHAR);
+  VAR node: PredefNode;
+BEGIN
+  NEW(node);
+  IF node = NIL THEN LogErr.Error("tasm: out of memory (predef)"); RETURN END;
+  Strings.Copy(name, node^.name);
+  Strings.Copy(value, node^.value);
+  node^.next := predefHead;
+  predefHead := node
+END AddPredef;
+
+(* FreePredefs: release the -D list. Called on every RunBody exit path
+   (TASM.MOD) alongside Assemble's own Sym.Free/Enc.FreeJmpDecisions
+   cleanup -- the predef list is TASM.MOD's own allocation, outside
+   Assemble's normal per-call cleanup, so it needs its own free call. *)
+PROCEDURE FreePredefs*;
+  VAR n, nn: PredefNode;
+BEGIN
+  n := predefHead;
+  WHILE n # NIL DO nn := n^.next; DISPOSE(n); n := nn END;
+  predefHead := NIL
+END FreePredefs;
+
+(* ApplyPredefs: record every -D name/value into Sym via Sym.Define,
+   exactly as if `%define name value` had appeared before line 1 of the
+   source -- called once per Assemble, right after Sym.Init. Because
+   Sym's define table is untouched by RunPass (not reset between passes,
+   see RunPass's own header comment), this needs no per-pass replay
+   machinery: applied once, it stays defined through both passes with
+   no cross-pass caching risk (§I.0's ground rule). A source-level
+   %undef NAME still works normally afterward. *)
+PROCEDURE ApplyPredefs;
+  VAR n: PredefNode;
+BEGIN
+  n := predefHead;
+  WHILE n # NIL DO
+    Sym.Define(n^.name, n^.value);
+    n := n^.next
+  END
+END ApplyPredefs;
+
+(* CurFname: the ACTIVE source's filename for diagnostics (§I.3 -- was a
+   single module-global `fname`, wrong once %include can push a second
+   file: an error inside an included file must report the include's own
+   name, not the top-level .asm's). Every Scan.Scanner already carries
+   its own fname, so this just copies the active stack slot's. *)
+PROCEDURE CurFname(VAR out: ARRAY OF CHAR);
+BEGIN Strings.Copy(stk[srcTop].scn.fname, out)
+END CurFname;
+
 PROCEDURE Fail(msg: ARRAY OF CHAR);
-BEGIN LogErr.ErrorInFile(fname, tLine, msg); anyErr := TRUE
+  VAR fn: ARRAY 128 OF CHAR;
+BEGIN CurFname(fn); LogErr.ErrorInFile(fn, tLine, msg); anyErr := TRUE
 END Fail;
 
 (* DefineCurLabel: define a label at the current position in whichever
@@ -74,164 +192,99 @@ END Fail;
    SegBss/bssOfs.  Factors out the SegCode/SegData/SegBss three-way
    dispatch that both label-definition sites in ParseLine need. *)
 PROCEDURE DefineCurLabel(nameOrig: ARRAY OF CHAR);
+  VAR fn: ARRAY 128 OF CHAR;
 BEGIN
+  CurFname(fn);
   IF curSeg = Sym.SegCode THEN
-    Sym.DefineLabel(nameOrig, Sym.SegCode, codeOfs, FALSE, fname, tLine)
+    Sym.DefineLabel(nameOrig, Sym.SegCode, codeOfs, FALSE, fn, tLine)
   ELSIF curSeg = Sym.SegData THEN
-    Sym.DefineLabel(nameOrig, Sym.SegData, dataOfs, FALSE, fname, tLine)
+    Sym.DefineLabel(nameOrig, Sym.SegData, dataOfs, FALSE, fn, tLine)
   ELSE
-    Sym.DefineLabel(nameOrig, Sym.SegBss, bssOfs, FALSE, fname, tLine)
+    Sym.DefineLabel(nameOrig, Sym.SegBss, bssOfs, FALSE, fn, tLine)
   END
 END DefineCurLabel;
 
 (* ---- token stream with %define expansion ---- *)
 
-(* RawNext: pull the next token either from an active macro pushback
-   buffer (mbuf[mtop]) or, if none is active/exhausted, from the real file
-   scanner s.  A macro buffer holding only whitespace-separated identifiers
-   /numbers/punctuation is re-lexed by a tiny ad-hoc scan (macro bodies in
-   both oracle files are short: bare constants, mnemonic aliases, or one
-   bracketed memory expression -- never multi-line). *)
-PROCEDURE McSkipBlanks(VAR m: MacroBuf);
-BEGIN WHILE (m.text[m.pos] = " ") OR (ORD(m.text[m.pos]) = 9) DO INC(m.pos) END
-END McSkipBlanks;
-
-(* MacroAtEnd: TRUE if the active macro buffer has nothing but trailing
-   whitespace left.  Must skip blanks before testing for the 0X terminator
-   -- %define bodies are built with a trailing " " after every token (see
-   TryPercentDirective's DEFINE loop), so the raw text almost always ends
-   in a space, not immediately 0X; without the skip here, PopMacroIfDone
-   would fail to recognize the buffer as exhausted one call early, and
-   McNextTok would return a spurious TEof for what should have been a
-   transparent pop back to the real token stream (e.g. "[bp+RSIZE+2]" with
-   RSIZE="4 " would see TEof right after the 4, truncating the "+2]" that
-   follows in the real source). *)
-PROCEDURE MacroAtEnd(): BOOLEAN;
-BEGIN
-  IF mtop < 0 THEN RETURN FALSE END;
-  McSkipBlanks(mbuf[mtop]);
-  RETURN mbuf[mtop].text[mbuf[mtop].pos] = 0X
-END MacroAtEnd;
-
-PROCEDURE PopMacroIfDone;
-BEGIN
-  WHILE MacroAtEnd() DO DEC(mtop) END
-END PopMacroIfDone;
-
-PROCEDURE IsIdStart(c: CHAR): BOOLEAN;
-BEGIN
-  RETURN ((c >= "A") & (c <= "Z")) OR ((c >= "a") & (c <= "z")) OR (c = "_")
-         OR (c = ".") OR (c = "$") OR (c = "?") OR (c = "@")
-END IsIdStart;
-
-PROCEDURE IsIdChar(c: CHAR): BOOLEAN;
-BEGIN RETURN IsIdStart(c) OR SYSTEM.ISDIGIT(c)
-END IsIdChar;
-
-(* McNextTok: lex one token from a MacroBuf using the same T* sym space as
-   Scan.  Numbers here are plain decimal or 0x../h-suffixed hex (matches
-   what %define bodies in the two oracle files actually contain: small
-   integers and one bracketed address expression). *)
-PROCEDURE McNextTok(VAR m: MacroBuf; VAR sym: INTEGER; VAR id, idOrig: ARRAY OF CHAR; VAR ival: LONGINT);
-  VAR i: INTEGER; c: CHAR; buf: ARRAY 32 OF CHAR; isHex: BOOLEAN;
-BEGIN
-  McSkipBlanks(m);
-  c := m.text[m.pos];
-  IF c = 0X THEN sym := Scan.TEof; RETURN END;
-  IF IsIdStart(c) THEN
-    i := 0;
-    WHILE IsIdChar(m.text[m.pos]) DO
-      IF i < LEN(id) - 1 THEN idOrig[i] := m.text[m.pos]; id[i] := SYSTEM.UCASE(m.text[m.pos]); INC(i) END;
-      INC(m.pos)
-    END;
-    idOrig[i] := 0X; id[i] := 0X; sym := Scan.TIdent
-  ELSIF SYSTEM.ISDIGIT(c) THEN
-    i := 0;
-    WHILE IsIdChar(m.text[m.pos]) DO   (* IsIdChar also matches hex letters/digits/x *)
-      IF i < LEN(buf) - 1 THEN buf[i] := m.text[m.pos]; INC(i) END;
-      INC(m.pos)
-    END;
-    buf[i] := 0X;
-    isHex := (i >= 2) & (buf[0] = "0") & ((buf[1] = "x") OR (buf[1] = "X"));
-    ival := LONGINT(0);
-    IF isHex THEN
-      i := 2;
-      WHILE buf[i] # 0X DO
-        ival := ival * 16;
-        IF (buf[i] >= "0") & (buf[i] <= "9") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("0"))
-        ELSIF (buf[i] >= "A") & (buf[i] <= "F") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("A") + 10)
-        ELSIF (buf[i] >= "a") & (buf[i] <= "f") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("a") + 10)
-        END;
-        INC(i)
-      END
-    ELSIF (i >= 1) & ((buf[i-1] = "h") OR (buf[i-1] = "H")) THEN
-      i := 0;
-      WHILE buf[i+1] # 0X DO
-        ival := ival * 16;
-        IF (buf[i] >= "0") & (buf[i] <= "9") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("0"))
-        ELSIF (buf[i] >= "A") & (buf[i] <= "F") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("A") + 10)
-        ELSIF (buf[i] >= "a") & (buf[i] <= "f") THEN ival := ival + LONGINT(ORD(buf[i]) - ORD("a") + 10)
-        END;
-        INC(i)
-      END
-    ELSE
-      i := 0;
-      WHILE buf[i] # 0X DO
-        ival := ival * 10 + LONGINT(ORD(buf[i]) - ORD("0")); INC(i)
-      END
-    END;
-    sym := Scan.TInt
-  ELSIF c = ":" THEN INC(m.pos); sym := Scan.TColon
-  ELSIF c = "[" THEN INC(m.pos); sym := Scan.TLbrak
-  ELSIF c = "]" THEN INC(m.pos); sym := Scan.TRbrak
-  ELSIF c = "+" THEN INC(m.pos); sym := Scan.TPlus
-  ELSIF c = "-" THEN INC(m.pos); sym := Scan.TMinus
-  ELSIF c = "," THEN INC(m.pos); sym := Scan.TComma
-  ELSE INC(m.pos); sym := Scan.TError
-  END
-END McNextTok;
-
-(* TokNext: the token source every parser procedure below calls.  Expands
-   %define macros transparently: if the raw next token is an identifier
-   matching a Sym macro, push its substitution text as a new MacroBuf and
-   pull the first token from there instead (recursively -- a macro body
-   naming another macro is re-checked once the pushed buffer starts
-   yielding, since McNextTok's identifiers go through the same
-   Sym.Expand check below). *)
-(* RawTokNext: fetch the next token with NO %define expansion.  Used only
+(* RawTokNext: fetch the next token with NO %define expansion, from
+   whichever slot is on top of the §I.3 input-source stack -- a real file,
+   a %macro expansion, or (§S2) a %define substitution, all lexed by the
+   ONE real Scan.Next now (McNextTok's ad-hoc re-lexer is retired: it used
+   to diverge from Scan.Next on strings/parens/'*'/'/' and every other
+   token this module has ever added, smell C8/S2). Used raw (no expansion)
    for the identifier immediately following %define/%undef/%ifdef: that
    name is being declared or tested, not used as a value, so it must never
    itself be macro-expanded -- e.g. "%define IS_FAR" (empty-bodied, used
-   purely as an %ifdef flag in SYS.ASM/EMS.ASM) followed later by
+   purely as an %ifdef flag in SYSTEM.ASM/EMS.ASM) followed later by
    "%ifdef IS_FAR" would otherwise have TokNext silently expand IS_FAR to
    its (empty) substitution before DoIfdef ever saw an identifier token,
    desyncing the whole token stream. *)
 PROCEDURE RawTokNext;
 BEGIN
-  PopMacroIfDone;
-  IF mtop >= 0 THEN
-    McNextTok(mbuf[mtop], tSym, tId, tIdOrig, tIval);
-    tLine := s.line
-  ELSE
-    Scan.Next(s);
-    tSym := s.sym; tLine := s.tokLine; tIval := s.ival;
-    Strings.Copy(s.id, tId); Strings.Copy(s.idOrig, tIdOrig); Strings.Copy(s.sval, tSval)
+  INC(tokCount);
+  Scan.Next(stk[srcTop].scn);
+  tSym := stk[srcTop].scn.sym; tLine := stk[srcTop].scn.tokLine; tIval := stk[srcTop].scn.ival;
+  Strings.Copy(stk[srcTop].scn.id, tId);
+  Strings.Copy(stk[srcTop].scn.idOrig, tIdOrig);
+  Strings.Copy(stk[srcTop].scn.sval, tSval);
+  IF (tSym = Scan.TEof) & (srcTop > 0) THEN
+    IF stk[srcTop].isDefine THEN
+      (* §S2: a %define substitution running dry must pop TRANSPARENTLY
+         and keep reading the SAME logical line from the parent slot --
+         unlike a %macro expansion or %include file (below), it must NOT
+         synthesize a TEol, since the substitution sits mid-statement
+         (e.g. "mov ax, RSIZE+2" with RSIZE="4" must continue reading
+         "+2" from the real source right after "4", not see an end of
+         line first). DISPOSE + DEC, then re-read from the (now) top
+         slot -- recursion depth is bounded by MaxSrcDepth, same as
+         %include/%macro's own guards. *)
+      DISPOSE(stk[srcTop].scn.mem);
+      DEC(srcTop);
+      RawTokNext; RETURN
+    END;
+    (* §I.3: on inner-file/%macro EOF (srcTop > 0), pop back to the
+       parent source and synthesize ONE TEol first -- an included file
+       not ending in a newline (or a %macro expansion, which is never
+       newline-terminated) must not glue its last token onto the
+       parent's next line -- then continue reading from the parent so
+       the outer loop (RunPass) never observes an inner TEof at all;
+       only the true top-level EOF (stack empty down to stk[0]) ever
+       surfaces as TEof to callers. *)
+    IF stk[srcTop].isFile THEN Files.Close(stk[srcTop].f)
+    ELSE DISPOSE(stk[srcTop].scn.mem) END;   (* N1 fix: %macro expansion buffer *)
+    DEC(srcTop);
+    tSym := Scan.TEol
   END
 END RawTokNext;
 
+(* TokNext: the token source every parser procedure below calls.  Expands
+   %define macros transparently: if the raw next token is an identifier
+   matching a Sym macro, push its substitution text as a new memory-source
+   slot (§S2: Scan.InitMem, the same real tokenizer %macro expansions
+   already use) and pull the first token from there instead (recursively --
+   a macro body naming another macro is re-checked once the pushed slot
+   starts yielding, since RawTokNext's tokens go through the same
+   Sym.Expand check below regardless of which slot they came from). *)
 PROCEDURE TokNext;
-  VAR sub: ARRAY 128 OF CHAR;
+  VAR sub: ARRAY 128 OF CHAR; expansion: Scan.MemText; fn: ARRAY 128 OF CHAR;
 BEGIN
   RawTokNext;
   IF (tSym = Scan.TIdent) & Sym.Expand(tId, sub) THEN
-    IF mtop < MacroDepth - 1 THEN
-      INC(mtop);
-      Strings.Copy(sub, mbuf[mtop].text);
-      mbuf[mtop].pos := 0;
-      TokNext; RETURN     (* re-enter: pull the macro's first real token *)
-    ELSE
-      Fail("macro expansion nested too deep")
-    END
+    IF srcTop = MaxSrcDepth - 1 THEN Fail("macro expansion nested too deep"); RETURN END;
+    NEW(expansion);
+    IF expansion = NIL THEN Fail("out of memory (define expansion)"); RETURN END;
+    SYSTEM.MOVE(sub[0], expansion^.buf[0], Strings.Length(sub));
+    expansion^.buf[Strings.Length(sub)] := 0X;
+    (* CurFname BEFORE the push: it must capture the INVOCATION SITE's
+       filename for the expansion's diagnostics -- after INC(srcTop) it
+       would read the new slot's stale/blank fname instead, making every
+       error inside an expansion report an empty filename (found by the
+       2026-07-16 review probe; InvokeMacro had the same ordering bug). *)
+    CurFname(fn);
+    INC(srcTop);
+    stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := TRUE;
+    Scan.InitMem(stk[srcTop].scn, expansion, fn, tLine);
+    TokNext; RETURN     (* re-enter: pull the macro's first real token *)
   END
 END TokNext;
 
@@ -274,40 +327,61 @@ BEGIN
   RETURN TRUE
 END LookupReg;
 
+(* IsSegRegPrefixNext / SegRegPrefixByteFor: D fix -- support NASM's
+   "es stosb"-style bare segment-register prefix before a string op
+   (STOSB/MOVSB/... take no memory operand of their own to carry a
+   `[es:...]` override, so this leading-token form is the only way to
+   apply one). `name` is already-uppercased (matches LookupReg's
+   contract); only recognizes ES/CS/SS/DS, same set LookupReg accepts. *)
+PROCEDURE IsSegRegPrefixNext(name: ARRAY OF CHAR): BOOLEAN;
+  VAR size, reg: INTEGER; isSeg: BOOLEAN;
+BEGIN
+  RETURN LookupReg(name, size, reg, isSeg) & isSeg
+END IsSegRegPrefixNext;
+
+PROCEDURE SegRegPrefixByteFor(name: ARRAY OF CHAR): INTEGER;
+  VAR size, reg: INTEGER; isSeg: BOOLEAN;
+BEGIN
+  IF LookupReg(name, size, reg, isSeg) & isSeg THEN
+    RETURN INTEGER(Enc.SegPrefixByte(reg))
+  END;
+  RETURN 0
+END SegRegPrefixByteFor;
+
 (* IsBaseIndexReg: TRUE if reg (a word register code) may appear inside
    [ ... ] as a base/index register (BX, BP, SI, DI only -- 8086 addressing
    has no other valid base/index registers). *)
 PROCEDURE BaseIndexOf(reg: INTEGER): INTEGER;
 BEGIN
   CASE reg OF
-    Enc.RBX: RETURN 100
-  | Enc.RBP: RETURN 101
-  | Enc.RSI: RETURN 102
-  | Enc.RDI: RETURN 103
+    Enc.RBX: RETURN MkBx
+  | Enc.RBP: RETURN MkBp
+  | Enc.RSI: RETURN MkSi
+  | Enc.RDI: RETURN MkDi
   ELSE RETURN -1
   END
 END BaseIndexOf;
 
 (* CombineBaseIndex: given two base/index component codes (each one of the
-   100..103 markers from BaseIndexOf, order-independent), pick the 8086
-   Am* addressing-mode selector.  Only [BX+SI] [BX+DI] [BP+SI] [BP+DI] are
+   Mk* markers from BaseIndexOf, order-independent), pick the 8086 Am*
+   addressing-mode selector.  Only [BX+SI] [BX+DI] [BP+SI] [BP+DI] are
    legal two-register forms; anything else is a caller error. *)
 PROCEDURE CombineBaseIndex(a, b: INTEGER; VAR am: INTEGER): BOOLEAN;
 BEGIN
-  IF ((a = 100) & (b = 102)) OR ((a = 102) & (b = 100)) THEN am := Enc.AmBxSi; RETURN TRUE END;
-  IF ((a = 100) & (b = 103)) OR ((a = 103) & (b = 100)) THEN am := Enc.AmBxDi; RETURN TRUE END;
-  IF ((a = 101) & (b = 102)) OR ((a = 102) & (b = 101)) THEN am := Enc.AmBpSi; RETURN TRUE END;
-  IF ((a = 101) & (b = 103)) OR ((a = 103) & (b = 101)) THEN am := Enc.AmBpDi; RETURN TRUE END;
+  IF ((a = MkBx) & (b = MkSi)) OR ((a = MkSi) & (b = MkBx)) THEN am := Enc.AmBxSi; RETURN TRUE END;
+  IF ((a = MkBx) & (b = MkDi)) OR ((a = MkDi) & (b = MkBx)) THEN am := Enc.AmBxDi; RETURN TRUE END;
+  IF ((a = MkBp) & (b = MkSi)) OR ((a = MkSi) & (b = MkBp)) THEN am := Enc.AmBpSi; RETURN TRUE END;
+  IF ((a = MkBp) & (b = MkDi)) OR ((a = MkDi) & (b = MkBp)) THEN am := Enc.AmBpDi; RETURN TRUE END;
   RETURN FALSE
 END CombineBaseIndex;
 
 PROCEDURE SingleRegAm(marker: INTEGER; VAR am: INTEGER): BOOLEAN;
 BEGIN
   CASE marker OF
-    100: am := Enc.AmBx; RETURN TRUE
-  | 101: am := Enc.AmDisp; RETURN TRUE   (* [BP] alone: Am selector reuses 6, mod forced to 01 by EmitModRm's disp=0 rule *)
-  | 102: am := Enc.AmSi; RETURN TRUE
-  | 103: am := Enc.AmDi; RETURN TRUE
+    MkBx: am := Enc.AmBx; RETURN TRUE
+  | MkBp: am := Enc.AmDisp; RETURN TRUE   (* [BP] alone: Am selector reuses 6, mod forced to 01 by EmitModRm's disp=0 rule *)
+  | MkSi: am := Enc.AmSi; RETURN TRUE
+  | MkDi: am := Enc.AmDi; RETURN TRUE
   ELSE RETURN FALSE
   END
 END SingleRegAm;
@@ -315,12 +389,12 @@ END SingleRegAm;
 (* ---- operand parsing ----
    ParseMemBody parses the contents of [ ... ] (after the '[' has been
    consumed by the caller, up to but not including ']'), filling `op` as
-   an OKMem operand.  Grammar actually needed (per DOCS/TASM_PLAN.MD's
-   addressing-form audit): reg | reg+reg | reg+disp | reg+reg+disp | disp
-   | label | label+disp -- disp may itself be a NAME.field struct-offset
-   constant (resolved via Dir.TryResolveField) or a %define'd numeric
-   token (already expanded by TokNext by the time we see it) or a bare
-   label (data/code address, becomes hasLabel+labelName). *)
+   an OKMem operand.  Grammar actually needed: reg | reg+reg | reg+disp |
+   reg+reg+disp | disp | label | label+disp -- disp may itself be a
+   NAME.field struct-offset constant (resolved via Dir.TryResolveField) or
+   a %define'd numeric token (already expanded by TokNext by the time we
+   see it) or a bare label (data/code address, becomes
+   hasLabel+labelName). *)
 PROCEDURE ParseMemBody(VAR op: Enc.Operand);
   VAR size, reg: INTEGER; isSeg: BOOLEAN;
       marker1, marker2: INTEGER;
@@ -355,10 +429,31 @@ BEGIN
       negNext := FALSE; TokNext
     ELSIF tSym = Scan.TIdent THEN
       IF LookupReg(tId, size, reg, isSeg) & ~isSeg & (BaseIndexOf(reg) >= 0) THEN
+        (* N3/M3 fix: a register can never be legally negated on 8086 --
+           "[bx-si]" was silently dropping the '-' and encoding [bx+si]
+           instead of failing (NASM rejects it as an invalid effective
+           address). *)
+        IF negNext THEN Fail("'-' before register/label in address"); RETURN END;
         IF ~haveReg THEN marker1 := BaseIndexOf(reg); haveReg := TRUE
-        ELSE marker2 := BaseIndexOf(reg)
+        ELSIF marker2 < 0 THEN marker2 := BaseIndexOf(reg)
+        ELSE
+          (* BUG B4: a third base/index register (e.g. [bx+si+di]) has no
+             8086 addressing mode at all -- silently overwriting marker2
+             dropped the second register from the encoded address with no
+             diagnostic. *)
+          Fail("too many registers in address"); RETURN
         END;
         TokNext
+      ELSIF LookupReg(tId, size, reg, isSeg) & ~isSeg THEN
+        (* M2 fix: a recognized register that is NOT usable as a base/index
+           (AX/CX/DX/BX's word forms are fine via BaseIndexOf above; this
+           catches AX/CX/DX/SP and any other register with no addressing
+           role, e.g. "[ax]") -- falling through to the identifier/label
+           branch below would either report a misleading "undefined
+           symbol ax", or worse, silently resolve to a same-named label
+           (a label named "ax" is legal) and emit a direct-memory
+           reference where NASM rejects the effective address outright. *)
+        Fail("register not usable as base/index on 8086"); RETURN
       ELSE
         (* identifier: either NAME.field (struct offset), or a plain label.
            Use original case throughout -- struct names/fields are stored
@@ -380,6 +475,11 @@ BEGIN
           END;
           TokNext
         ELSE
+          (* N3/M3 fix: same negation guard as the register case -- a bare
+             label can also never be legally negated inside [ ] (there is
+             no "negative address" concept; "[-label]" must fail, not
+             silently become "[+label]"). *)
+          IF negNext THEN Fail("'-' before register/label in address"); RETURN END;
           hasLabel := TRUE; Strings.Copy(firstIdent, labelName)
         END
       END
@@ -400,7 +500,14 @@ BEGIN
     END;
     op.disp := disp;
     IF hasLabel THEN
-      Fail("label displacement combined with base register not supported"); RETURN
+      (* M1 fix: [label+reg]/[reg+label] IS a legal, common 8086/NASM
+         table-indexing idiom -- EmitModRm already forces Mod=10 (disp16)
+         whenever hasLabel is set and EmitDisp16 already emits the RELOC
+         correctly (see ENC.MOD's EmitModRm mod-selection); only this
+         parser-side Fail was blocking the combination. Keep the label
+         alongside the base/index register instead of rejecting it. *)
+      op.hasLabel := TRUE; Strings.Copy(labelName, op.labelName);
+      Sym.ReserveLabel(labelName)
     END
   ELSE
     op.am := Enc.AmNone;
@@ -425,7 +532,14 @@ PROCEDURE ParseOperand(VAR op: Enc.Operand; sizeHint: INTEGER);
   VAR size, reg, qual: INTEGER; isSeg: BOOLEAN; neg: BOOLEAN;
       name: ARRAY Scan.MaxIdent OF CHAR; nameOrig: ARRAY Scan.MaxIdent OF CHAR;
 BEGIN
-  op.size := sizeHint; op.isFar := FALSE; op.isSegOf := FALSE; op.isShort := FALSE;
+  (* full zero-init: an OKReg/OKImm operand only fills the fields it needs,
+     leaving the rest as stack garbage from the caller's uninitialised
+     `ops` array (BUG A3) -- EmitModRm and friends must be able to trust
+     every field regardless of kind. *)
+  op.kind := Enc.OKNone; op.size := sizeHint; op.reg := 0; op.am := Enc.AmNone;
+  op.seg := Enc.NoSeg; op.disp := LONGINT(0); op.hasLabel := FALSE;
+  op.labelName[0] := 0X;
+  op.isFar := FALSE; op.isSegOf := FALSE; op.isShort := FALSE;
   IF tSym = Scan.TIdent THEN
     Strings.Copy(tId, name); Strings.Copy(tIdOrig, nameOrig);
     qual := Lex.LookupQualifier(name);
@@ -456,11 +570,22 @@ BEGIN
     END;
     (* bare label used as an immediate/address value -- original case, to
        match Sym.DefineLabel's storage (see the note on the [ ] path
-       above: label names are never uppercased). *)
+       above: label names are never uppercased).  Optional trailing
+       "+ disp"/"- disp" (e.g. "mov ax, __data+0", ccasm's array-address
+       form) is consumed here the same way ParseMemBody does inside [ ] --
+       without this, the leftover '+'/'-' token is never advanced past by
+       ParseInstruction/ParseLine and RunPass's main loop spins forever
+       (never reaching TEol/TEof). *)
     TokNext;
     op.kind := Enc.OKImm; op.hasLabel := TRUE; Strings.Copy(nameOrig, op.labelName);
     op.disp := LONGINT(0);
     Sym.ReserveLabel(nameOrig);
+    WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+      neg := (tSym = Scan.TMinus); TokNext;
+      IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
+      IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
+      TokNext
+    END;
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
     RETURN
   ELSIF tSym = Scan.TDot THEN
@@ -471,11 +596,30 @@ BEGIN
     op.kind := Enc.OKImm; op.hasLabel := TRUE; Strings.Copy(nameOrig, op.labelName);
     op.disp := LONGINT(0);
     Sym.ReserveLabel(nameOrig);
+    (* N10 fix: mirror the bare-ident branch's "+ disp"/"- disp" chain --
+       without this, "jmp .loop+2" fell through to the generic A2
+       no-progress guard ("unexpected token at start of statement")
+       instead of either working or naming the real problem. *)
+    WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+      neg := (tSym = Scan.TMinus); TokNext;
+      IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
+      IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
+      TokNext
+    END;
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
     RETURN
   ELSIF tSym = Scan.TLbrak THEN
     TokNext; ParseMemBody(op);
-    IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
+    (* BUG B1: no WORD default here -- an unsized memory operand (no
+       BYTE/WORD qualifier and no register operand on the same instruction
+       to infer width from) is a real NASM hard error ("operation size not
+       specified"), not a silent WORD assumption that corrupts an adjacent
+       byte buffer. Encoders whose width depends solely on the memory
+       operand (EncIncDec/EncUnaryGroup/EncShift, mem-imm EncMov/EncAlu/
+       EncTest) must Err on SzNone themselves; a register operand on the
+       same instruction still pins width the same way it always has,
+       since those encoders read the REGISTER's size in that case, not
+       the memory operand's. *)
     RETURN
   ELSIF (tSym = Scan.TInt) OR (tSym = Scan.TMinus) THEN
     neg := FALSE;
@@ -487,6 +631,9 @@ BEGIN
     TokNext; RETURN
   ELSIF tSym = Scan.TString THEN
     (* single-character literal used as an immediate, e.g. cmp byte [..], 'E' *)
+    (* C7 fix: an empty string '' has tSval[0]=0X too, so the old check
+       (tSval[1] # 0X) alone passed it through as immediate 0, silently. *)
+    IF tSval[0] = 0X THEN Fail("empty string literal is not valid as an immediate"); RETURN END;
     IF tSval[1] # 0X THEN Fail("only single-character literals are valid as an immediate"); RETURN END;
     op.kind := Enc.OKImm; op.hasLabel := FALSE; op.disp := LONGINT(ORD(tSval[0]));
     IF op.size = Enc.SzNone THEN op.size := Enc.SzByte END;
@@ -548,18 +695,62 @@ END EmitDataWord;
 (* EmitDataWordMaybeLabel: DW val, where val may be a label (word address,
    with a relocation in pass 2) rather than a plain constant. *)
 PROCEDURE EmitDataWordMaybeLabel(VAR op: Enc.Operand);
-  VAR lseg: INTEGER; lofs: LONGINT; patchSeg: INTEGER; patchOfs: LONGINT;
+  VAR lseg: INTEGER; lofs: LONGINT; patchSeg: INTEGER; patchOfs: LONGINT; impId: INTEGER;
 BEGIN
   IF op.hasLabel & (curPass = 2) THEN
-    IF ~Sym.Lookup(op.labelName, lseg, lofs) THEN Fail("undefined symbol") END;
     IF curSeg = Sym.SegCode THEN patchSeg := Rdoff.SegCode; patchOfs := codeOfs
     ELSE patchSeg := Rdoff.SegData; patchOfs := dataOfs
     END;
+    IF Sym.IsExtern(op.labelName) THEN
+      (* mirror Enc.EmitDisp16's extern branch (BUG A5): an EXTERN target's
+         address is unknown until link time, so the reloc's RSEG must be
+         the import ID, not this module's own code/data segment -- the
+         addend is the operand's own constant offset only (no lofs, since
+         there is no local definition to add in). *)
+      (* N4 residual fix: the +n addend of "dw extlabel+n" wraps mod
+         65536 just like a plain word value -- same guard/bounds as the
+         constant arm below. *)
+      IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+        Fail("word value out of range"); RETURN
+      END;
+      impId := Enc.EnsureImportId(op.labelName);
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 2, impId, FALSE);
+      EmitDataWord(INTEGER(op.disp));
+      RETURN
+    END;
+    (* N9 fix: every sibling site (EmitDisp16, EncJmpShort, ...) returns/
+       emits-placeholder on this Fail -- missing RETURN here left
+       lseg/lofs uninitialized and fell through into the reloc dispatch
+       below. Currently unreachable (A1's CheckAllDefined runs before
+       Pass 2 and every referenced label is at least reserved), but a
+       future refactor could reach this with garbage state. *)
+    IF ~Sym.Lookup(op.labelName, lseg, lofs) THEN Fail("undefined symbol"); RETURN END;
+    (* three-way dispatch (R3 fix): a BSS-defined label was falling into
+       the ELSE arm and relocating against SegData -- mirror Enc.AddReloc's
+       three-way dispatch so `dw bssLabel` gets the correct RSEG. *)
     IF lseg = Sym.SegCode THEN
       Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 2, Rdoff.SegCode, FALSE)
-    ELSE
+    ELSIF lseg = Sym.SegData THEN
       Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 2, Rdoff.SegData, FALSE)
-    END
+    ELSE
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 2, Rdoff.SegBss, FALSE)
+    END;
+    (* addend on disk must be the target's own local offset (op.disp+lofs),
+       matching EmitDisp16's intra-module RELOC convention -- see its
+       comment on the absolute-RELOC addend formula. N4 residual fix:
+       guard the sum against mod-65536 wrap, same as EmitDisp16's own
+       intra-module arm. *)
+    IF (op.disp + lofs < LONGINT(-32768)) OR (op.disp + lofs > LONGINT(65535)) THEN
+      Fail("word value out of range"); RETURN
+    END;
+    EmitDataWord(INTEGER(op.disp + lofs));
+    RETURN
+  END;
+  (* N4 fix: same word-range guard as Enc.EmitDisp16 -- a plain-constant
+     DW value silently wrapped mod 65536 (e.g. "dw 70000" -> 4464) with
+     no diagnostic. *)
+  IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+    Fail("word value out of range"); RETURN
   END;
   EmitDataWord(INTEGER(op.disp))
 END EmitDataWordMaybeLabel;
@@ -580,8 +771,13 @@ BEGIN
       IF tSym = Scan.TMinus THEN
         TokNext;
         IF tSym # Scan.TInt THEN Fail("expected number after '-'"); RETURN END;
+        (* C5 fix: BYTE(...) silently truncates any out-of-range value --
+           reject rather than wrap, matching NASM's warning-turned-error
+           policy for this class of surprise. *)
+        IF (tIval < 0) OR (tIval > 128) THEN Fail("DB value out of range (-128..255)"); RETURN END;
         EmitDataByte(BYTE(-tIval)); TokNext
       ELSE
+        IF (tIval < 0) OR (tIval > 255) THEN Fail("DB value out of range (-128..255)"); RETURN END;
         EmitDataByte(BYTE(tIval)); TokNext
       END
     ELSE
@@ -609,6 +805,7 @@ END ParseDwList;
 (* ---- STRUC field-size keywords: RESB/RESW/RESD n ---- *)
 PROCEDURE ParseStrucField(field: ARRAY OF CHAR);
   VAR kw: ARRAY Scan.MaxIdent OF CHAR; szBytes, count: LONGINT; neg: BOOLEAN; d: INTEGER;
+      fn: ARRAY 128 OF CHAR;
 BEGIN
   IF tSym # Scan.TIdent THEN Fail("expected RESB/RESW/RESD"); RETURN END;
   Strings.Copy(tId, kw); TokNext;
@@ -623,7 +820,11 @@ BEGIN
   IF tSym # Scan.TInt THEN Fail("expected count"); RETURN END;
   count := tIval; IF neg THEN count := -count END;
   TokNext;
-  Dir.AddField(field, szBytes, count, fname, tLine)
+  (* C6 fix: a negative count walks the STRUC field offset backwards with
+     no diagnostic, corrupting every later field's offset silently. *)
+  IF count < LONGINT(0) THEN Fail("RESB/RESW/RESD count must not be negative"); RETURN END;
+  CurFname(fn);
+  Dir.AddField(field, szBytes, count, fn, tLine)
 END ParseStrucField;
 
 (* ---- directive dispatch: BITS/CPU/SECTION/GLOBAL/STRUC/ENDSTRUC/
@@ -642,6 +843,7 @@ END SkipToEol;
 VAR
   skipping:    ARRAY 16 OF BOOLEAN;
   branchTrue:  ARRAY 16 OF BOOLEAN;
+  sawElse:     ARRAY 16 OF BOOLEAN;   (* C9: duplicate %else detection *)
   ifDepth:     INTEGER;
 
 PROCEDURE CurrentlySkipping(): BOOLEAN;
@@ -657,10 +859,18 @@ PROCEDURE DoIfdef;
 BEGIN
   IF tSym # Scan.TIdent THEN Fail("expected identifier after %ifdef"); RETURN END;
   Strings.Copy(tId, name); RawTokNext;
+  (* paper cut fix: mirror %include's own trailing-EOL check -- trailing
+     junk after the name used to be silently mis-parsed as a new
+     statement ("unknown directive or mnemonic") instead of naming the
+     real problem. *)
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after %ifdef name"); RETURN
+  END;
   cond := Sym.IsDefine(name);
   IF ifDepth < 16 THEN
     skipping[ifDepth] := CurrentlySkipping() OR ~cond;
     branchTrue[ifDepth] := cond;
+    sawElse[ifDepth] := FALSE;
     INC(ifDepth)
   ELSE
     Fail("%ifdef nested too deep")
@@ -670,6 +880,10 @@ END DoIfdef;
 PROCEDURE DoElse;
 BEGIN
   IF ifDepth = 0 THEN Fail("%else without %ifdef"); RETURN END;
+  (* C9 fix: a duplicate %else for the same %ifdef was silently accepted
+     and re-toggled nothing detectably. *)
+  IF sawElse[ifDepth-1] THEN Fail("duplicate %else for the same %ifdef"); RETURN END;
+  sawElse[ifDepth-1] := TRUE;
   IF ifDepth = 1 THEN skipping[0] := branchTrue[0]
   ELSE skipping[ifDepth-1] := skipping[ifDepth-2] OR branchTrue[ifDepth-1]
   END
@@ -680,6 +894,189 @@ BEGIN
   IF ifDepth = 0 THEN Fail("%endif without %ifdef"); RETURN END;
   DEC(ifDepth)
 END DoEndif;
+
+(* DoInclude: %include "FILE.INC" -- §I.3. The filename is read via
+   RawTokNext (NOT TokNext) so it is never itself %define-expanded, same
+   rationale as the identifier immediately after %define/%undef/%ifdef.
+   NASM skips %include inside a false %ifdef branch without opening the
+   file at all (the `%ifdef DOS_BUILD / %include "dosonly.inc"` idiom
+   must not fail just because dosonly.inc doesn't exist on this build),
+   so the skip check runs BEFORE any Files.Reset. *)
+PROCEDURE DoInclude;
+  VAR path: ARRAY 128 OF CHAR; i: INTEGER;
+BEGIN
+  (* TryPercentDirective's caller already advanced past the "INCLUDE"
+     keyword itself (its own RawTokNext, right after matching kw) before
+     dispatching here -- the current token IS the filename operand
+     already; do not consume another token first. *)
+  IF tSym # Scan.TString THEN Fail("expected filename string after %include"); RETURN END;
+  (* paper cut fix: Strings.Copy truncates silently when tSval (up to
+     Scan.MaxStr-1 = 255 chars) doesn't fit path (128) -- without this
+     guard, a >127-char include path failed downstream with a confusing
+     "cannot open include file" naming the TRUNCATED path. *)
+  IF Strings.Length(tSval) >= LEN(path) THEN Fail("%include path too long"); RETURN END;
+  Strings.Copy(tSval, path);
+  RawTokNext;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after %include filename"); RETURN
+  END;
+  IF CurrentlySkipping() THEN RETURN END;
+  IF srcTop = MaxSrcDepth - 1 THEN Fail("%include nested too deep"); RETURN END;
+  (* cycle check: compare against every FILE entry currently on the
+     stack, case-insensitively (DOS paths are case-insensitive) -- a
+     %include cycle would otherwise recurse until MaxSrcDepth's fatal
+     error fires anyway, but with a confusing "nested too deep" message
+     instead of naming the actual problem. *)
+  i := 0;
+  WHILE i <= srcTop DO
+    IF stk[i].isFile & Strings.EqualICase(stk[i].scn.fname, path) THEN
+      Fail("recursive %include"); RETURN
+    END;
+    INC(i)
+  END;
+  INC(srcTop);
+  stk[srcTop].isFile := TRUE; stk[srcTop].isDefine := FALSE;
+  IF ~Files.Reset(stk[srcTop].f, path) THEN
+    DEC(srcTop); Fail("cannot open include file"); RETURN
+  END;
+  Scan.Init(stk[srcTop].scn, stk[srcTop].f, path)
+END DoInclude;
+
+VAR
+  inMacroDef: BOOLEAN;   (* §I.4: TRUE while DoMacroRecord is capturing a
+                             %macro...%endmacro body -- guards against a
+                             nested %macro, which this design does not
+                             support (Out of scope v1, TASM.MD §I.4). *)
+
+(* IsEndmacroLine: TRUE if the raw line text (buf[0..n)) is, once leading
+   blanks are skipped, the bare directive "%endmacro" (case-insensitive,
+   matching every other directive keyword in this module) and nothing
+   else but trailing blanks. Deliberately simple string scanning, not a
+   real tokenize -- this is the one line DoMacroRecord's raw-capture loop
+   must recognize without disturbing the byte-exact capture of every
+   OTHER line. *)
+PROCEDURE IsEndmacroLine(buf: ARRAY OF CHAR; n: INTEGER): BOOLEAN;
+  VAR i, j: INTEGER; word: ARRAY 16 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  j := 0;
+  WHILE (i < n) & (j < LEN(word) - 1) & (buf[i] # " ") & (ORD(buf[i]) # 9) DO
+    word[j] := SYSTEM.UCASE(buf[i]); INC(i); INC(j)
+  END;
+  word[j] := 0X;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  (* N5 fix: "%endmacro ; note" was captured as body text instead of being
+     recognized, since this required EXACTLY blanks-then-EOL after the
+     keyword -- a trailing comment-to-EOL is valid NASM source and must be
+     accepted the same way IsMacroLine's own trailing-content tolerance
+     already treats non-blank content after "%macro" as fine. *)
+  RETURN ((i = n) OR (buf[i] = ";")) & Strings.Equal(word, "%ENDMACRO")
+END IsEndmacroLine;
+
+(* IsMacroLine: TRUE if the raw line text starts (after leading blanks)
+   with "%macro" as a whole word -- used by DoMacroRecord's raw-capture
+   loop to detect and reject a NESTED %macro while still inside another
+   one. Without this check, a nested %macro's header line would simply
+   be captured as ordinary body text (indistinguishable from any other
+   line) and the raw-capture loop would stop at whichever %endmacro it
+   sees FIRST -- silently mis-scoping the outer macro's body instead of
+   reporting "nested %macro not supported" the way the header comment
+   promises. Only checks the word, not trailing content, since a
+   %macro line always has more tokens after the keyword (name,
+   nparams) that this raw check does not need to validate -- DoMacroRecord's
+   fatal path fires before any of that would matter. *)
+PROCEDURE IsMacroLine(buf: ARRAY OF CHAR; n: INTEGER): BOOLEAN;
+  VAR i, j: INTEGER; word: ARRAY 16 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  j := 0;
+  WHILE (i < n) & (j < LEN(word) - 1) & (buf[i] # " ") & (ORD(buf[i]) # 9) DO
+    word[j] := SYSTEM.UCASE(buf[i]); INC(i); INC(j)
+  END;
+  word[j] := 0X;
+  RETURN Strings.Equal(word, "%MACRO")
+END IsMacroLine;
+
+(* DoMacroRecord: %macro NAME NPARAMS ... %endmacro -- §I.4. Reads the
+   header via the normal tokenizer (RawTokNext, uppercased name, exactly
+   %define's own convention), then switches to RAW LINE capture
+   (Scan.ReadRawLine) for the body: re-tokenizing and re-serializing the
+   body via TokToText would reopen the B5 lossy-serializer trap this
+   design explicitly avoids -- a macro body's strings/comments/spacing
+   must survive byte-for-byte. Skipped (consumed, not stored) inside a
+   false %ifdef branch, mirroring %define's own skip semantics -- the
+   raw lines are still read (to keep the scanner in sync and to still
+   detect %endmacro/EOF correctly) but never appended to the staging
+   buffer nor recorded into Sym. *)
+PROCEDURE DoMacroRecord;
+  VAR name: ARRAY Sym.MaxName OF CHAR; nParams: INTEGER;
+      lineBuf: ARRAY 512 OF CHAR;
+      total, lineLen: INTEGER; eof, overLong, done, skipping: BOOLEAN;
+      body: Scan.MemText;
+BEGIN
+  IF inMacroDef THEN Fail("nested %macro not supported"); RETURN END;
+  IF tSym # Scan.TIdent THEN Fail("expected macro name after %macro"); RETURN END;
+  Strings.Copy(tId, name); RawTokNext;
+  IF tSym # Scan.TInt THEN Fail("expected parameter count after %macro name"); RETURN END;
+  IF (tIval < 0) OR (tIval > 9) THEN Fail("%macro parameter count must be 0..9"); RETURN END;
+  nParams := INTEGER(tIval);
+  RawTokNext;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after %macro header"); RETURN
+  END;
+  skipping := CurrentlySkipping();
+  inMacroDef := TRUE;
+  total := 0; done := FALSE;
+  WHILE ~done DO
+    (* Raw capture stays anchored to stk[srcTop] -- the file/include
+       currently supplying source at the point %macro appeared; a
+       %macro body can span physical lines of that same source but
+       never crosses an include boundary (the design does not support
+       a %macro spanning into/out of a %include). *)
+    Scan.ReadRawLine(stk[srcTop].scn, lineBuf, lineLen, eof, overLong);
+    IF IsEndmacroLine(lineBuf, lineLen) THEN
+      done := TRUE
+    ELSIF IsMacroLine(lineBuf, lineLen) THEN
+      (* without this check, a nested %macro's header would just be
+         captured as body text and the outer capture would stop at
+         whichever %endmacro comes first -- silently mis-scoping the
+         outer body instead of rejecting the nesting outright. *)
+      Fail("nested %macro not supported"); inMacroDef := FALSE; RETURN
+    ELSIF eof THEN
+      Fail("missing %endmacro"); inMacroDef := FALSE; RETURN
+    (* N7 fix: a macro-body line longer than LEN(lineBuf) used to be
+       captured silently truncated -- reject it loudly instead. *)
+    ELSIF overLong THEN
+      Fail("macro body line too long"); inMacroDef := FALSE; RETURN
+    ELSE
+      IF ~skipping THEN
+        (* +1 for the LF this loop re-inserts between captured lines
+           (ReadRawLine strips it), +1 for the final NUL added once the
+           whole body is staged. *)
+        IF total + lineLen + 2 >= LEN(macroBodyBuf) THEN
+          Fail("macro body too long"); inMacroDef := FALSE; RETURN
+        END;
+        IF lineLen > 0 THEN SYSTEM.MOVE(lineBuf[0], macroBodyBuf[total], lineLen) END;
+        INC(total, lineLen);
+        macroBodyBuf[total] := CHR(10); INC(total)   (* re-insert the LF *)
+      END
+    END
+  END;
+  inMacroDef := FALSE;
+  IF skipping THEN RETURN END;
+  macroBodyBuf[total] := 0X;
+  (* MemText is a fixed-size (Scan.MaxMemText) heap pointer to a one-
+     field RECORD wrapping the buffer -- see Scan.MemText's own comment
+     for why (a compiler VAR-parameter type-compatibility gap for bare
+     POINTER-TO-ARRAY across three modules). NEW takes no size argument. *)
+  NEW(body);
+  IF body = NIL THEN Fail("out of memory (macro body)"); RETURN END;
+  SYSTEM.MOVE(macroBodyBuf[0], body^.buf[0], total);
+  body^.buf[total] := 0X;
+  Sym.DefineMacro(name, nParams, body)
+END DoMacroRecord;
 
 (* DoTimes: TIMES n DB/DW val -- since every TIMES in both oracle files is
    `times N db 0` (a single repeated byte), this handles exactly
@@ -694,12 +1091,25 @@ BEGIN
   Strings.Copy(tId, kw); TokNext;
   IF Strings.Equal(kw, "DB") THEN
     ParseOperand(op, Enc.SzByte);
-    IF op.kind # Enc.OKImm THEN Fail("TIMES DB requires a constant value"); RETURN END;
+    IF (op.kind # Enc.OKImm) OR op.hasLabel THEN
+      (* BUG B2: a label reference (kind=OKImm, hasLabel=TRUE) passed this
+         check when it only tested `kind`, then EmitDataByte(BYTE(op.disp))
+         silently wrote a run of 0-bytes with no reloc at all -- TIMES has
+         no per-iteration reloc-emission path, so a repeated label value is
+         not supported at all (Simplicity First), not merely a constant. *)
+      Fail("TIMES DB requires a constant value"); RETURN
+    END;
     i := LONGINT(0);
     WHILE i < count DO EmitDataByte(BYTE(op.disp)); i := i + LONGINT(1) END
   ELSIF Strings.Equal(kw, "DW") THEN
     ParseOperand(op, Enc.SzWord);
-    IF op.kind # Enc.OKImm THEN Fail("TIMES DW requires a constant value"); RETURN END;
+    IF (op.kind # Enc.OKImm) OR op.hasLabel THEN
+      Fail("TIMES DW requires a constant value"); RETURN
+    END;
+    (* N4 fix: same word-range guard as EmitDataWordMaybeLabel. *)
+    IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+      Fail("word value out of range"); RETURN
+    END;
     i := LONGINT(0);
     WHILE i < count DO EmitDataWord(INTEGER(op.disp)); i := i + LONGINT(1) END
   ELSE
@@ -719,8 +1129,53 @@ END DoTimes;
    RESB/RESW/RESD in .text/.data would silently do nothing useful (no
    bytes end up in the segment stream either way), so it's rejected as a
    fatal error instead of a silent no-op. *)
+(* ParseResTerm: one signed integer literal -- the leaf of the count
+   expression grammar below. *)
+PROCEDURE ParseResTerm(VAR v: LONGINT);
+  VAR neg: BOOLEAN;
+BEGIN
+  neg := FALSE;
+  IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
+  IF tSym # Scan.TInt THEN Fail("expected count after RESB/RESW/RESD"); RETURN END;
+  v := tIval; IF neg THEN v := -v END;
+  TokNext
+END ParseResTerm;
+
+(* ParseResMulDiv: left-to-right chain of '*'/'/' over integer terms,
+   e.g. "32*1024/16". *)
+PROCEDURE ParseResMulDiv(VAR v: LONGINT);
+  VAR rhs: LONGINT;
+BEGIN
+  ParseResTerm(v);
+  WHILE (tSym = Scan.TStar) OR (tSym = Scan.TSlash) DO
+    IF tSym = Scan.TStar THEN
+      TokNext; ParseResTerm(rhs); v := v * rhs
+    ELSE
+      TokNext; ParseResTerm(rhs);
+      IF rhs = LONGINT(0) THEN Fail("division by zero in RESB/RESW/RESD count"); RETURN END;
+      v := v DIV rhs
+    END
+  END
+END ParseResMulDiv;
+
+(* ParseResExpr: left-to-right chain of '+'/'-' over ParseResMulDiv terms,
+   e.g. "32*1024/16+1" -- the full count-operand grammar RESB/RESW/RESD
+   accept (bare integers, optionally combined with +, -, *, / at NASM's
+   usual precedence -- no parens, matching Simplicity First: this dialect
+   only needs to size .bss buffers from simple constant arithmetic). *)
+PROCEDURE ParseResExpr(VAR v: LONGINT);
+  VAR rhs: LONGINT; isPlus: BOOLEAN;
+BEGIN
+  ParseResMulDiv(v);
+  WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+    isPlus := (tSym = Scan.TPlus); TokNext;
+    ParseResMulDiv(rhs);
+    IF isPlus THEN v := v + rhs ELSE v := v - rhs END
+  END
+END ParseResExpr;
+
 PROCEDURE ParseTopLevelRes(d: INTEGER);
-  VAR szBytes, count: LONGINT; neg: BOOLEAN;
+  VAR szBytes, count: LONGINT;
 BEGIN
   IF curSeg # Sym.SegBss THEN
     Fail("RESB/RESW/RESD only valid in SECTION .bss"); RETURN
@@ -729,11 +1184,10 @@ BEGIN
   ELSIF d = Lex.DResw THEN szBytes := LONGINT(2)
   ELSE szBytes := LONGINT(4)
   END;
-  neg := FALSE;
-  IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
-  IF tSym # Scan.TInt THEN Fail("expected count after RESB/RESW/RESD"); RETURN END;
-  count := tIval; IF neg THEN count := -count END;
-  TokNext;
+  ParseResExpr(count);
+  (* C6 fix: a negative count silently SHRINKS bssOfs (later labels then
+     overlap earlier reservations) instead of erroring. *)
+  IF count < LONGINT(0) THEN Fail("RESB/RESW/RESD count must not be negative"); RETURN END;
   bssOfs := bssOfs + szBytes * count
 END ParseTopLevelRes;
 
@@ -743,7 +1197,9 @@ END ParseTopLevelRes;
 PROCEDURE TryDirective(kw: ARRAY OF CHAR): BOOLEAN;
   VAR strucName: ARRAY Sym.MaxName OF CHAR;
       more: BOOLEAN; d: INTEGER;
+      fn: ARRAY 128 OF CHAR;
 BEGIN
+  CurFname(fn);
   d := Lex.LookupDirective(kw);
   CASE d OF
     Lex.DBits, Lex.DCpu:
@@ -788,11 +1244,11 @@ BEGIN
       IF tSym # Scan.TIdent THEN Fail("expected struct name after STRUC")
       ELSE
         Strings.Copy(tIdOrig, strucName);
-        Dir.BeginStruc(strucName, fname, tLine);
+        Dir.BeginStruc(strucName, fn, tLine);
         TokNext
       END
   | Lex.DEndstruc:
-      Dir.EndStruc(fname, tLine)
+      Dir.EndStruc(fn, tLine)
   | Lex.DDb:
       ParseDbList
   | Lex.DDw:
@@ -808,6 +1264,50 @@ BEGIN
   RETURN TRUE
 END TryDirective;
 
+(* TokToText: append the CURRENT token's text representation to val,
+   followed by one separator space -- the ONE shared token->text
+   serializer (B5/E3 lesson: this used to be duplicated once for
+   %define bodies and would have been duplicated again for %macro
+   actual-parameter capture; now both call this). Returns FALSE (with
+   Fail already called) on a token this serializer cannot represent, or
+   on growth that would truncate val. *)
+PROCEDURE TokToText(VAR val: ARRAY OF CHAR; whatBody: ARRAY OF CHAR): BOOLEAN;
+  VAR msg: ARRAY 96 OF CHAR;
+BEGIN
+  IF tSym = Scan.TIdent THEN Strings.Append(tIdOrig, val)
+  ELSIF tSym = Scan.TInt THEN Strings.AppendInt(tIval, val)
+  ELSIF tSym = Scan.TColon THEN Strings.Append(":", val)
+  ELSIF tSym = Scan.TLbrak THEN Strings.Append("[", val)
+  ELSIF tSym = Scan.TRbrak THEN Strings.Append("]", val)
+  ELSIF tSym = Scan.TPlus THEN Strings.Append("+", val)
+  ELSIF tSym = Scan.TMinus THEN Strings.Append("-", val)
+  ELSIF tSym = Scan.TComma THEN Strings.Append(",", val)
+  ELSIF tSym = Scan.TStar THEN Strings.Append("*", val)
+  ELSIF tSym = Scan.TSlash THEN Strings.Append("/", val)
+  ELSE
+    (* BUG B5: every other token (string literals, '(' ')' '.' '%',
+       TError) was silently swallowed here -- only the separator space
+       got appended, so e.g. "%define SZ 4*2" (before the TStar/TSlash
+       cases above existed) stored "4 2 ", which a later use then
+       mis-parses or re-triggers BUG A2's stray-token hang, with no
+       diagnostic pointing at the %define line itself. *)
+    Strings.Copy("unsupported token in ", msg); Strings.Append(whatBody, msg);
+    Fail(msg); RETURN FALSE
+  END;
+  (* val's buffer size varies by caller (128 for %define, up to the
+     shared macro-arg staging size); Strings.Append truncates silently
+     past LEN(val) -- reject growth that would truncate rather than
+     storing a partial body with no diagnostic. R4 fix: check the
+     ACTUAL length already written, not a compile-time array bound that
+     doesn't match the token's real text length. *)
+  IF Strings.Length(val) >= LEN(val) - 1 THEN
+    Strings.Copy(whatBody, msg); Strings.Append(" too long", msg);
+    Fail(msg); RETURN FALSE
+  END;
+  Strings.Append(" ", val);
+  RETURN TRUE
+END TokToText;
+
 (* ---- %-preprocessor line dispatch (a leading '%' token; consumes the
    directive keyword itself since Scan yields TPercent as a separate
    token from the following identifier). ---- *)
@@ -822,23 +1322,14 @@ BEGIN
     Strings.Copy(tId, name); RawTokNext;
     val[0] := 0X;
     WHILE (tSym # Scan.TEol) & (tSym # Scan.TEof) DO
-      IF tSym = Scan.TIdent THEN Strings.Append(tIdOrig, val)
-      ELSIF tSym = Scan.TInt THEN Strings.AppendInt(tIval, val)
-      ELSIF tSym = Scan.TColon THEN Strings.Append(":", val)
-      ELSIF tSym = Scan.TLbrak THEN Strings.Append("[", val)
-      ELSIF tSym = Scan.TRbrak THEN Strings.Append("]", val)
-      ELSIF tSym = Scan.TPlus THEN Strings.Append("+", val)
-      ELSIF tSym = Scan.TMinus THEN Strings.Append("-", val)
-      ELSIF tSym = Scan.TComma THEN Strings.Append(",", val)
-      END;
-      Strings.Append(" ", val);
+      IF ~TokToText(val, "%define body") THEN RETURN TRUE END;
       RawTokNext
     END;
     (* %define/%undef must NOT take effect when the current %ifdef/%else
        branch is being skipped -- unlike %ifdef/%else/%endif themselves
        (which must always run to track nesting), a %define inside a false
        branch is dead code and must not overwrite an outer definition.
-       Verified against SYS.RDF: "%else / %define RSIZE 2 / %endif" (the
+       Verified against SYSTEM.RDF: "%else / %define RSIZE 2 / %endif" (the
        untaken branch, since IS_FAR is defined) was clobbering RSIZE's
        real value of 4 with 2, corrupting every later [bp+RSIZE+n]
        reference -- the tokens must still be consumed above (to keep the
@@ -849,6 +1340,13 @@ BEGIN
     IF tSym # Scan.TIdent THEN Fail("expected name after %undef"); RETURN TRUE END;
     IF ~CurrentlySkipping() THEN Sym.Undef(tId) END;
     RawTokNext;
+    (* paper cut fix: mirror %include's own trailing-EOL check -- trailing
+       junk after the name used to be silently mis-parsed as a new
+       statement ("unknown directive or mnemonic") instead of naming the
+       real problem. *)
+    IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+      Fail("unexpected text after %undef name"); RETURN TRUE
+    END;
     RETURN TRUE
   ELSIF Strings.Equal(kw, "IFDEF") THEN
     DoIfdef; RETURN TRUE
@@ -856,6 +1354,15 @@ BEGIN
     DoElse; RETURN TRUE
   ELSIF Strings.Equal(kw, "ENDIF") THEN
     DoEndif; RETURN TRUE
+  ELSIF Strings.Equal(kw, "INCLUDE") THEN
+    DoInclude; RETURN TRUE
+  ELSIF Strings.Equal(kw, "MACRO") THEN
+    DoMacroRecord; RETURN TRUE
+  ELSIF Strings.Equal(kw, "ENDMACRO") THEN
+    (* %endmacro is only ever consumed internally by DoMacroRecord's raw-
+       line scan (IsEndmacroLine) -- reaching this dispatch means it
+       appeared with no matching %macro at all. *)
+    Fail("%endmacro without %macro"); RETURN TRUE
   ELSE
     Fail("unknown % directive"); RETURN TRUE
   END
@@ -882,6 +1389,7 @@ END IsDataDirectiveNext;
    leading token on this same source line. *)
 PROCEDURE ParseInstruction(mnemId: INTEGER; prefixByte: BYTE);
   VAR ops: ARRAY Enc.MaxOperands OF Enc.Operand; n: INTEGER; more: BOOLEAN;
+      fn: ARRAY 128 OF CHAR;
 BEGIN
   n := 0; more := (tSym # Scan.TEol) & (tSym # Scan.TEof);
   WHILE more & (n < Enc.MaxOperands) DO
@@ -889,7 +1397,9 @@ BEGIN
     INC(n);
     IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
   END;
-  Enc.SetContext(fname, tLine, curPass, codeOfs);
+  IF more THEN Fail("too many operands"); RETURN END;
+  CurFname(fn);
+  Enc.SetContext(fn, tLine, curPass, codeOfs);
   Enc.Encode(mnemId, ops, n, prefixByte);
   codeOfs := codeOfs + Enc.Emitted();
   IF Enc.Failed() THEN anyErr := TRUE END
@@ -903,9 +1413,263 @@ END ParseInstruction;
    line).  Inside a STRUC..ENDSTRUC block, every non-empty line is a field
    declaration (".field RESB/RESW/RESD n") handled by ParseStrucField
    instead -- STRUC field names are never colon-terminated labels. *)
+(* ParseStrucLine: job 3 of ParseLine's original five (E5 fix) -- handles
+   one source line while inside a STRUC/ENDSTRUC block, where every line
+   is either a ".field RESB/RESW/RESD n" declaration or the closing
+   ENDSTRUC keyword; ordinary label/mnemonic dispatch does not apply. *)
+PROCEDURE ParseStrucLine;
+  VAR nameOrig: ARRAY Scan.MaxIdent OF CHAR; fn: ARRAY 128 OF CHAR;
+BEGIN
+  (* Field names are written ".fieldname" (e.g. "._AX resw 1"); Scan now
+     always yields a standalone TDot before the identifier (see SCAN.MOD's
+     Next -- the dot is never merged into the following identifier). *)
+  IF tSym = Scan.TDot THEN
+    TokNext;
+    IF tSym # Scan.TIdent THEN Fail("expected field name after '.'"); RETURN END;
+    (* Field key reconstruction in Dir.TryResolveField is
+       "structName + '.' + field" -- store the field name WITHOUT the
+       leading dot (the dot that introduced it in source, ".field", is
+       punctuation, not part of the name) so a later "STRUCT.field"
+       lookup (also structName + "." + field, no double dot) matches. *)
+    Strings.Copy(tIdOrig, nameOrig); TokNext;
+    ParseStrucField(nameOrig)
+  ELSIF tSym = Scan.TIdent THEN
+    IF Lex.LookupDirective(tId) = Lex.DEndstruc THEN
+      TokNext; CurFname(fn); Dir.EndStruc(fn, tLine)
+    ELSE
+      Strings.Copy(tIdOrig, nameOrig); TokNext;
+      ParseStrucField(nameOrig)
+    END
+  ELSE
+    Fail("expected field name in STRUC")
+  END
+END ParseStrucLine;
+
+(* AppendChecked: Strings.Append silently truncates past dst's buffer --
+   this wraps it with the explicit overflow check §I.0's "no silent
+   truncation" rule requires (same shape as TokToText's own guard).
+   Returns FALSE (with Fail already called) if s would not fit. *)
+PROCEDURE AppendChecked(s: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR; errMsg: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  IF Strings.Length(dst) + Strings.Length(s) >= LEN(dst) THEN
+    Fail(errMsg); RETURN FALSE
+  END;
+  Strings.Append(s, dst);
+  RETURN TRUE
+END AppendChecked;
+
+(* InvokeMacro: §I.4 -- expand a %macro invocation. name is already
+   uppercased and confirmed to be a known macro by the caller.
+   1. Parse actuals: comma-separated raw token runs up to EOL, each
+      re-serialized to text via the shared TokToText (same serializer
+      %define bodies use -- B5/E3 lesson: one copy, not two divergent
+      ones). Count mismatch vs the macro's own nParams is fatal.
+   2. Build the expansion: copy the body, replacing %n (n=1..9, n<=
+      nParams) with the argument text, and %%ident with ?Mk?ident (k =
+      a per-invocation counter that advances identically in both passes
+      -- see macroLocalCounter's own comment). Uses Strings.Pos (single-
+      char pattern "%", dispatches to SYSTEM.FINDBYTE internally) to
+      find each substitution site and Strings.Extract to pull out the
+      literal run before it, rather than a manual char-by-char scan.
+   3. Push the expansion as a memory source on the I.3 stack
+      (isFile=FALSE, Scan.InitMem) and return -- ParseLine's caller
+      continues the parse loop, so the macro's first expanded line is
+      simply the next token read. *)
+PROCEDURE InvokeMacro(name: ARRAY OF CHAR);
+  VAR nParams: INTEGER; body: Scan.MemText;
+      args: ARRAY 9 OF ARRAY 128 OF CHAR;
+      nArgs: INTEGER;
+      expBuf: ARRAY 4096 OF CHAR;
+      literalBuf: ARRAY 128 OF CHAR;
+      localTag: ARRAY 16 OF CHAR;
+      expansion: Scan.MemText;
+      fn: ARRAY 128 OF CHAR;
+      bodyLen, runStart, argNum: INTEGER;
+      pctPos: WORD;
+      afterPct: CHAR;
+      more: BOOLEAN;
+BEGIN
+  IF ~Sym.GetMacro(name, nParams, body) THEN RETURN END;   (* caller already checked IsMacro *)
+  nArgs := 0;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    args[0][0] := 0X;
+    IF nParams = 0 THEN Fail("macro argument count mismatch"); RETURN END;
+    WHILE (tSym # Scan.TEol) & (tSym # Scan.TEof) & (tSym # Scan.TComma) DO
+      IF ~TokToText(args[nArgs], "macro argument") THEN RETURN END;
+      TokNext
+    END;
+    INC(nArgs);
+    WHILE tSym = Scan.TComma DO
+      TokNext;
+      IF nArgs >= LEN(args) THEN Fail("too many macro arguments"); RETURN END;
+      args[nArgs][0] := 0X;
+      WHILE (tSym # Scan.TEol) & (tSym # Scan.TEof) & (tSym # Scan.TComma) DO
+        IF ~TokToText(args[nArgs], "macro argument") THEN RETURN END;
+        TokNext
+      END;
+      INC(nArgs)
+    END
+  END;
+  IF nArgs # nParams THEN Fail("macro argument count mismatch"); RETURN END;
+
+  Strings.Copy("?M", localTag);
+  Strings.AppendInt(macroLocalCounter, localTag);
+  Strings.Append("?", localTag);
+  INC(macroLocalCounter);
+
+  (* Body-scan: Strings.Pos's `pos` parameter is both the search-start
+     offset (input) and the match offset (output, on success) -- set it
+     to runStart before each call, which is exactly the "search forward
+     from here" semantics this loop needs. Each iteration: find the next
+     '%' at or after runStart, Extract the literal run strictly before
+     it and append that run verbatim, then classify the ONE character
+     after '%' -- a digit 1-9 is a %n parameter substitution, a second
+     '%' is a %%local substitution; runStart advances past the 2-char
+     sequence either way. Once no more '%' is found, the final literal
+     tail (including a trailing lone '%' with nothing useful after it,
+     copied through as-is) is appended and the loop ends. *)
+  bodyLen := Strings.Length(body^.buf);
+  expBuf[0] := 0X;
+  runStart := 0;
+  more := TRUE;
+  WHILE more DO
+    pctPos := WORD(runStart);
+    IF ~Strings.Pos("%", body^.buf, pctPos) THEN
+      Strings.Extract(body^.buf, runStart, bodyLen - runStart, literalBuf);
+      IF ~AppendChecked(literalBuf, expBuf, "macro expansion too long") THEN RETURN END;
+      more := FALSE
+    ELSE
+      Strings.Extract(body^.buf, runStart, INTEGER(pctPos) - runStart, literalBuf);
+      IF ~AppendChecked(literalBuf, expBuf, "macro expansion too long") THEN RETURN END;
+      IF INTEGER(pctPos) + 1 >= bodyLen THEN
+        (* trailing lone '%' at the very end of the body -- copy it
+           through literally rather than reading a nonexistent next
+           char. *)
+        IF ~AppendChecked("%", expBuf, "macro expansion too long") THEN RETURN END;
+        more := FALSE
+      ELSE
+        Strings.Extract(body^.buf, INTEGER(pctPos) + 1, 1, literalBuf);
+        afterPct := literalBuf[0];
+        IF (afterPct >= "1") & (afterPct <= "9") THEN
+          argNum := ORD(afterPct) - ORD("0");
+          IF argNum > nParams THEN Fail("macro parameter %n beyond nParams"); RETURN END;
+          IF ~AppendChecked(args[argNum-1], expBuf, "macro expansion too long") THEN RETURN END;
+          runStart := INTEGER(pctPos) + 2
+        ELSIF afterPct = "%" THEN
+          IF ~AppendChecked(localTag, expBuf, "macro expansion too long") THEN RETURN END;
+          runStart := INTEGER(pctPos) + 2
+        ELSE
+          (* '%' followed by something not 1-9 or '%' -- not a
+             recognized substitution in this body; copy the '%' through
+             literally and resume scanning right after it (matches how
+             an ordinary '%' inside macro body TEXT, as opposed to a
+             %define/%macro line, is just a character here -- macro
+             bodies are raw captured text, never re-run through the
+             %-directive dispatcher). *)
+          IF ~AppendChecked("%", expBuf, "macro expansion too long") THEN RETURN END;
+          runStart := INTEGER(pctPos) + 1
+        END
+      END
+    END
+  END;
+
+  IF srcTop = MaxSrcDepth - 1 THEN Fail("macro expansion nested too deep"); RETURN END;
+  NEW(expansion);
+  IF expansion = NIL THEN Fail("out of memory (macro expansion)"); RETURN END;
+  SYSTEM.MOVE(expBuf[0], expansion^.buf[0], Strings.Length(expBuf));
+  expansion^.buf[Strings.Length(expBuf)] := 0X;
+  (* CurFname BEFORE the push -- same ordering fix as TokNext's %define
+     push: after INC(srcTop) it reads the new slot's stale/blank fname,
+     which made every diagnostic inside a macro body report an empty
+     filename (this was also the real cause of the "blank filename at
+     the depth-cap edge" gap documented after the §I.4 pass). *)
+  CurFname(fn);
+  INC(srcTop);
+  stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := FALSE;
+  Scan.InitMem(stk[srcTop].scn, expansion, fn, tLine)
+END InvokeMacro;
+
+(* ParseStatement: job 5 of ParseLine's original five (E5 fix) -- the
+   actual statement dispatch once the label-consuming loop in ParseLine
+   has determined `name`/`nameOrig`/`mnemId` (the first non-label token on
+   the line, already consumed, token stream positioned just past it) is
+   NOT itself a colon-terminated label. Handles LOCK/REP* and segment-
+   override leading prefixes, the colon-less-label-before-DB/DW/TIMES
+   form, and plain directive/mnemonic dispatch. Always returns to
+   ParseLine's caller (every path here consumes the rest of the
+   statement); extracted verbatim from ParseLine's final ELSIF chain --
+   no control-flow change, just named and separated from the label loop
+   it used to share a body with. *)
+PROCEDURE ParseStatement(name, nameOrig: ARRAY OF CHAR; mnemId: INTEGER);
+  VAR prefixId: INTEGER;
+BEGIN
+  IF (mnemId = Lex.LNone) & IsDataDirectiveNext() THEN
+    (* NASM allows a colon-less label immediately followed by a data
+       directive on the same line, e.g. "MemStartSeg  dw 0" -- `name`
+       (already consumed) is that implicit label; `tSym` is now
+       positioned at DB/DW/TIMES itself. Only recognized for the data-
+       directive keywords (not general directives/mnemonics), matching
+       the one real occurrence in SYSTEM.ASM/EMS.ASM -- a colon-less
+       label before an instruction or SECTION/GLOBAL/etc. does not occur
+       in either oracle file, so is intentionally not supported
+       (Simplicity First). *)
+    DefineCurLabel(nameOrig);
+    Strings.Copy(tId, name); TokNext;
+    IF ~TryDirective(name) THEN Fail("unknown directive or mnemonic") END
+  ELSIF Lex.IsPrefixMnem(mnemId) THEN
+    (* LOCK/REP* leading token: not a label, not itself an instruction --
+       stash its prefix byte and re-read the NEXT identifier as the real
+       mnemonic (e.g. "rep movsb"; label-before-prefix, "L: rep movsb",
+       is handled naturally since ParseStatement is only reached after
+       the label-consuming iterations in ParseLine already ran). *)
+    prefixId := mnemId;
+    IF tSym # Scan.TIdent THEN
+      Fail("expected instruction mnemonic after LOCK/REP prefix"); RETURN
+    END;
+    Strings.Copy(tId, name); TokNext;
+    mnemId := Lex.LookupMnem(name);
+    IF mnemId = Lex.LNone THEN
+      Fail("unknown mnemonic after LOCK/REP prefix"); RETURN
+    END;
+    ParseInstruction(mnemId, Enc.PrefixByteFor(prefixId))
+  ELSIF (mnemId = Lex.LNone) & IsSegRegPrefixNext(name) THEN
+    (* D fix: "es stosb"-style leading segment-register override -- same
+       shape as the LOCK/REP* prefix branch above, but the token is a
+       segment-register name (not a Lex.M* prefix id), only valid
+       directly before a string-op mnemonic (STOSB/MOVSB/... take no
+       explicit memory operand to carry a `[es:...]` override, so that's
+       the only way NASM lets one apply here). *)
+    IF tSym # Scan.TIdent THEN
+      Fail("expected string-op mnemonic after segment override"); RETURN
+    END;
+    prefixId := SegRegPrefixByteFor(name);
+    Strings.Copy(tId, name); TokNext;
+    mnemId := Lex.LookupMnem(name);
+    IF mnemId = Lex.LNone THEN
+      Fail("unknown mnemonic after segment override"); RETURN
+    END;
+    ParseInstruction(mnemId, BYTE(prefixId))
+  ELSE
+    (* not a label: `name` (already consumed, token stream positioned
+       just past it) is a directive keyword, an instruction mnemonic, or
+       (§I.4) a %macro invocation -- checked LAST, only once label
+       handling, TryDirective, and Lex.LookupMnem all miss, so a %macro
+       can never shadow a real mnemonic or directive. *)
+    IF TryDirective(name) THEN
+      (* handled *)
+    ELSIF mnemId # Lex.LNone THEN
+      ParseInstruction(mnemId, BYTE(0))
+    ELSIF Sym.IsMacro(name) THEN
+      InvokeMacro(name)
+    ELSE
+      Fail("unknown directive or mnemonic")
+    END
+  END
+END ParseStatement;
+
 PROCEDURE ParseLine;
   VAR name: ARRAY Scan.MaxIdent OF CHAR; nameOrig: ARRAY Scan.MaxIdent OF CHAR;
-      more: BOOLEAN; mnemId, prefixId: INTEGER;
+      more: BOOLEAN; mnemId: INTEGER;
 BEGIN
   IF tSym = Scan.TEol THEN RETURN END;
   IF tSym = Scan.TPercent THEN
@@ -913,34 +1677,12 @@ BEGIN
   END;
   IF CurrentlySkipping() THEN SkipToEol; RETURN END;
 
-  IF Dir.InStruc() THEN
-    (* Field names are written ".fieldname" (e.g. "._AX resw 1"); Scan now
-       always yields a standalone TDot before the identifier (see SCAN.MOD's
-       Next -- the dot is never merged into the following identifier). *)
-    IF tSym = Scan.TDot THEN
-      TokNext;
-      IF tSym # Scan.TIdent THEN Fail("expected field name after '.'"); RETURN END;
-      (* Field key reconstruction in Dir.TryResolveField is
-         "structName + '.' + field" -- store the field name WITHOUT the
-         leading dot (the dot that introduced it in source, ".field", is
-         punctuation, not part of the name) so a later "STRUCT.field"
-         lookup (also structName + "." + field, no double dot) matches. *)
-      Strings.Copy(tIdOrig, nameOrig); TokNext;
-      ParseStrucField(nameOrig)
-    ELSIF tSym = Scan.TIdent THEN
-      IF Lex.LookupDirective(tId) = Lex.DEndstruc THEN
-        TokNext; Dir.EndStruc(fname, tLine)
-      ELSE
-        Strings.Copy(tIdOrig, nameOrig); TokNext;
-        ParseStrucField(nameOrig)
-      END
-    ELSE
-      Fail("expected field name in STRUC")
-    END;
-    RETURN
-  END;
+  IF Dir.InStruc() THEN ParseStrucLine; RETURN END;
 
-  (* consume zero or more "IDENT :" or ".IDENT :" (local) labels *)
+  (* consume zero or more "IDENT :" or ".IDENT :" (local) labels, then
+     dispatch the statement itself via ParseStatement (E5 fix: this loop
+     is job 4, label-consuming, of ParseLine's original five; the
+     dispatch it used to inline is now ParseStatement, job 5). *)
   more := TRUE;
   WHILE more & ((tSym = Scan.TIdent) OR (tSym = Scan.TDot)) DO
     IF tSym = Scan.TDot THEN
@@ -956,50 +1698,9 @@ BEGIN
     IF tSym = Scan.TColon THEN
       TokNext;
       DefineCurLabel(nameOrig)
-    ELSIF (mnemId = Lex.LNone) & IsDataDirectiveNext() THEN
-      (* NASM allows a colon-less label immediately followed by a data
-         directive on the same line, e.g. "MemStartSeg  dw 0" -- `name`
-         (already consumed) is that implicit label; `tSym` is now
-         positioned at DB/DW/TIMES itself. Only recognized for the data-
-         directive keywords (not general directives/mnemonics), matching
-         the one real occurrence in SYS.ASM/EMS.ASM -- a colon-less
-         label before an instruction or SECTION/GLOBAL/etc. does not occur
-         in either oracle file, so is intentionally not supported
-         (Simplicity First). *)
-      more := FALSE;
-      DefineCurLabel(nameOrig);
-      Strings.Copy(tId, name); TokNext;
-      IF ~TryDirective(name) THEN Fail("unknown directive or mnemonic") END;
-      RETURN
-    ELSIF Lex.IsPrefixMnem(mnemId) THEN
-      (* LOCK/REP* leading token: not a label, not itself an instruction --
-         stash its prefix byte and re-read the NEXT identifier as the real
-         mnemonic (e.g. "rep movsb"; label-before-prefix, "L: rep movsb",
-         is handled naturally since this ELSIF is only reached after the
-         label-consuming iterations above already ran). *)
-      more := FALSE;
-      prefixId := mnemId;
-      IF tSym # Scan.TIdent THEN
-        Fail("expected instruction mnemonic after LOCK/REP prefix"); RETURN
-      END;
-      Strings.Copy(tId, name); TokNext;
-      mnemId := Lex.LookupMnem(name);
-      IF mnemId = Lex.LNone THEN
-        Fail("unknown mnemonic after LOCK/REP prefix"); RETURN
-      END;
-      ParseInstruction(mnemId, Enc.PrefixByteFor(prefixId));
-      RETURN
     ELSE
-      (* not a label: `name` (already consumed, token stream positioned
-         just past it) is a directive keyword or an instruction mnemonic. *)
       more := FALSE;
-      IF TryDirective(name) THEN
-        (* handled *)
-      ELSIF mnemId # Lex.LNone THEN
-        ParseInstruction(mnemId, BYTE(0))
-      ELSE
-        Fail("unknown directive or mnemonic")
-      END;
+      ParseStatement(name, nameOrig, mnemId);
       RETURN
     END
   END
@@ -1017,18 +1718,60 @@ END ParseLine;
    ORDER relative to label definitions matters for text substitution), so
    Sym's define-table is NOT reset either -- it simply accumulates the
    exact same Define/Undef calls again, which are idempotent. *)
-PROCEDURE RunPass(passNo: INTEGER; VAR f2: Files.File);
+(* CloseAllSources: close every open file on the stack (top level +
+   any still-pushed %include levels) and reset it to empty. Called on
+   every early-exit path out of Assemble/RunPass (§I.3's "files closed
+   on all paths" rule) and at the start of each RunPass (the stack from
+   the PREVIOUS pass, if any, must not leak into the next one). A
+   memory-source slot (isFile=FALSE, §I.4) has no file to close. *)
+PROCEDURE CloseAllSources;
+  VAR i: INTEGER;
 BEGIN
+  i := 0;
+  WHILE i <= srcTop DO
+    IF stk[i].isFile THEN Files.Close(stk[i].f)
+    ELSE DISPOSE(stk[i].scn.mem) END;   (* N1 fix: %macro expansion buffer *)
+    INC(i)
+  END;
+  srcTop := -1
+END CloseAllSources;
+
+(* RunPass: assemble the whole source tree once (one Pass), starting by
+   opening srcPath fresh as stk[0] -- %include (§I.3) pushes further
+   slots during the walk; RawTokNext pops back to the parent
+   transparently on each pushed slot's EOF, so this loop only ever sees
+   the outermost TEof once the WHOLE tree (not just the top-level file)
+   is exhausted. *)
+PROCEDURE RunPass(passNo: INTEGER; srcPath: ARRAY OF CHAR; VAR ok: BOOLEAN);
+  VAR beforeCount: LONGINT;
+BEGIN
+  ok := TRUE;
+  CloseAllSources;
+  srcTop := 0;
+  stk[0].isFile := TRUE; stk[0].isDefine := FALSE;
+  IF ~Files.Reset(stk[0].f, srcPath) THEN
+    LogErr.Error2("tasm: cannot open ", srcPath); srcTop := -1; ok := FALSE; RETURN
+  END;
+  Scan.Init(stk[0].scn, stk[0].f, srcPath);
   curPass := passNo;
-  Scan.Init(s, f2, fname);
   curSeg := Sym.SegCode;
   codeOfs := LONGINT(0); dataOfs := LONGINT(0); bssOfs := LONGINT(0);
-  mtop := -1; ifDepth := 0;
+  ifDepth := 0; tokCount := LONGINT(0); macroLocalCounter := LONGINT(0);
   IF passNo = 1 THEN Enc.ResetJmpDecisions ELSE Enc.ResetJmpReplay END;
   TokNext;
   WHILE (tSym # Scan.TEof) & ~LogErr.HaveErr() & ~anyErr DO
+    beforeCount := tokCount;
     ParseLine;
-    IF tSym = Scan.TEol THEN TokNext END
+    IF tSym = Scan.TEol THEN TokNext
+    ELSIF tokCount = beforeCount THEN
+      (* ParseLine consumed nothing and left a token that is neither TEol
+         nor TEof (BUG A2): a stray operator/number/bracket at the start of
+         a statement, or trailing junk ParseInstruction didn't consume --
+         without this, the loop re-enters ParseLine on the identical token
+         forever. *)
+      Fail("unexpected token at start of statement"); SkipToEol;
+      IF tSym = Scan.TEol THEN TokNext END
+    END
   END;
   (* EOF reached with an %ifdef still open: without this check, a missing
      %endif is a silent no-op -- everything inside the never-closed block
@@ -1039,7 +1782,8 @@ BEGIN
      it applies uniformly regardless of nesting depth. *)
   IF (tSym = Scan.TEof) & (ifDepth > 0) & ~LogErr.HaveErr() & ~anyErr THEN
     Fail("%ifdef without matching %endif")
-  END
+  END;
+  CloseAllSources
 END RunPass;
 
 (* EmitGlobal: Sym.GlobalVisitProc callback, invoked once per GLOBAL-marked
@@ -1062,33 +1806,44 @@ END EmitGlobal;
    every instruction and fixes every label's final offset) then Pass 2
    (emits real bytes + relocations into `outObj`, which the caller
    (TASM.MOD) must have already RdfInit'd).  Returns TRUE on success (no
-   LogErr errors latched during either pass). *)
+   LogErr errors latched during either pass).
+   NOT re-entrant / not safe to call twice concurrently for different
+   files (E10, code-smell audit): the scanner state, current token,
+   %ifdef nesting, current section, and code/data/bss offsets are all
+   module-level VARs in this module (and in Enc.MOD's mirrored pass/here/
+   jmp-decision state), reset at the top of each RunPass rather than
+   threaded through an explicit context record. Fine for TASM.MOD's own
+   one-file-per-process CLI driver; a future TOC-style batch driver that
+   wants to assemble multiple files in one process must call Assemble to
+   completion (or hold a lock) before starting the next one, not
+   interleave/parallelize calls. *)
 PROCEDURE Assemble*(srcPath: ARRAY OF CHAR; outObj: Rdoff.ObjFile): BOOLEAN;
-  VAR f1: Files.File;
+  VAR undefName: ARRAY Sym.MaxName OF CHAR; ok: BOOLEAN;
 BEGIN
-  Strings.Copy(srcPath, fname);
+  srcTop := -1;
   obj := outObj;
   Enc.SetObj(outObj);
   anyErr := FALSE;
   Sym.Init; Dir.Init;
+  ApplyPredefs;
 
-  IF ~Files.Reset(f1, srcPath) THEN
-    LogErr.Error2("tasm: cannot open ", srcPath); RETURN FALSE
-  END;
-  RunPass(1, f1);
-  Files.Close(f1);
-  IF anyErr OR LogErr.HaveErr() THEN Sym.Free; RETURN FALSE END;
+  RunPass(1, srcPath, ok);
+  IF ~ok THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
+  IF anyErr OR LogErr.HaveErr() THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
 
-  IF ~Files.Reset(f1, srcPath) THEN
-    LogErr.Error2("tasm: cannot reopen ", srcPath); Sym.Free; RETURN FALSE
+  IF Sym.CheckAllDefined(undefName) THEN
+    LogErr.Error2("tasm: undefined symbol ", undefName);
+    Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE
   END;
-  RunPass(2, f1);
-  Files.Close(f1);
-  IF anyErr OR LogErr.HaveErr() THEN Sym.Free; RETURN FALSE END;
+
+  RunPass(2, srcPath, ok);
+  IF ~ok THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
+  IF anyErr OR LogErr.HaveErr() THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
 
   IF bssOfs > LONGINT(0) THEN Rdoff.RdfSetBss(obj, bssOfs) END;
   Sym.EnumGlobals(EmitGlobal);
   Sym.Free;
+  Enc.FreeJmpDecisions;
   RETURN ~(anyErr OR LogErr.HaveErr())
 END Assemble;
 

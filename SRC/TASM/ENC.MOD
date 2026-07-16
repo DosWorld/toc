@@ -146,7 +146,12 @@ BEGIN
   END
 END AddReloc;
 
-PROCEDURE SegPrefixByte(seg: INTEGER): BYTE;
+(* SegPrefixByte: exported (D fix) so Parse.MOD can synthesize a leading
+   segment-override prefix byte for the "es stosb"-style form (a bare
+   segment-register token before a string op, distinct from the
+   `[es:...]` memory-operand override this procedure already serves via
+   EmitSegPrefix below). *)
+PROCEDURE SegPrefixByte*(seg: INTEGER): BYTE;
 BEGIN
   CASE seg OF
     SegES: RETURN BYTE(026H)
@@ -191,7 +196,7 @@ END ModRmByte;
    exactly one IMPORT record).  Pass-2 only (import IDs, like all other
    header records, are only meaningful once Rdoff is actually being
    written). *)
-PROCEDURE EnsureImportId(name: ARRAY OF CHAR): INTEGER;
+PROCEDURE EnsureImportId*(name: ARRAY OF CHAR): INTEGER;
   VAR id: INTEGER;
 BEGIN
   id := Sym.GetImportId(name);
@@ -211,6 +216,12 @@ BEGIN
          is 0 (no local offset to add in), and the RELOC's RSEG is the
          import ID (per DOCS/RDOFF2.MD §3.3 "RSEG >2 = Import ID"), not
          SegCode/SegData. *)
+      (* N4 residual fix: the +n addend of "extlabel+n" wraps mod 65536
+         in W's INTEGER truncation just like a plain word value -- guard
+         it with the same bounds as the non-label arm below. *)
+      IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+        Err("word value out of range"); W(0); RETURN
+      END;
       patchOfs := Rdoff.CodeLen(obj);
       W(INTEGER(op.disp));
       IF pass = 2 THEN
@@ -239,9 +250,16 @@ BEGIN
              WHOLE module's code/data section)
            so the addend already on disk before linking must be the
            target's own LOCAL offset within that section (lofs+op.disp),
-           not 0 -- verified against SYS.RDF, a real-NASM-built oracle,
+           not 0 -- verified against SYSTEM.RDF, a real-NASM-built oracle,
            which pre-fills exactly this value at every intra-module RELOC
-           site. *)
+           site.
+           N4 residual fix: that sum wraps mod 65536 in W's INTEGER
+           truncation just like a plain word value ("mov ax, tbl+70000"
+           silently became "mov ax, tbl+4464") -- same guard/bounds as
+           the non-label arm below. *)
+        IF (op.disp + lofs < LONGINT(-32768)) OR (op.disp + lofs > LONGINT(65535)) THEN
+          Err("word value out of range"); W(0); RETURN
+        END;
         W(INTEGER(op.disp + lofs))
       END;
       IF pass = 2 THEN
@@ -258,6 +276,11 @@ BEGIN
         END
       END
     END
+  ELSIF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+    (* N4 fix: same class of trap C5 closed for byte immediates -- W's
+       INTEGER(op.disp) truncation silently wraps any out-of-range word
+       value mod 65536 (e.g. "mov ax, 70000" -> "mov ax, 4464"). *)
+    Err("word value out of range"); W(0)
   ELSE
     W(INTEGER(op.disp))
   END
@@ -277,17 +300,28 @@ BEGIN
   IF mem.kind = OKReg THEN
     B(ModRmByte(3, regField, mem.reg)); RETURN
   END;
+  IF mem.kind # OKMem THEN
+    Err("register or memory operand required"); RETURN
+  END;
   (* OKMem *)
   IF mem.am = AmNone THEN
     B(ModRmByte(0, regField, AmDisp));
     EmitDisp16(mem);
     RETURN
   END;
-  IF mem.disp = 0 THEN
+  IF mem.hasLabel THEN
+    (* M1 fix: [label+reg] must always carry a disp16 RELOC (Mod=10),
+       even when the label's own constant offset happens to be 0 --
+       the mem.disp=0 branch below picks Mod=00 (no displacement byte
+       at all) purely from the numeric disp, which silently dropped the
+       label's relocation entirely for e.g. "[table+bx]" where table's
+       local disp is 0. A label reference is never "no displacement". *)
+    modv := 2
+  ELSIF mem.disp = 0 THEN
     (* [BP] with disp=0 must still encode disp8=0 (Mod=01): Mod=00,rm=110
        is reserved for the [disp16] direct-address form, not [BP]. *)
     IF mem.am = AmDisp THEN modv := 1 ELSE modv := 0 END
-  ELSIF (mem.disp >= -128) & (mem.disp <= 127) & ~mem.hasLabel THEN
+  ELSIF (mem.disp >= -128) & (mem.disp <= 127) THEN
     modv := 1
   ELSE
     modv := 2
@@ -308,6 +342,15 @@ CONST
 PROCEDURE EmitImm(VAR imm: Operand; wide: BOOLEAN);
 BEGIN
   IF wide THEN EmitDisp16(imm)
+  ELSIF imm.hasLabel THEN
+    (* a label's low byte is not a meaningful value and RDOFF2 has no
+       byte-sized relocation type -- BUG A6: silently emitted BYTE(0) with
+       no diagnostic and no reloc, dropping the reference entirely. *)
+    Err("label not allowed as byte immediate")
+  ELSIF (imm.disp < -128) OR (imm.disp > 255) THEN
+    (* C5 fix: BYTE(imm.disp) silently truncates any out-of-range value
+       (e.g. "mov al, 300") -- reject rather than wrap. *)
+    Err("byte immediate out of range (-128..255)")
   ELSE B(BYTE(imm.disp))
   END
 END EmitImm;
@@ -319,6 +362,9 @@ END EmitImm;
 PROCEDURE EncPushPopReg(opcodeBase: BYTE; VAR op: Operand);
 BEGIN
   IF op.kind = OKReg THEN
+    (* N2 fix: the 50+r/58+r short forms are WORD-only on 8086 -- "push al"
+       must not silently become "push ax" (there is no byte PUSH/POP). *)
+    IF op.size # SzWord THEN Err("operand size mismatch"); RETURN END;
     B(BYTE(INTEGER(opcodeBase) + op.reg))
   ELSE
     Err("PUSH/POP requires a register or memory operand")
@@ -330,19 +376,29 @@ PROCEDURE EncPushMem(VAR op: Operand);
 BEGIN EmitModRm(6, op)
 END EncPushMem;
 
-(* PUSH imm16 (68H, genuine 8086) / PUSH imm8 (6AH, sign-extended --
-   technically an 80186+ opcode, included anyway per maintainer request
-   even though it's outside the project's stated pure-8086 scope). Labels
-   as push operands are not supported (PUSH imm on 8086 has no relocation
-   use case in this codebase's fixtures; a bare "push label" already
-   parses as OKImm with hasLabel and would need EmitDisp16 -- left
-   unimplemented until a real .asm needs it). *)
+(* PUSH imm16 (68H) / PUSH imm8 (6AH, sign-extended) -- both are 80186+
+   opcodes, NOT genuine 8086 (CLAUDE.md targets pure 8086; PROHIBITED for
+   generated code -- see SRC/CC/CCASM.MOD's EmitIntr, which hit this the
+   hard way: `xt` decodes 68H as an invalid opcode and halts).  Encoding
+   is included here only because TASM is a general assembler front-end
+   (a .ASM author could still write PUSH imm and expect NASM-compatible
+   bytes out); callers targeting this project's real 8086 execution
+   environment must avoid it (e.g. "xor ax,ax / push ax" instead of
+   "push word 0"). Labels as push operands are not supported (PUSH imm
+   has no relocation use case in this codebase's fixtures; a bare "push
+   label" already parses as OKImm with hasLabel and would need
+   EmitDisp16 -- left unimplemented until a real .asm needs it). *)
 PROCEDURE EncPushImm(VAR op: Operand);
 BEGIN
   IF op.hasLabel THEN Err("PUSH label immediate not supported"); RETURN END;
   IF op.size = SzByte THEN
     B(BYTE(06AH)); B(BYTE(op.disp))
   ELSE
+    (* N4 fix: same word-range guard as EmitDisp16 -- W's truncation
+       silently wraps an out-of-range PUSH immediate mod 65536. *)
+    IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+      Err("word value out of range"); RETURN
+    END;
     B(BYTE(068H)); W(INTEGER(op.disp))
   END
 END EncPushImm;
@@ -363,6 +419,9 @@ BEGIN
       B(BYTE(0FEH)); EmitModRm(ext, op)
     END
   ELSE
+    IF op.size = SzNone THEN
+      Err("operation size not specified"); RETURN
+    END;
     IF op.size = SzByte THEN B(BYTE(0FEH)) ELSE B(BYTE(0FFH)) END;
     EmitModRm(ext, op)
   END
@@ -373,10 +432,21 @@ END EncIncDec;
 PROCEDURE EncMov(VAR dst, src: Operand);
 BEGIN
   IF (dst.kind = OKSegReg) & ((src.kind = OKReg) OR (src.kind = OKMem)) THEN
-    (* MOV Sreg, r/m16 -> 8E /r (segment register in the /reg field). *)
+    (* MOV Sreg, r/m16 -> 8E /r (segment register in the /reg field).
+       N2 fix: the r/m must be word-sized -- a byte register (e.g.
+       "mov ds, al") shares AL's reg code with AX and would silently
+       encode as "mov ds, ax" otherwise; a BYTE-qualified [mem]
+       ("mov ds, byte [x]") is the same mismatch spelled on a memory
+       operand (an UNSIZED [mem] is fine -- 8E always moves a word). *)
+    IF (src.size # SzNone) & (src.size # SzWord) THEN
+      Err("operand size mismatch"); RETURN
+    END;
     B(BYTE(08EH)); EmitModRm(dst.reg, src)
   ELSIF (src.kind = OKSegReg) & ((dst.kind = OKReg) OR (dst.kind = OKMem)) THEN
-    (* MOV r/m16, Sreg -> 8C /r. *)
+    (* MOV r/m16, Sreg -> 8C /r. Same N2 fix, mirrored. *)
+    IF (dst.size # SzNone) & (dst.size # SzWord) THEN
+      Err("operand size mismatch"); RETURN
+    END;
     B(BYTE(08CH)); EmitModRm(src.reg, dst)
   ELSIF (dst.kind = OKReg) & (src.kind = OKImm) THEN
     (* compact form: B0+r ib / B8+r iw *)
@@ -385,6 +455,9 @@ BEGIN
     END
   ELSIF src.kind = OKImm THEN
     (* MOV mem, imm: C6 /0 ib  or  C7 /0 iw *)
+    IF (dst.kind = OKMem) & (dst.size = SzNone) THEN
+      Err("operation size not specified"); RETURN
+    END;
     IF dst.size = SzByte THEN B(BYTE(0C6H)); EmitModRm(0, dst); EmitImm(src, FALSE)
     ELSE B(BYTE(0C7H)); EmitModRm(0, dst); EmitImm(src, TRUE)
     END
@@ -403,15 +476,20 @@ BEGIN
     B(BYTE(0A3H)); EmitDisp16(dst)
   ELSIF (src.kind = OKReg) & (src.reg = RAL) & (src.size = SzByte) & (dst.kind = OKMem)
         & (dst.am = AmNone) THEN
-    (* MOV [disp16], AL  ->  A2 disp16  (verified against SYS.RDF's
+    (* MOV [disp16], AL  ->  A2 disp16  (verified against SYSTEM.RDF's
        "mov BYTE[cs:err_code], AL" -> 2E A2 disp16, not the equally-valid
        general ModRM form 2E 88 06 disp16 that a naive encoder would pick). *)
     B(BYTE(0A2H)); EmitDisp16(dst)
   ELSIF (dst.kind = OKReg) & (src.kind = OKReg) THEN
     (* register-to-register MOV: NASM always encodes opcode 88/89 (r/m,
        reg) with dst as the r/m field and src as /reg, never 8A/8B --
-       verified against SYS.RDF's "mov bx, sp" (oracle: 89 E3, i.e.
-       dst=BX in r/m, src=SP in /reg -- not the equally-valid 8B DC). *)
+       verified against SYSTEM.RDF's "mov bx, sp" (oracle: 89 E3, i.e.
+       dst=BX in r/m, src=SP in /reg -- not the equally-valid 8B DC).
+       N2 fix: dst/src reg codes overlap across sizes (AL=AX=0, BL=BX=3,
+       ...), so a mismatched pair (e.g. "mov al, bx") must be rejected
+       instead of silently renaming one side to its same-numbered
+       same-size counterpart. *)
+    IF dst.size # src.size THEN Err("operand size mismatch"); RETURN END;
     IF dst.size = SzByte THEN B(BYTE(088H)) ELSE B(BYTE(089H)) END;
     EmitModRm(src.reg, dst)
   ELSIF (dst.kind = OKReg) & (src.kind = OKMem) THEN
@@ -443,7 +521,7 @@ END EncMov;
    immediate fits in a byte: real NASM (without -O) never performs this
    optimization on its own, and always emits the full-width 81 iw form
    unless the source uses BYTE-qualified syntax -- verified against
-   SYS.RDF's "sub sp, 4" -> 81 EC 04 00, not 83 EC 04. *)
+   SYSTEM.RDF's "sub sp, 4" -> 81 EC 04 00, not 83 EC 04. *)
 PROCEDURE EncAlu(base: BYTE; ext: INTEGER; VAR dst, src: Operand);
   VAR wide: BOOLEAN;
 BEGIN
@@ -453,6 +531,8 @@ BEGIN
       B(BYTE(INTEGER(base) + 4)); EmitImm(src, FALSE)
     ELSIF (dst.kind = OKReg) & (dst.reg = RAX) & (dst.size = SzWord) THEN
       B(BYTE(INTEGER(base) + 5)); EmitImm(src, TRUE)
+    ELSIF (dst.kind = OKMem) & (dst.size = SzNone) THEN
+      Err("operation size not specified")
     ELSIF wide THEN
       B(BYTE(081H)); EmitModRm(ext, dst); EmitImm(src, TRUE)
     ELSE
@@ -461,15 +541,29 @@ BEGIN
   ELSIF (dst.kind = OKReg) & (src.kind = OKReg) THEN
     (* register-to-register: same NASM convention as MOV (see EncMov) --
        always the r/m,reg direction (base+0/1), dst in r/m, src in /reg,
-       never base+2/3.  Verified against SYS.RDF's "xor ah, ah" -> 30 E4
-       (opcode 0x30 = base+0 for XOR's base 0x30), not 32 E4. *)
+       never base+2/3.  Verified against SYSTEM.RDF's "xor ah, ah" -> 30 E4
+       (opcode 0x30 = base+0 for XOR's base 0x30), not 32 E4.
+       N2 fix: reject a size mismatch, same as the mem,reg arms below. *)
+    IF dst.size # src.size THEN Err("operand size mismatch"); RETURN END;
     IF wide THEN B(BYTE(INTEGER(base) + 1)) ELSE B(BYTE(INTEGER(base))) END;
     EmitModRm(src.reg, dst)
   ELSIF (dst.kind = OKReg) & (src.kind = OKMem) THEN
     IF wide THEN B(BYTE(INTEGER(base) + 3)) ELSE B(BYTE(INTEGER(base) + 2)) END;
     EmitModRm(dst.reg, src)
   ELSIF (src.kind = OKReg) & (dst.kind = OKMem) THEN
-    IF wide THEN B(BYTE(INTEGER(base) + 1)) ELSE B(BYTE(INTEGER(base))) END;
+    (* R2 fix: width must come from the REGISTER operand, not dst.size --
+       dst.size may be SzNone for an unqualified `[mem]` (B1 stopped
+       defaulting it to SzWord), and the top-of-procedure `wide` was
+       computed from dst.size alone, so e.g. `add [wvar], ax` silently
+       encoded the BYTE opcode (00, not 01) with a word register --
+       verified: pre-B1 the WORD default masked this, post-B1 it went
+       silently wrong instead of erroring. Also reject a genuine
+       size mismatch between an explicit `[mem]` qualifier and the
+       register width (e.g. `add byte [x], ax`). *)
+    IF (dst.size # SzNone) & (dst.size # src.size) THEN
+      Err("operand size mismatch"); RETURN
+    END;
+    IF src.size = SzWord THEN B(BYTE(INTEGER(base) + 1)) ELSE B(BYTE(INTEGER(base))) END;
     EmitModRm(src.reg, dst)
   ELSE
     Err("unsupported ALU operand combination")
@@ -487,14 +581,39 @@ BEGIN
       B(BYTE(0A8H)); EmitImm(src, FALSE)
     ELSIF (dst.kind = OKReg) & (dst.reg = RAX) & (dst.size = SzWord) THEN
       B(BYTE(0A9H)); EmitImm(src, TRUE)
+    ELSIF (dst.kind = OKMem) & (dst.size = SzNone) THEN
+      Err("operation size not specified")
     ELSIF wide THEN
       B(BYTE(0F7H)); EmitModRm(0, dst); EmitImm(src, TRUE)
     ELSE
       B(BYTE(0F6H)); EmitModRm(0, dst); EmitImm(src, FALSE)
     END
-  ELSIF (src.kind = OKReg) & ((dst.kind = OKReg) OR (dst.kind = OKMem)) THEN
+  ELSIF (src.kind = OKReg) & (dst.kind = OKReg) THEN
+    (* N2 fix: reject a size mismatch, same as the mem,reg arms below. *)
+    IF dst.size # src.size THEN Err("operand size mismatch"); RETURN END;
     IF wide THEN B(BYTE(085H)) ELSE B(BYTE(084H)) END;
     EmitModRm(src.reg, dst)
+  ELSIF (src.kind = OKReg) & (dst.kind = OKMem) THEN
+    (* R2 fix: same width-from-register fix as EncAlu -- dst.size (the
+       memory operand) may be SzNone for an unqualified `[mem]`, so width
+       must come from src.size (the register), not the top-of-procedure
+       `wide` which was computed from dst.size alone. *)
+    IF (dst.size # SzNone) & (dst.size # src.size) THEN
+      Err("operand size mismatch"); RETURN
+    END;
+    IF src.size = SzWord THEN B(BYTE(085H)) ELSE B(BYTE(084H)) END;
+    EmitModRm(src.reg, dst)
+  ELSIF (dst.kind = OKReg) & (src.kind = OKMem) THEN
+    (* D fix: NASM accepts "test reg, mem" (TEST is commutative, unlike
+       CMP/SUB) by swapping to the reg,mem encoding above -- TASM only
+       had the mem,reg (dst=mem) form. Same width-from-register /
+       size-mismatch guard as the dst=mem arm, mirrored with dst/src
+       swapped. *)
+    IF (src.size # SzNone) & (src.size # dst.size) THEN
+      Err("operand size mismatch"); RETURN
+    END;
+    IF dst.size = SzWord THEN B(BYTE(085H)) ELSE B(BYTE(084H)) END;
+    EmitModRm(dst.reg, src)
   ELSE
     Err("unsupported TEST operand combination")
   END
@@ -503,6 +622,9 @@ END EncTest;
 (* ---- single-operand group F6/F7: NOT=/2 NEG=/3 MUL=/4 ---- *)
 PROCEDURE EncUnaryGroup(ext: INTEGER; VAR op: Operand);
 BEGIN
+  IF (op.kind = OKMem) & (op.size = SzNone) THEN
+    Err("operation size not specified"); RETURN
+  END;
   IF op.size = SzByte THEN B(BYTE(0F6H)) ELSE B(BYTE(0F7H)) END;
   EmitModRm(ext, op)
 END EncUnaryGroup;
@@ -514,6 +636,9 @@ END EncUnaryGroup;
 PROCEDURE EncShift(ext: INTEGER; VAR dst, cnt: Operand);
   VAR wide: BOOLEAN;
 BEGIN
+  IF (dst.kind = OKMem) & (dst.size = SzNone) THEN
+    Err("operation size not specified"); RETURN
+  END;
   wide := dst.size = SzWord;
   IF (cnt.kind = OKImm) & (cnt.disp = LONGINT(1)) & ~cnt.hasLabel THEN
     IF wide THEN B(BYTE(0D1H)) ELSE B(BYTE(0D0H)) END;
@@ -536,13 +661,32 @@ END EncShift;
 PROCEDURE EncXchg(VAR a, b: Operand);
 BEGIN
   IF (a.kind = OKReg) & (a.reg = RAX) & (a.size = SzWord) & (b.kind = OKReg) THEN
+    (* N2 fix: the AX short form (90+r) always encodes a WORD swap --
+       "xchg ax, bl" must not silently become "xchg ax, bx". *)
+    IF b.size # SzWord THEN Err("operand size mismatch"); RETURN END;
     B(BYTE(090H + b.reg))
   ELSIF (b.kind = OKReg) & (b.reg = RAX) & (b.size = SzWord) & (a.kind = OKReg) THEN
+    IF a.size # SzWord THEN Err("operand size mismatch"); RETURN END;
     B(BYTE(090H + a.reg))
+  ELSIF (a.kind = OKReg) & (b.kind = OKReg) THEN
+    (* N2 fix: general reg,reg form -- both sides must agree in size. *)
+    IF a.size # b.size THEN Err("operand size mismatch"); RETURN END;
+    IF a.size = SzByte THEN B(BYTE(086H)) ELSE B(BYTE(087H)) END;
+    EmitModRm(a.reg, b)
   ELSIF a.kind = OKReg THEN
+    (* reg,mem arm -- same explicit-qualifier mismatch guard as EncAlu's
+       R2 fix: "xchg ax, byte [x]" must not silently ignore the BYTE
+       qualifier and encode a word XCHG. An UNSIZED [mem] still takes
+       its width from the register, as everywhere else. *)
+    IF (b.size # SzNone) & (b.size # a.size) THEN
+      Err("operand size mismatch"); RETURN
+    END;
     IF a.size = SzByte THEN B(BYTE(086H)) ELSE B(BYTE(087H)) END;
     EmitModRm(a.reg, b)
   ELSIF b.kind = OKReg THEN
+    IF (a.size # SzNone) & (a.size # b.size) THEN
+      Err("operand size mismatch"); RETURN
+    END;
     IF b.size = SzByte THEN B(BYTE(086H)) ELSE B(BYTE(087H)) END;
     EmitModRm(b.reg, a)
   ELSE
@@ -579,6 +723,9 @@ END EncLds;
 PROCEDURE EncInt(VAR op: Operand);
 BEGIN
   IF op.kind # OKImm THEN Err("INT requires an immediate byte")
+  ELSIF op.hasLabel THEN Err("label not allowed here")  (* R6 fix *)
+  ELSIF (op.disp < 0) OR (op.disp > 255) THEN
+    Err("INT vector out of range (0..255)")  (* C5 fix *)
   ELSE B(BYTE(0CDH)); B(BYTE(op.disp))
   END
 END EncInt;
@@ -588,6 +735,13 @@ END EncInt;
 PROCEDURE EncRet(far: BOOLEAN; hasImm: BOOLEAN; VAR imm: Operand);
 BEGIN
   IF hasImm THEN
+    IF imm.kind # OKImm THEN Err("RET immediate must be a constant"); RETURN END;
+    IF imm.hasLabel THEN Err("label not allowed here"); RETURN END;  (* R6 fix *)
+    (* N4 fix: RET's imm16 operand count is a WORD -- "ret 65536" must not
+       silently wrap to "ret 0". *)
+    IF (imm.disp < LONGINT(-32768)) OR (imm.disp > LONGINT(65535)) THEN
+      Err("word value out of range"); RETURN
+    END;
     IF far THEN B(BYTE(0CAH)) ELSE B(BYTE(0C2H)) END;
     W(INTEGER(imm.disp))
   ELSE
@@ -602,11 +756,12 @@ END EncNoOperand;
 
 (* ---- JMP / CALL, near / far, direct label or indirect memory ---- *)
 
-(* EncJmpShort: unqualified JMP/Jcc -- v1 policy (DOCS/TASM_PLAN.MD decision
-   #1): compute assuming rel8 in pass 1 sizing (2 bytes total: opcode+rel8),
-   validate in pass 2 that the real displacement still fits; a target that
-   doesn't fit is a fatal error asking the source to be restructured (no
-   iterative resizing, no NEAR-qualified auto-widening in v1). *)
+(* EncJmpShort: unqualified JMP/Jcc -- policy (see DOCS/IMPLRULE.MD's TASM
+   section, "short-vs-near jump sizing"): compute assuming rel8 in pass 1
+   sizing (2 bytes total: opcode+rel8), validate in pass 2 that the real
+   displacement still fits; a target that doesn't fit is a fatal error
+   asking the source to be restructured (no iterative resizing, no
+   NEAR-qualified auto-widening). *)
 PROCEDURE EncJmpShort(opcode: BYTE; VAR target: Operand);
   VAR lseg: INTEGER; lofs, rel: LONGINT; instrEnd: LONGINT;
 BEGIN
@@ -615,8 +770,26 @@ BEGIN
     B(opcode); B(BYTE(0));   (* placeholder rel8; real size is always 2 bytes for short form *)
     RETURN
   END;
+  IF Sym.IsExtern(target.labelName) THEN
+    (* rel8 (short branch) has no RDOFF2 relocation type at all -- unlike
+       EncNearRel/EmitDisp16, which route an EXTERN target through an
+       RDFREC_IMPORT-relative reloc, there is no way to patch a 1-byte
+       displacement against a symbol whose address is only known at link
+       time. Sym.Lookup would otherwise return the reserved placeholder
+       (SegCode, 0) for an EXTERN name (BUG A1's table never marks these
+       "defined"), silently encoding a wild rel8 (BUG A4). *)
+    Err("short branch to EXTERN symbol is impossible (rel8 has no relocation)");
+    B(opcode); B(BYTE(0)); RETURN
+  END;
   IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
     Err("undefined symbol"); B(opcode); B(BYTE(0)); RETURN
+  END;
+  IF lseg # Sym.SegCode THEN
+    (* C12 fix: a short branch to a data/bss label computes a rel8 across
+       segments -- a meaningless value, usually (but not always) caught
+       by the +-128 range check below since data/bss offsets are
+       unrelated to code offsets; silent inside that window otherwise. *)
+    Err("branch target is not in the code segment"); B(opcode); B(BYTE(0)); RETURN
   END;
   instrEnd := here + LONGINT(2);
   rel := lofs - instrEnd;
@@ -650,6 +823,9 @@ BEGIN
   IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
     Err("undefined symbol"); B(opcode); W(0); RETURN
   END;
+  IF lseg # Sym.SegCode THEN
+    Err("branch target is not in the code segment"); B(opcode); W(0); RETURN  (* C12 fix *)
+  END;
   instrEnd := here + LONGINT(3);
   rel := lofs - instrEnd;
   B(opcode); W(INTEGER(rel))
@@ -658,7 +834,7 @@ END EncNearRel;
 (* EncJmpAuto: unqualified JMP (no explicit SHORT/NEAR keyword) to a label.
    Real NASM auto-selects the 2-byte short (EB rel8) encoding whenever it
    safely can, falling back to the 3-byte near (E9 rel16) form otherwise --
-   verified against SYS.RDF, where "jmp ErrWithMsg" (a BACKWARD reference,
+   verified against SYSTEM.RDF, where "jmp ErrWithMsg" (a BACKWARD reference,
    already-defined at encode time) short-sizes to EB despite no `short`
    keyword in the source.
 
@@ -666,8 +842,9 @@ END EncNearRel;
    already DEFINED at the moment Pass 1 first walks past this instruction:
    for those, Pass 1 already knows the real distance and can pick a size.
    A FORWARD reference has no such fixed point without iterative resizing
-   (the exact problem DOCS/TASM_PLAN.MD's decision #1 avoids for Jcc/LOOP)
-   -- so a forward JMP always takes the near (E9) form.
+   (the exact problem the short-vs-near jump sizing decision in
+   DOCS/IMPLRULE.MD's TASM section avoids for Jcc/LOOP) -- so a forward
+   JMP always takes the near (E9) form.
 
    CRITICAL: Sym's label table is NOT reset between passes (Pass 2 needs
    Pass 1's final offsets to resolve forward refs), so by the time Pass 2
@@ -681,45 +858,94 @@ END EncNearRel;
    the unique starting code-offset of this specific JMP instruction, valid
    as a key since code only grows monotonically); Pass 2 replays the same
    choice instead of re-deciding. *)
-CONST MaxJmpDecisions = 128;
+(* BUG B6: was a fixed ARRAY MaxJmpDecisions=128 -- the 129th unqualified
+   auto-sized JMP in one file hit a hard "internal limit" error. Chunked
+   linked list (CLAUDE.md "Chunk small records" rule), same shape as
+   Sym.MOD's label/define tables: each entry is tiny (a LONGINT offset + a
+   BOOLEAN), NEW'd once per auto-sized JMP encountered. *)
+CONST JmpChunk = 32;
+TYPE
+  JmpDecNode = POINTER TO JmpDecNodeDesc;
+  JmpDecNodeDesc = RECORD
+    ofs*:   ARRAY JmpChunk OF LONGINT;
+    short*: ARRAY JmpChunk OF BOOLEAN;
+    count*: INTEGER;
+    next*:  JmpDecNode
+  END;
 VAR
-  jmpDecOfs:   ARRAY MaxJmpDecisions OF LONGINT;
-  jmpDecShort: ARRAY MaxJmpDecisions OF BOOLEAN;
-  nJmpDec:     INTEGER;
+  jmpDecHead, jmpDecTail: JmpDecNode;
 
 PROCEDURE ResetJmpDecisions*;
-BEGIN nJmpDec := 0
+  VAR n, nn: JmpDecNode;
+BEGIN
+  (* free any chain from a PRIOR Assemble call in this process (CLAUDE.md
+     zero-leak rule) -- called once per Pass 1, i.e. once per Assemble;
+     within one Assemble, Pass 2 must NOT call this (it needs Pass 1's
+     recorded decisions still present to replay), which the call sites in
+     Parse.RunPass already guarantee (pass=1 only). *)
+  n := jmpDecHead;
+  WHILE n # NIL DO nn := n^.next; DISPOSE(n); n := nn END;
+  jmpDecHead := NIL; jmpDecTail := NIL
 END ResetJmpDecisions;
 
-PROCEDURE RecordJmpDecision(ofs: LONGINT; isShort: BOOLEAN);
+(* FreeJmpDecisions: release Pass 2's now-unneeded jmp-decision chain --
+   called once at the END of Assemble (mirrors Sym.Free), so TASM.MOD's
+   LeakGuard measurement (taken right after Assemble returns) doesn't see
+   this chunk-list as a leak. *)
+PROCEDURE FreeJmpDecisions*;
+  VAR n, nn: JmpDecNode;
 BEGIN
-  IF nJmpDec < MaxJmpDecisions THEN
-    jmpDecOfs[nJmpDec] := ofs; jmpDecShort[nJmpDec] := isShort; INC(nJmpDec)
-  ELSE
-    Err("too many auto-sized JMPs in one file (internal limit)")
-  END
+  n := jmpDecHead;
+  WHILE n # NIL DO nn := n^.next; DISPOSE(n); n := nn END;
+  jmpDecHead := NIL; jmpDecTail := NIL
+END FreeJmpDecisions;
+
+PROCEDURE RecordJmpDecision(ofs: LONGINT; isShort: BOOLEAN);
+  VAR last: JmpDecNode;
+BEGIN
+  IF (jmpDecTail = NIL) OR (jmpDecTail^.count >= JmpChunk) THEN
+    NEW(last);
+    IF last = NIL THEN Err("out of memory (jmp-decision table)"); RETURN END;
+    last^.count := 0; last^.next := NIL;
+    IF jmpDecHead = NIL THEN jmpDecHead := last ELSE jmpDecTail^.next := last END;
+    jmpDecTail := last
+  END;
+  jmpDecTail^.ofs[jmpDecTail^.count] := ofs;
+  jmpDecTail^.short[jmpDecTail^.count] := isShort;
+  INC(jmpDecTail^.count)
 END RecordJmpDecision;
 
 (* ReplayJmpDecision: pass 2 only -- find the decision recorded for the JMP
    instruction that started at code offset `ofs` during pass 1, in order
    (each pass 2 call consumes the next unconsumed record; since both
    passes walk instructions in the same source order, position-in-sequence
-   is a simpler and equally correct key than the recorded offset itself,
-   but the offset is kept too as a consistency cross-check). *)
-VAR replayIdx: INTEGER;
+   is a simpler and equally correct key than the recorded offset itself).
+   `ofs` is now actually cross-checked against the recorded offset (it was
+   written but never read before this fix) -- a mismatch means pass 1 and
+   pass 2 walked the source differently, i.e. some earlier encoder desynced
+   the two passes' byte counts, exactly the class of bug old BUG 3's family
+   was. *)
+VAR replayNode: JmpDecNode; replayIdx: INTEGER;
 
 PROCEDURE ResetJmpReplay*;
-BEGIN replayIdx := 0
+BEGIN replayNode := jmpDecHead; replayIdx := 0
 END ResetJmpReplay;
 
-PROCEDURE ReplayJmpDecision(): BOOLEAN;
+PROCEDURE ReplayJmpDecision(ofs: LONGINT): BOOLEAN;
   VAR r: BOOLEAN;
 BEGIN
-  IF replayIdx < nJmpDec THEN
-    r := jmpDecShort[replayIdx]; INC(replayIdx); RETURN r
+  WHILE (replayNode # NIL) & (replayIdx >= replayNode^.count) DO
+    replayNode := replayNode^.next; replayIdx := 0
   END;
-  Err("JMP auto-size replay ran out of pass-1 decisions (internal error)");
-  RETURN FALSE
+  IF replayNode = NIL THEN
+    Err("JMP auto-size replay ran out of pass-1 decisions (internal error)");
+    RETURN FALSE
+  END;
+  IF replayNode^.ofs[replayIdx] # ofs THEN
+    Err("JMP auto-size replay desynced from pass 1 (internal error)");
+    RETURN FALSE
+  END;
+  r := replayNode^.short[replayIdx]; INC(replayIdx); RETURN r
 END ReplayJmpDecision;
 
 PROCEDURE EncJmpAuto(VAR target: Operand);
@@ -740,11 +966,14 @@ BEGIN
     END;
     RecordJmpDecision(startOfs, useShort)
   ELSE
-    useShort := ReplayJmpDecision()
+    useShort := ReplayJmpDecision(startOfs)
   END;
   IF useShort THEN
     IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
       Err("undefined symbol"); B(BYTE(0EBH)); B(BYTE(0)); RETURN
+    END;
+    IF lseg # Sym.SegCode THEN
+      Err("branch target is not in the code segment"); B(BYTE(0EBH)); B(BYTE(0)); RETURN  (* C12 fix *)
     END;
     instrEnd := here + LONGINT(2);
     rel := lofs - instrEnd;
@@ -758,17 +987,32 @@ END EncJmpAuto;
    memory or register operand -- `far [reg]`/`far [mem]` selects /5. *)
 PROCEDURE EncJmpIndirect(VAR mem: Operand);
 BEGIN
+  IF mem.isFar & (mem.kind = OKReg) THEN
+    Err("far JMP/CALL cannot target a plain register (no segment half)"); RETURN
+  END;
+  (* N2 fix: a register target must be WORD-sized -- "jmp al" has no
+     8-bit indirect-jump encoding and must not silently become "jmp ax". *)
+  IF (mem.kind = OKReg) & (mem.size # SzWord) THEN
+    Err("operand size mismatch"); RETURN
+  END;
+  B(BYTE(0FFH));
   IF mem.isFar THEN EmitModRm(5, mem) ELSE EmitModRm(4, mem) END
 END EncJmpIndirect;
 
 PROCEDURE EncCallIndirect(VAR mem: Operand);
 BEGIN
+  IF mem.isFar & (mem.kind = OKReg) THEN
+    Err("far JMP/CALL cannot target a plain register (no segment half)"); RETURN
+  END;
+  IF (mem.kind = OKReg) & (mem.size # SzWord) THEN
+    Err("operand size mismatch"); RETURN
+  END;
   B(BYTE(0FFH));
   IF mem.isFar THEN EmitModRm(3, mem) ELSE EmitModRm(2, mem) END
 END EncCallIndirect;
 
 (* EncJmpFarDirect: JMP/CALL far ptr16:16 -- EA/9A followed by offset then
-   segment word.  Does not occur in SYS.ASM/EMS.ASM (both only use
+   segment word.  Does not occur in SYSTEM.ASM/EMS.ASM (both only use
    `call far [mem]`, the indirect form above) but is part of the base 8086
    instruction set (v2 "full 8086 coverage" plan, batch 4).  Reuses
    EmitDisp16 twice against two Operand copies of the same label target --
@@ -777,6 +1021,14 @@ END EncCallIndirect;
    same offset/segment split EmitDisp16 already performs for `SEG label`
    elsewhere, just both halves of the same instruction instead of two
    separate instructions. *)
+(* E2 (code-smell audit): `segOp := target` below copies a VAR-param
+   Operand into a local -- currently safe (EncJmpFarDirect has only ONE
+   VAR Operand param, and EncXchg's comment above scopes the known TOC
+   codegen bug to procedures with TWO same-type VAR record params), but
+   the pattern is a trap: adding a second VAR Operand param here later
+   would silently hit the same miscompile EncXchg works around by never
+   doing this copy at all. If this procedure ever grows a second VAR
+   Operand parameter, build segOp field-by-field instead of `:=`. *)
 PROCEDURE EncJmpFarDirect(opcode: BYTE; VAR target: Operand);
   VAR segOp: Operand;
 BEGIN
@@ -804,6 +1056,10 @@ BEGIN
   IF (src.kind = OKReg) & (src.reg = RDX) THEN
     IF wide THEN B(BYTE(0EDH)) ELSE B(BYTE(0ECH)) END
   ELSIF src.kind = OKImm THEN
+    IF src.hasLabel THEN Err("label not allowed here"); RETURN END;  (* R6 fix *)
+    IF (src.disp < 0) OR (src.disp > 255) THEN
+      Err("port number out of range (0..255)"); RETURN  (* C5 fix *)
+    END;
     IF wide THEN B(BYTE(0E5H)) ELSE B(BYTE(0E4H)) END;
     B(BYTE(src.disp))
   ELSE
@@ -819,6 +1075,10 @@ BEGIN
   IF (dst.kind = OKReg) & (dst.reg = RDX) THEN
     IF wide THEN B(BYTE(0EFH)) ELSE B(BYTE(0EEH)) END
   ELSIF dst.kind = OKImm THEN
+    IF dst.hasLabel THEN Err("label not allowed here"); RETURN END;  (* R6 fix *)
+    IF (dst.disp < 0) OR (dst.disp > 255) THEN
+      Err("port number out of range (0..255)"); RETURN  (* C5 fix *)
+    END;
     IF wide THEN B(BYTE(0E7H)) ELSE B(BYTE(0E6H)) END;
     B(BYTE(dst.disp))
   ELSE
@@ -972,7 +1232,7 @@ BEGIN
   | Lex.MFninit: B(BYTE(0DBH)); B(BYTE(0E3H))
   | Lex.MFstcw:
       (* FSTCW (as opposed to FNSTCW) is defined to include an implicit
-         leading FWAIT (9B) -- verified against SYS.RDF, a real-NASM-built
+         leading FWAIT (9B) -- verified against SYSTEM.RDF, a real-NASM-built
          oracle: NASM emits "9B D9 /7", not bare "D9 /7", for this mnemonic. *)
       IF n # 1 THEN Err("FSTCW requires 1 operand")
       ELSE B(BYTE(09BH)); B(BYTE(0D9H)); EmitModRm(7, ops[0])
@@ -982,6 +1242,9 @@ BEGIN
   | Lex.MCwd:  EncNoOperand(BYTE(099H))
   | Lex.MHlt:  EncNoOperand(BYTE(0F4H))
   | Lex.MXlat: EncNoOperand(BYTE(0D7H))
+  | Lex.MCmc:  EncNoOperand(BYTE(0F5H))
+  | Lex.MLahf: EncNoOperand(BYTE(09FH))
+  | Lex.MSahf: EncNoOperand(BYTE(09EH))
   | Lex.MInto: EncNoOperand(BYTE(0CEH))
   | Lex.MAaa:  EncNoOperand(BYTE(037H))
   | Lex.MAas:  EncNoOperand(BYTE(03FH))
@@ -991,19 +1254,25 @@ BEGIN
   | Lex.MAad:  B(BYTE(0D5H)); B(BYTE(00AH))
   | Lex.MJmp:
       IF n # 1 THEN Err("JMP requires 1 operand")
-      ELSIF ops[0].kind = OKMem THEN EncJmpIndirect(ops[0])
+      ELSIF (ops[0].kind = OKMem) OR (ops[0].kind = OKReg) THEN EncJmpIndirect(ops[0])
       ELSIF (ops[0].kind = OKImm) & ops[0].isFar THEN EncJmpFarDirect(BYTE(0EAH), ops[0])
       ELSIF ops[0].isShort THEN EncJmpShort(BYTE(0EBH), ops[0])
       ELSE EncJmpAuto(ops[0])
       END
   | Lex.MCall:
       IF n # 1 THEN Err("CALL requires 1 operand")
-      ELSIF ops[0].kind = OKMem THEN EncCallIndirect(ops[0])
+      ELSIF (ops[0].kind = OKMem) OR (ops[0].kind = OKReg) THEN EncCallIndirect(ops[0])
       ELSIF (ops[0].kind = OKImm) & ops[0].isFar THEN EncJmpFarDirect(BYTE(09AH), ops[0])
       ELSE EncNearRel(BYTE(0E8H), ops[0])
       END
   | Lex.MLoop:
       IF n # 1 THEN Err("LOOP requires 1 operand") ELSE EncJmpShort(BYTE(0E2H), ops[0]) END
+  | Lex.MLoope, Lex.MLoopz:
+      IF n # 1 THEN Err("LOOPE/LOOPZ requires 1 operand") ELSE EncJmpShort(BYTE(0E1H), ops[0]) END
+  | Lex.MLoopne, Lex.MLoopnz:
+      IF n # 1 THEN Err("LOOPNE/LOOPNZ requires 1 operand") ELSE EncJmpShort(BYTE(0E0H), ops[0]) END
+  | Lex.MJcxz:
+      IF n # 1 THEN Err("JCXZ requires 1 operand") ELSE EncJmpShort(BYTE(0E3H), ops[0]) END
   | Lex.MJe, Lex.MJz:
       IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(074H), ops[0]) END
   | Lex.MJne, Lex.MJnz:

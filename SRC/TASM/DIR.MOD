@@ -12,9 +12,6 @@ MODULE Dir;
 *)
 IMPORT Sym, LogErr, Strings;
 
-CONST
-  MaxFields = 32;
-
 TYPE
   StrucState* = RECORD
     active*: BOOLEAN;
@@ -50,10 +47,18 @@ END BeginStruc;
    or Parse.MOD needing a second lookup mechanism. size is in bytes
    (resb=1, resw=2, resd=4) times count. *)
 PROCEDURE AddField*(field: ARRAY OF CHAR; sizeBytes, count: LONGINT; fname: ARRAY OF CHAR; line: LONGINT);
-  VAR key: ARRAY 80 OF CHAR; val: ARRAY 16 OF CHAR;
+  VAR key: ARRAY 2 * Sym.MaxName OF CHAR; val: ARRAY 16 OF CHAR;
 BEGIN
   IF ~curStruc.active THEN
     LogErr.ErrorInFile(fname, line, "field declaration outside STRUC"); RETURN
+  END;
+  IF Strings.Length(curStruc.name) + 1 + Strings.Length(field) >= Sym.MaxName THEN
+    (* BUG B3.1: the composed key "STRUCT.field" is stored as a Sym %define
+       whose name buffer is bounded to Sym.MaxName -- a composed key past
+       that bound would be silently truncated by Sym.Define's own
+       Strings.Copy, and two different (struct,field) pairs sharing a
+       truncated prefix would then collide on the SAME %define entry. *)
+    LogErr.ErrorInFile(fname, line, "STRUC field name too long"); RETURN
   END;
   Strings.Copy(curStruc.name, key);
   Strings.Append(".", key);
@@ -82,10 +87,18 @@ END Upper;
    TESTS/FIX/TSTRUC.ASM fixture: "TPoint_size" stored mixed-case, looked
    up as "TPOINT_SIZE", silently resolved to 0 instead of erroring). *)
 PROCEDURE EndStruc*(fname: ARRAY OF CHAR; line: LONGINT);
-  VAR key: ARRAY 80 OF CHAR; val: ARRAY 16 OF CHAR;
+  VAR key: ARRAY 2 * Sym.MaxName OF CHAR; val: ARRAY 16 OF CHAR;
 BEGIN
   IF ~curStruc.active THEN
     LogErr.ErrorInFile(fname, line, "ENDSTRUC without STRUC"); RETURN
+  END;
+  IF Strings.Length(curStruc.name) + 5 >= Sym.MaxName THEN
+    (* R5 fix: same overflow class as AddField's B3.1 guard -- the
+       composed "NAME_size" key is stored as a Sym %define bounded to
+       Sym.MaxName; an unguarded composition here would silently
+       truncate and resurrect the hash-of-full-name vs
+       stored-truncated-name permanent-mismatch bug. *)
+    LogErr.ErrorInFile(fname, line, "STRUC name too long"); RETURN
   END;
   Strings.Copy(curStruc.name, key);
   Strings.Append("_size", key);
@@ -113,7 +126,7 @@ END ParseDecimal;
    the %define Sym.Define stored by AddField/EndStruc.  Returns TRUE and
    the numeric value if found. *)
 PROCEDURE TryResolveField*(structName, field: ARRAY OF CHAR; VAR value: LONGINT): BOOLEAN;
-  VAR key: ARRAY 80 OF CHAR; val: ARRAY 16 OF CHAR;
+  VAR key: ARRAY 2 * Sym.MaxName OF CHAR; val: ARRAY 16 OF CHAR;
 BEGIN
   Strings.Copy(structName, key);
   Strings.Append(".", key);

@@ -33,7 +33,8 @@ CONST
   RegAH* = 13; RegCH* = 14; RegDH* = 15; RegBH* = 16;
   RegES* = 17; RegCS* = 18; RegSS* = 19; RegDS* = 20;
 
-  (* ---- mnemonics (50..149) ---- *)
+  (* ---- mnemonics (50..169, non-contiguous -- see the §D block and
+     MLoope*/MLoopnz* below, which extend the range past 149) ---- *)
   MMov* = 50; MPush* = 51; MPop* = 52; MLea* = 53; MLes* = 54; MXchg* = 55;
   MAdd* = 56; MSub* = 57; MAdc* = 58; MSbb* = 59; MAnd* = 60; MOr* = 61;
   MXor* = 62; MCmp* = 63; MTest* = 64;
@@ -61,20 +62,30 @@ CONST
   MCbw* = 143; MCwd* = 144; MHlt* = 145; MXlat* = 146; MInto* = 147;
   MAaa* = 148; MAas* = 149; MAam* = 150; MAad* = 151; MDaa* = 152; MDas* = 153;
   MLds* = 154;
+  (* ---- §D 8086-coverage-gap additions ---- *)
+  MCmc* = 155; MLahf* = 156; MSahf* = 157; MJcxz* = 158;
+  MLoope* = 166; MLoopz* = 167; MLoopne* = 168; MLoopnz* = 169;
 
-  (* ---- prefix pseudo-mnemonics (160..169) -- LOCK/REP* precede the real
+  (* ---- prefix pseudo-mnemonics (160..165 ONLY -- 166..169 are the
+     LOOPcc mnemonics above, not prefixes) -- LOCK/REP* precede the real
      mnemonic as a separate leading token on the same source line (e.g.
      "rep movsb", "lock inc [x]"); Parse.MOD's ParseLine recognizes one via
      Lex.LookupMnem exactly like a real mnemonic, but instead of calling
      ParseInstruction directly it stashes the corresponding prefix byte
-     (see Enc.PrefixByteFor) and re-dispatches on the next token. *)
+     (see Enc.PrefixByteFor) and re-dispatches on the next token.
+     MPrefixLast is IsPrefixMnem's single authority for the top of this
+     range -- extending the range means moving this constant, not just
+     adding a new MRep* case, so the two can never drift apart again
+     (S1 fix: the old comment claimed 160..169, which would have
+     collided with MLoope*..MLoopnz* had anyone trusted it literally). *)
   MLock* = 160; MRep* = 161; MRepe* = 162; MRepz* = 163; MRepne* = 164; MRepnz* = 165;
+  MPrefixLast* = MRepnz;
 
   (* ---- directives (170..199) ---- *)
   DBits* = 170; DCpu* = 171; DSection* = 172; DGlobal* = 173;
   DStruc* = 174; DEndstruc* = 175; DDb* = 176; DDw* = 177; DTimes* = 178;
-  DResb* = 179; DResw* = 180; DResd* = 181; DEndStrucAlt* = 182;
-  DText* = 183; DData* = 184; DExtern* = 185;
+  DResb* = 179; DResw* = 180; DResd* = 181;
+  DExtern* = 185;
 
   (* ---- operand qualifiers (200..209) ---- *)
   QByte* = 200; QWord* = 201; QFar* = 202; QShort* = 203; QNear* = 204; QSeg* = 205;
@@ -125,10 +136,10 @@ BEGIN RETURN (r >= RegAL) & (r <= RegBH)
 END IsByteReg;
 
 (* IsPrefixMnem: classify an already-resolved M* id as one of the
-   LOCK/REP* leading-prefix pseudo-mnemonics (160..169) rather than a real
-   instruction mnemonic. *)
+   LOCK/REP* leading-prefix pseudo-mnemonics (160..165, MLock..MPrefixLast)
+   rather than a real instruction mnemonic. *)
 PROCEDURE IsPrefixMnem*(m: INTEGER): BOOLEAN;
-BEGIN RETURN (m >= MLock) & (m <= MRepnz)
+BEGIN RETURN (m >= MLock) & (m <= MPrefixLast)
 END IsPrefixMnem;
 
 PROCEDURE IsSegReg*(r: INTEGER): BOOLEAN;
@@ -162,11 +173,17 @@ BEGIN
       ELSIF Strings.Equal(name, "LODSB")  THEN RETURN MLodsb
       ELSIF Strings.Equal(name, "LODSW")  THEN RETURN MLodsw
       ELSIF Strings.Equal(name, "LOCK")   THEN RETURN MLock
+      ELSIF Strings.Equal(name, "LAHF")   THEN RETURN MLahf
+      ELSIF Strings.Equal(name, "LOOPE")  THEN RETURN MLoope
+      ELSIF Strings.Equal(name, "LOOPZ")  THEN RETURN MLoopz
+      ELSIF Strings.Equal(name, "LOOPNE") THEN RETURN MLoopne
+      ELSIF Strings.Equal(name, "LOOPNZ") THEN RETURN MLoopnz
       END
   | "X":
       IF    Strings.Equal(name, "XCHG") THEN RETURN MXchg
       ELSIF Strings.Equal(name, "XOR")  THEN RETURN MXor
       ELSIF Strings.Equal(name, "XLAT") THEN RETURN MXlat
+      ELSIF Strings.Equal(name, "XLATB") THEN RETURN MXlat  (* alias, D7 *)
       END
   | "A":
       IF    Strings.Equal(name, "ADD") THEN RETURN MAdd
@@ -190,6 +207,7 @@ BEGIN
       ELSIF Strings.Equal(name, "STOSW")  THEN RETURN MStosw
       ELSIF Strings.Equal(name, "SAR")    THEN RETURN MSar
       ELSIF Strings.Equal(name, "SAL")    THEN RETURN MSal
+      ELSIF Strings.Equal(name, "SAHF")   THEN RETURN MSahf
       END
   | "O":
       IF    Strings.Equal(name, "OR")  THEN RETURN MOr
@@ -205,6 +223,7 @@ BEGIN
       ELSIF Strings.Equal(name, "CMPSW")  THEN RETURN MCmpsw
       ELSIF Strings.Equal(name, "CBW")    THEN RETURN MCbw
       ELSIF Strings.Equal(name, "CWD")    THEN RETURN MCwd
+      ELSIF Strings.Equal(name, "CMC")    THEN RETURN MCmc
       END
   | "T":
       IF Strings.Equal(name, "TEST") THEN RETURN MTest END
@@ -275,6 +294,7 @@ BEGIN
       ELSIF Strings.Equal(name, "JNG")  THEN RETURN MJng
       ELSIF Strings.Equal(name, "JG")   THEN RETURN MJg
       ELSIF Strings.Equal(name, "JNLE") THEN RETURN MJnle
+      ELSIF Strings.Equal(name, "JCXZ") THEN RETURN MJcxz
       END
   | "F":
       IF    Strings.Equal(name, "FNINIT") THEN RETURN MFninit
@@ -283,6 +303,8 @@ BEGIN
       END
   | "H":
       IF Strings.Equal(name, "HLT") THEN RETURN MHlt END
+  | "W":
+      IF Strings.Equal(name, "WAIT") THEN RETURN MFwait END  (* alias, 9B *)
   ELSE
   END;
   RETURN LNone
