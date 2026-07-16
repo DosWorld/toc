@@ -301,3 +301,4 @@ dbg/off-dbg-member-empty	DBGOFF.MOD		om-no-file	DBGOFF.DBG
 arrcmp/general-case-rejected	ARRCMP1.MOD	fails	compile-fails
 arrcmp/empty-string-still-ok	ARRCMP2.MOD		has-global	Arrcmp2__init
 constimp/big-const-not-truncated	USEBIG.MOD+CSTBIG.OM	/ENTRY=Run	errorlevel	0
+ptr/var-param-array-across-modules	PTRUSE.MOD+PTRLIB.MOD	/ENTRY=Run	errorlevel	0

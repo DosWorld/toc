@@ -3,7 +3,7 @@
 ; local nasm build lacks the rdf output backend. Expected TMULDIV.RDF was
 ; hand-verified byte-for-byte against the 8086 F6/F7 opcode table (reg
 ; field = /ext: IMUL=5, DIV=6, IDIV=7) before being adopted as the
-; regression baseline -- see DOCS/TASM_PLAN.MD "Testing strategy for v2".
+; regression baseline -- see DOCS/TESTS.MD "TASM assembler regression test".
 bits 16
 cpu 8086
 section .data

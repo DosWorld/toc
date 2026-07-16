@@ -5,8 +5,8 @@
 ; independent NASM oracle: the local nasm build lacks the rdf output
 ; backend. Expected TBSS.RDF was hand-verified byte-for-byte (code bytes
 ; + a RDFREC_BSS header record for the reserved total) before being
-; adopted as the regression baseline -- see DOCS/TASM_PLAN.MD "Testing
-; strategy for v2".
+; adopted as the regression baseline -- see DOCS/TESTS.MD "TASM assembler
+; regression test".
 bits 16
 cpu 8086
 section .bss

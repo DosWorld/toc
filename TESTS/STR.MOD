@@ -14,14 +14,15 @@ BEGIN
 END StTLength;
 
 PROCEDURE StTPos*;
+  VAR p: WORD;
 BEGIN
-  Test.AssertInt( 3, Strings.Pos("lo",  "hello", 0), "Pos lo");
-  Test.AssertInt( 0, Strings.Pos("he",  "hello", 0), "Pos he");
-  Test.AssertInt(-1, Strings.Pos("xyz", "hello", 0), "Pos xyz");
-  Test.AssertInt( 2, Strings.Pos("l",   "hello", 0), "Pos l@0");
-  Test.AssertInt( 3, Strings.Pos("l",   "hello", 3), "Pos l@3");
-  Test.AssertInt( 2, Strings.Pos("",    "hello", 2), "Pos empty");
-  Test.AssertInt( 2, Strings.Pos("llo", "hello", 0), "Pos llo")
+  p := 0; Test.AssertTrue(Strings.Pos("lo",  "hello", p) & (p = WORD(3)), "Pos lo");
+  p := 0; Test.AssertTrue(Strings.Pos("he",  "hello", p) & (p = WORD(0)), "Pos he");
+  p := 0; Test.AssertTrue(~Strings.Pos("xyz", "hello", p), "Pos xyz");
+  p := 0; Test.AssertTrue(Strings.Pos("l",   "hello", p) & (p = WORD(2)), "Pos l@0");
+  p := 3; Test.AssertTrue(Strings.Pos("l",   "hello", p) & (p = WORD(3)), "Pos l@3");
+  p := 2; Test.AssertTrue(Strings.Pos("",    "hello", p) & (p = WORD(2)), "Pos empty");
+  p := 0; Test.AssertTrue(Strings.Pos("llo", "hello", p) & (p = WORD(2)), "Pos llo")
 END StTPos;
 
 PROCEDURE StTAppend*;
@@ -67,15 +68,17 @@ BEGIN
 END StTReplace;
 
 PROCEDURE StTExtract*;
-VAR dst: ARRAY 16 OF CHAR;
+VAR dst: ARRAY 16 OF CHAR; src: ARRAY 16 OF CHAR;
 BEGIN
-  Strings.Extract("hello world", 6, 5, dst);
+  (* Extract takes src as VAR (an l-value), so string literals must first be
+     copied into a local buffer -- they cannot be passed directly. *)
+  src := "hello world"; Strings.Extract(src, 6, 5, dst);
   Test.AssertStr("world", dst, "extract world");
-  Strings.Extract("hello", 0, 3, dst);
+  src := "hello"; Strings.Extract(src, 0, 3, dst);
   Test.AssertStr("hel", dst, "extract head");
-  Strings.Extract("hello", 0, 0, dst);
+  src := "hello"; Strings.Extract(src, 0, 0, dst);
   Test.AssertStr("", dst, "extract zero");
-  Strings.Extract("hello", 5, 3, dst);
+  src := "hello"; Strings.Extract(src, 5, 3, dst);
   Test.AssertStr("", dst, "extract past end")
 END StTExtract;
 
@@ -118,14 +121,15 @@ BEGIN
 END StTReplaceGlobal;
 
 PROCEDURE StTExtractGlobal*;
+VAR src: ARRAY 16 OF CHAR;
 BEGIN
-  Strings.Extract("hello world", 6, 5, Stgdst);
+  src := "hello world"; Strings.Extract(src, 6, 5, Stgdst);
   Test.AssertStr("world", Stgdst, "extract global world");
-  Strings.Extract("hello", 0, 3, Stgdst);
+  src := "hello"; Strings.Extract(src, 0, 3, Stgdst);
   Test.AssertStr("hel", Stgdst, "extract global head");
-  Strings.Extract("hello", 0, 0, Stgdst);
+  src := "hello"; Strings.Extract(src, 0, 0, Stgdst);
   Test.AssertStr("", Stgdst, "extract global zero");
-  Strings.Extract("hello", 5, 3, Stgdst);
+  src := "hello"; Strings.Extract(src, 5, 3, Stgdst);
   Test.AssertStr("", Stgdst, "extract global past end")
 END StTExtractGlobal;
 

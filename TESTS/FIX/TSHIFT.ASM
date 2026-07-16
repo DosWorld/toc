@@ -3,8 +3,8 @@
 ; NASM oracle: the local nasm build lacks the rdf output backend. Expected
 ; TSHIFT.RDF was hand-verified byte-for-byte against the 8086 D0-D3 opcode
 ; table (reg field = /ext: ROL=0, ROR=1, SAR=7, SAL=4 same as SHL) before
-; being adopted as the regression baseline -- see DOCS/TASM_PLAN.MD
-; "Testing strategy for v2".
+; being adopted as the regression baseline -- see DOCS/TESTS.MD
+; "TASM assembler regression test".
 bits 16
 cpu 8086
 section .data

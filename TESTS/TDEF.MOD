@@ -3,7 +3,7 @@ MODULE TDEF;
    DefWrite produces the expected text patterns and that DefRead round-trips
    symbols correctly. *)
 
-IMPORT Test, Files, Strings, Syms, Def;
+IMPORT Test, Files, Strings, Syms, Def, StrTab;
 
 VAR
   TmpDef: ARRAY 8 OF CHAR;
@@ -49,10 +49,18 @@ PROCEDURE cleanup;
 BEGIN Syms.SymsFree(); ok := Files.Delete(TmpDef) END cleanup;
 
 PROCEDURE has(pat: ARRAY OF CHAR): BOOLEAN;
-BEGIN RETURN Strings.Pos(pat, Txt, 0) >= 0 END has;
+  VAR p: WORD;
+BEGIN p := 0; RETURN Strings.Pos(pat, Txt, p) END has;
 
+(* posOf: like Strings.Pos, but folds the "not found" case down to -1 so
+   callers can keep using ordinary signed comparisons (pConst < pType etc.)
+   on the result. *)
 PROCEDURE posOf(pat: ARRAY OF CHAR): INTEGER;
-BEGIN RETURN Strings.Pos(pat, Txt, 0) END posOf;
+  VAR p: WORD;
+BEGIN
+  p := 0;
+  IF Strings.Pos(pat, Txt, p) THEN RETURN INTEGER(p) ELSE RETURN -1 END
+END posOf;
 
 (* ---- module line ---- *)
 
@@ -143,7 +151,7 @@ END TNonExported;
 (* ---- round-trip all ---- *)
 
 PROCEDURE TRoundtripAll*;
-  VAR s: Syms.Symbol;
+  VAR s: Syms.Symbol; nameBuf: ARRAY Syms.NameLen OF CHAR;
 BEGIN
   Syms.SymInit();
   s := Syms.SymNew("bar", Syms.KConst);
@@ -160,14 +168,14 @@ BEGIN
   Syms.SymsFree(); Syms.SymInit();
   doRead("F");
 
-  s := Syms.SymFindLocal("F.bar");
+  s := Syms.SymFindLocalId(StrTab.Intern("F.bar"));
   Test.AssertNotNil(s, "rt/bar found");
   IF s # NIL THEN
     Test.AssertInt(Syms.KConst, s^.kind, "rt/bar kind");
     Test.AssertLong(42, s^.val, "rt/bar val")
   END;
 
-  s := Syms.SymFindLocal("F.x");
+  s := Syms.SymFindLocalId(StrTab.Intern("F.x"));
   Test.AssertNotNil(s, "rt/x found");
   IF s # NIL THEN
     Test.AssertInt(Syms.KVar, s^.kind, "rt/x kind");
@@ -175,15 +183,16 @@ BEGIN
     Test.AssertInt(0, INTEGER(s^.level), "rt/x level")
   END;
 
-  s := Syms.SymFindLocal("F.T");
+  s := Syms.SymFindLocalId(StrTab.Intern("F.T"));
   Test.AssertNotNil(s, "rt/T found");
   IF s # NIL THEN Test.AssertInt(Syms.KType, s^.kind, "rt/T kind") END;
 
-  s := Syms.SymFindLocal("F.Calc");
+  s := Syms.SymFindLocalId(StrTab.Intern("F.Calc"));
   Test.AssertNotNil(s, "rt/Calc found");
   IF s # NIL THEN
     Test.AssertInt(Syms.KProc, s^.kind, "rt/Calc kind");
-    Test.AssertStr("Foo_Calc", s^.modName, "rt/Calc modName")
+    StrTab.Get(s^.nameId, nameBuf);
+    Test.AssertStr("F.Calc", nameBuf, "rt/Calc nameId")
   END;
   cleanup
 END TRoundtripAll;
@@ -198,7 +207,7 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("E");
-  Test.AssertNil(Syms.SymFindLocal("nothing"), "empty/no symbols");
+  Test.AssertNil(Syms.SymFindLocalId(StrTab.Intern("nothing")), "empty/no symbols");
   cleanup
 END TEmptyModule;
 
@@ -219,15 +228,15 @@ BEGIN
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
 
-  s := Syms.SymFindLocal("M.A");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.A"));
   Test.AssertNotNil(s, "multi/A found");
   IF s # NIL THEN Test.AssertLong(1, s^.val, "multi/A=1") END;
 
-  s := Syms.SymFindLocal("M.B");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.B"));
   Test.AssertNotNil(s, "multi/B found");
   IF s # NIL THEN Test.AssertLong(2, s^.val, "multi/B=2") END;
 
-  s := Syms.SymFindLocal("M.C");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.C"));
   Test.AssertNotNil(s, "multi/C found");
   IF s # NIL THEN Test.AssertLong(3, s^.val, "multi/C=3") END;
   cleanup
@@ -268,19 +277,19 @@ BEGIN
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
 
-  s := Syms.SymFindLocal("M.Point");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Point"));
   Test.AssertNotNil(s, "rec-fields/Point found");
   IF s # NIL THEN
     Test.AssertInt(Syms.TFRecord, s^.type^.form, "rec-fields/Point is record");
     Test.AssertLong(4, s^.type^.size, "rec-fields/size=4");
-    fld := Syms.SymFindField(s^.type, "x");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("x"));
     Test.AssertNotNil(fld, "rec-fields/x found");
     IF fld # NIL THEN
       Test.AssertLong(0, fld^.offset, "rec-fields/x offset=0");
       Test.AssertTrue(fld^.type = Syms.TypeInteger,
                       "rec-fields/x type=INTEGER")
     END;
-    fld := Syms.SymFindField(s^.type, "y");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("y"));
     Test.AssertNotNil(fld, "rec-fields/y found");
     IF fld # NIL THEN
       Test.AssertLong(2, fld^.offset, "rec-fields/y offset=2")
@@ -311,12 +320,12 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.Point3D");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Point3D"));
   Test.AssertNotNil(s, "rec-ext/Point3D found");
   IF s # NIL THEN
     Test.AssertInt(Syms.TFRecord, s^.type^.form, "rec-ext/is record");
     Test.AssertNotNil(s^.type^.base, "rec-ext/has base");
-    fld := Syms.SymFindField(s^.type, "z");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("z"));
     Test.AssertNotNil(fld, "rec-ext/z found")
   END;
   cleanup
@@ -342,10 +351,10 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.Node");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Node"));
   Test.AssertNotNil(s, "ptr-rec/Node found");
   IF s # NIL THEN
-    fld := Syms.SymFindField(s^.type, "next");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("next"));
     Test.AssertNotNil(fld, "ptr-rec/next found");
     IF fld # NIL THEN
       Test.AssertInt(Syms.TFPointer, fld^.type^.form,
@@ -374,20 +383,20 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.Floats");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Floats"));
   Test.AssertNotNil(s, "float-set/Floats found");
   IF s # NIL THEN
-    fld := Syms.SymFindField(s^.type, "r");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("r"));
     Test.AssertNotNil(fld, "float-set/r found");
     IF fld # NIL THEN
       Test.AssertInt(Syms.TFReal, fld^.type^.form, "float-set/r=REAL")
     END;
-    fld := Syms.SymFindField(s^.type, "lr");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("lr"));
     IF fld # NIL THEN
       Test.AssertInt(Syms.TFLongreal, fld^.type^.form,
                      "float-set/lr=LONGREAL")
     END;
-    fld := Syms.SymFindField(s^.type, "st");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("st"));
     IF fld # NIL THEN
       Test.AssertInt(Syms.TFSet, fld^.type^.form, "float-set/st=SET")
     END
@@ -413,7 +422,7 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.Calc");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Calc"));
   Test.AssertNotNil(s, "proc-float/Calc found");
   IF s # NIL THEN
     Test.AssertInt(Syms.TFLongreal, s^.type^.retType^.form,
@@ -476,13 +485,13 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.R");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.R"));
   Test.AssertNotNil(s, "real-base/R found");
   IF s # NIL THEN
-    fld := Syms.SymFindField(s^.type, "a");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("a"));
     Test.AssertTrue((fld # NIL) & (fld^.type = Syms.TypeReal),
                     "real-base/a resolves to TypeReal");
-    fld := Syms.SymFindField(s^.type, "b");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("b"));
     Test.AssertTrue((fld # NIL) & (fld^.type = Syms.TypeLongreal),
                     "real-base/b resolves to TypeLongreal")
   END;
@@ -508,7 +517,7 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.ReadInt");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.ReadInt"));
   Test.AssertNotNil(s, "typed-varparam/found");
   IF s # NIL THEN
     p := s^.type^.params;
@@ -558,7 +567,7 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("Mod");
-  s := Syms.SymFindLocal("Mod.Add");
+  s := Syms.SymFindLocalId(StrTab.Intern("Mod.Add"));
   Test.AssertTrue(s # NIL, "fwd-rt/Add found");
   IF s # NIL THEN
     Test.AssertInt(Syms.KProc, s^.kind, "fwd-rt/kind=PROC");
@@ -598,10 +607,10 @@ BEGIN
   bSym^.type := bRec; bSym^.exported := TRUE;
 
   doRead("M");
-  s := Syms.SymFindLocal("M.Container");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Container"));
   Test.AssertTrue(s # NIL, "imp-ptr/Container found");
   IF s # NIL THEN
-    fld := Syms.SymFindField(s^.type, "p");
+    fld := Syms.SymFindFieldId(s^.type, StrTab.Intern("p"));
     Test.AssertTrue(fld # NIL, "imp-ptr/field p found");
     IF fld # NIL THEN
       Test.AssertInt(Syms.TFPointer, fld^.type^.form, "imp-ptr/p is POINTER");
@@ -636,13 +645,13 @@ BEGIN
   baseSym := Syms.SymNew("B.Animal", Syms.KType);
   baseSym^.type := base; baseSym^.exported := TRUE;
   doRead("M");
-  extSym := Syms.SymFindLocal("M.Dog");
+  extSym := Syms.SymFindLocalId(StrTab.Intern("M.Dog"));
   Test.AssertNotNil(extSym, "cross-ext/Dog found");
   IF extSym # NIL THEN
     Test.AssertInt(Syms.TFRecord, extSym^.type^.form,
                    "cross-ext/Dog is record");
     Test.AssertNotNil(extSym^.type^.base, "cross-ext/Dog has base");
-    fld := Syms.SymFindField(extSym^.type, "legs");
+    fld := Syms.SymFindFieldId(extSym^.type, StrTab.Intern("legs"));
     Test.AssertNotNil(fld, "cross-ext/legs found")
   END;
   cleanup
@@ -668,7 +677,7 @@ BEGIN
 
   Syms.SymsFree(); Syms.SymInit();
   doRead("M");
-  s := Syms.SymFindLocal("M.ADR");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.ADR"));
   Test.AssertNotNil(s, "typeless/found");
   IF s # NIL THEN
     p := s^.type^.params;
@@ -682,6 +691,59 @@ BEGIN
   END;
   cleanup
 END TTypelessVarParam;
+
+(* ---- VAR param of POINTER TO ARRAY (anonymous array base) round-trip ----
+   Regression for PTR.MD: WriteType's POINTER branch used to find no symbol
+   name for the array base (an anonymous ARRAY N OF T, never itself given a
+   TYPE alias) and fell back to writing "POINTER VOID", losing the array
+   shape across module boundaries.  Every VAR param whose formal type is a
+   bare POINTER TO ARRAY hit this — see the TRec.Fill/TUse repro in PTR.MD. *)
+PROCEDURE TVarParamPtrArray*;
+  VAR s: Syms.Symbol; rec, arr, ptr, pt: Syms.TypeDesc; fld, p: Syms.Symbol;
+BEGIN
+  Syms.SymInit();
+  rec := Syms.TypeNewRecord(NIL);
+  fld := Syms.TypeAddField(rec, "a", Syms.TypeInteger);
+  fld^.exported := TRUE;
+  s := Syms.SymNew("Item", Syms.KType);
+  s^.type := rec; s^.exported := TRUE;
+  arr := Syms.TypeNewArray(rec, 10);
+  ptr := Syms.TypeNewPointer(arr);
+  pt := Syms.TypeNewProc(Syms.TypeNotype);
+  pt^.isFar := TRUE;
+  p := Syms.TypeAddParam(pt, "arr", ptr, TRUE);
+  s := Syms.SymNew("Fill", Syms.KProc);
+  s^.type := pt; s^.exported := TRUE;
+  doWrite("M");
+  Test.AssertTrue(has("PARAM VAR arr POINTER ARRAY 10 OF Item"),
+                  "varparam-ptrarr/write PARAM VAR ... POINTER ARRAY 10 OF Item");
+  Test.AssertFalse(has("POINTER VOID"),
+                    "varparam-ptrarr/no POINTER VOID fallback");
+
+  Syms.SymsFree(); Syms.SymInit();
+  doRead("M");
+  s := Syms.SymFindLocalId(StrTab.Intern("M.Fill"));
+  Test.AssertNotNil(s, "varparam-ptrarr/Fill found");
+  IF s # NIL THEN
+    p := s^.type^.params;
+    Test.AssertNotNil(p, "varparam-ptrarr/param exists");
+    IF p # NIL THEN
+      Test.AssertInt(Syms.KVarParam, p^.kind, "varparam-ptrarr/kind=VarParam");
+      Test.AssertInt(Syms.TFPointer, p^.type^.form,
+                     "varparam-ptrarr/type=POINTER");
+      IF p^.type^.form = Syms.TFPointer THEN
+        Test.AssertNotNil(p^.type^.base, "varparam-ptrarr/base exists");
+        IF p^.type^.base # NIL THEN
+          Test.AssertInt(Syms.TFArray, p^.type^.base^.form,
+                         "varparam-ptrarr/base=ARRAY");
+          Test.AssertInt(10, INTEGER(p^.type^.base^.len),
+                         "varparam-ptrarr/base len=10")
+        END
+      END
+    END
+  END;
+  cleanup
+END TVarParamPtrArray;
 
 PROCEDURE RunAllTests*;
 BEGIN
@@ -709,6 +771,7 @@ BEGIN
   Test.AddTest(TForwardProcRT,     "Def/forward-proc-rt");
   Test.AddTest(TImportedTypePtr,   "Def/imported-type-ptr");
   Test.AddTest(TCrossModuleExt,    "Def/cross-module-ext");
+  Test.AddTest(TVarParamPtrArray,  "Def/var-param-ptr-array");
   Test.RunTests
 END RunAllTests;
 

@@ -163,17 +163,17 @@ BEGIN
 END TFindByte;
 
 PROCEDURE TStringsPos*;
-  VAR s: ARRAY 16 OF CHAR; r: INTEGER;
+  VAR s: ARRAY 16 OF CHAR; p: WORD; found: BOOLEAN;
 BEGIN
   Strings.Copy("hello,world", s);
-  r := Strings.Pos(",", s, 0);
-  Test.AssertTrue(r = 5, "Pos single-char found");
-  r := Strings.Pos("x", s, 0);
-  Test.AssertTrue(r = -1, "Pos single-char not found");
-  r := Strings.Pos("d", s, 0);
-  Test.AssertTrue(r = 10, "Pos single-char at end");
-  r := Strings.Pos(",", s, 6);
-  Test.AssertTrue(r = -1, "Pos single-char start past match")
+  p := 0; found := Strings.Pos(",", s, p);
+  Test.AssertTrue(found & (p = WORD(5)), "Pos single-char found");
+  p := 0; found := Strings.Pos("x", s, p);
+  Test.AssertTrue(~found, "Pos single-char not found");
+  p := 0; found := Strings.Pos("d", s, p);
+  Test.AssertTrue(found & (p = WORD(10)), "Pos single-char at end");
+  p := 6; found := Strings.Pos(",", s, p);
+  Test.AssertTrue(~found, "Pos single-char start past match")
 END TStringsPos;
 
 PROCEDURE RunAllTests*;

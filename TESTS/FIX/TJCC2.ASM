@@ -3,8 +3,8 @@
 ; parity conditional jumps. No independent NASM oracle: the local nasm
 ; build lacks the rdf output backend. Expected TJCC2.RDF was hand-verified
 ; byte-for-byte against the 8086 70h-7Fh Jcc opcode map before being
-; adopted as the regression baseline -- see DOCS/TASM_PLAN.MD "Testing
-; strategy for v2".
+; adopted as the regression baseline -- see DOCS/TESTS.MD "TASM assembler
+; regression test".
 bits 16
 cpu 8086
 section .text
