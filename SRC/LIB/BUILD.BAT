@@ -1,26 +1,28 @@
 @echo off
 
-toc /SYSTEM SYSTEM.MOD
-toc OUT.MOD
-toc OUT87.MOD
-toc IN.MOD
-toc EMS.MOD
-toc FILES.MOD
-toc STRINGS.MOD
-toc DOS.MOD
-toc CRT.MOD
-toc TIME.MOD
-toc MATH.MOD
-toc IO.MOD
-toc RDFLOAD.MOD
-toc TEST.MOD
-toc LOGERR.MOD
-toc RDOFF.MOD
-toc TAR.MOD
-toc DETECT.MOD
-toc KMOUSE.MOD
-toc WINCB.MOD
-toc SCREEN.MOD
+del *.om
+
+..\..\BIN\toc /SYSTEM SYSTEM.MOD
+..\..\BIN\toc OUT.MOD
+..\..\BIN\toc OUT87.MOD
+..\..\BIN\toc IN.MOD
+..\..\BIN\toc EMS.MOD
+..\..\BIN\toc FILES.MOD
+..\..\BIN\toc STRINGS.MOD
+..\..\BIN\toc DOS.MOD
+..\..\BIN\toc CRT.MOD
+..\..\BIN\toc TIME.MOD
+..\..\BIN\toc MATH.MOD
+..\..\BIN\toc IO.MOD
+..\..\BIN\toc RDFLOAD.MOD
+..\..\BIN\toc TEST.MOD
+..\..\BIN\toc LOGERR.MOD
+..\..\BIN\toc RDOFF.MOD
+..\..\BIN\toc TAR.MOD
+..\..\BIN\toc DETECT.MOD
+..\..\BIN\toc KMOUSE.MOD
+..\..\BIN\toc WINCB.MOD
+..\..\BIN\toc SCREEN.MOD
 
 echo SYSTEM.MOD > oberon.lst
 echo OUT.MOD >> oberon.lst
@@ -45,7 +47,7 @@ echo WINCB.MOD >> oberon.lst
 echo SCREEN.MOD >> oberon.lst
 
 del OBERON.OM
-tolib.exe merge OBERON.OM @oberon.lst
+..\..\BIN\tolib.exe merge OBERON.OM @oberon.lst
 del oberon.lst
 
 copy OBERON.OM ..\BIN\

@@ -62,8 +62,14 @@ PROCEDURE SetLineSize(w: WORD); EXTERNAL;
 PROCEDURE SetScreenSize(n: WORD); EXTERNAL;
 PROCEDURE SetVSeg(seg: WORD); EXTERNAL;
 
-PROCEDURE GetHeightAsm(): INTEGER; EXTERNAL;
-PROCEDURE GetWidthAsm(): INTEGER; EXTERNAL;
+
+(* GetWidth returns the number of text columns in the current video
+   mode. No parameters. Result: column count (BIOS word 0040h:004Ah). *)
+PROCEDURE GetWidth*(): INTEGER; EXTERNAL;
+
+(* GetHeight returns the number of text rows in the current video mode.
+   No parameters. Result: row count (BIOS byte 0040h:0084h + 1). *)
+PROCEDURE GetHeight*(): INTEGER; EXTERNAL;
 
 PROCEDURE ClsAsm(clr: BYTE); EXTERNAL;
 PROCEDURE ClnAsm(x, y: INTEGER; clr: BYTE); EXTERNAL;
@@ -75,8 +81,14 @@ PROCEDURE PrintHlAsm(x, y: INTEGER; clr, hlclr: BYTE; s: SYSTEM.ADDRESS); EXTERN
 PROCEDURE ShowAsm; EXTERNAL;
 
 PROCEDURE LocateAsm(x, y: INTEGER); EXTERNAL;
-PROCEDURE GetXAsm(): INTEGER; EXTERNAL;
-PROCEDURE GetYAsm(): INTEGER; EXTERNAL;
+
+(* GetX returns the current hardware text-cursor column. No parameters.
+   Result: the column. *)
+PROCEDURE GetX*(): INTEGER; EXTERNAL;
+
+(* GetY returns the current hardware text-cursor row. No parameters.
+   Result: the row. *)
+PROCEDURE GetY*(): INTEGER; EXTERNAL;
 
 PROCEDURE SetCursorAsm(w: WORD); EXTERNAL;
 PROCEDURE GetCursorAsm(): WORD; EXTERNAL;
@@ -88,18 +100,6 @@ PROCEDURE WaitRetraceAsm; EXTERNAL;
 PROCEDURE Spinner1c; FAR; EXTERNAL;
 
 (*$L SCREEN.RDF*)
-
-(* GetWidth returns the number of text columns in the current video
-   mode. No parameters. Result: column count (BIOS word 0040h:004Ah). *)
-PROCEDURE GetWidth*(): INTEGER;
-BEGIN RETURN GetWidthAsm()
-END GetWidth;
-
-(* GetHeight returns the number of text rows in the current video mode.
-   No parameters. Result: row count (BIOS byte 0040h:0084h + 1). *)
-PROCEDURE GetHeight*(): INTEGER;
-BEGIN RETURN GetHeightAsm()
-END GetHeight;
 
 (* Cls clears the entire shadow screen buffer to spaces in color clr.
    Parameters: clr -- the fill attribute byte. Result: none. Call Show
@@ -166,18 +166,6 @@ END Show;
 PROCEDURE Locate*(x, y: INTEGER);
 BEGIN LocateAsm(x, y)
 END Locate;
-
-(* GetX returns the current hardware text-cursor column. No parameters.
-   Result: the column. *)
-PROCEDURE GetX*(): INTEGER;
-BEGIN RETURN GetXAsm()
-END GetX;
-
-(* GetY returns the current hardware text-cursor row. No parameters.
-   Result: the row. *)
-PROCEDURE GetY*(): INTEGER;
-BEGIN RETURN GetYAsm()
-END GetY;
 
 (* CursorOff hides the hardware text cursor (sets an off-screen cursor
    shape). No parameters, no result. *)

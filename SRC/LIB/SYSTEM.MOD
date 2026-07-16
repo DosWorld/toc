@@ -283,10 +283,6 @@ PROCEDURE ISSPACE*(c: CHAR): BOOLEAN;
 PROCEDURE ISHEX*(c: CHAR): BOOLEAN;
   INLINE(058H, 00CH, 020H, 02CH, 030H, 03CH, 00AH, 072H, 004H, 02CH, 031H, 03CH, 006H, 019H, 0C0H, 0F7H, 0D8H);
 
-(* HEXDIGIT: return ASCII hex digit for c. If c = 0AH then return 'A' *)
-PROCEDURE HEXDIGIT*(c: CHAR): CHAR;
-  INLINE(58H, 0b4H, 030H, 03cH, 00aH, 07cH, 002H, 0b4H, 037H, 000H, 0e0H);
-
 (* UPSTR: uppercase a string in place (ASCII a..z only).
    s MUST be an open array (ARRAY OF CHAR): the INLINE pops the 6-byte open-array
    slot {ofs, seg, LEN} as BX, ES, CX.  A typeless `VAR s` pushes only {ofs, seg}
@@ -451,6 +447,6 @@ PROCEDURE SegB000*:WORD; EXTERNAL;
 PROCEDURE SegB800*:WORD; EXTERNAL;
 PROCEDURE SegA000*:WORD; EXTERNAL;
 
-(*$L SYS.RDF*)
+(*$L SYSTEM.RDF*)
 
 END SYSTEM.

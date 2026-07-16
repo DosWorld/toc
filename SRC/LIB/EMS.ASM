@@ -57,7 +57,7 @@ endstruc
 ; every procedure EMS.MOD used to implement in Oberon (KB->pages rounding,
 ; MoveDesc struct packing, page-frame pointer arithmetic, the
 ; driverPresent/pageFrameObtained/pageFrameSeg/errorCode module state) now
-; lives here, in the same style as SYSTEM.MOD/SYS.ASM: EMS.MOD is reduced to
+; lives here, in the same style as SYSTEM.MOD/SYSTEM.ASM: EMS.MOD is reduced to
 ; bare `PROCEDURE ...; EXTERNAL;` declarations with no logic of their own.
 ; Global symbol names follow the compiler's EXTERNAL-import rule:
 ; "<MODULE>_<ProcName>" (Parser.MOD ParseProcDecl's EXTERNAL branch), so
@@ -66,13 +66,13 @@ endstruc
 ; PageSize (16384 = 2^14) divides/mods are done with a shift/mask (PageShift)
 ; instead of a general 32-bit divide kernel -- both operands of every
 ; DIV/MOD on an EMS offset in this file are powers of two.  (A general
-; 32-bit divide kernel already exists as SYS.ASM's SYSTEM_S32DIV/S32MOD, but
+; 32-bit divide kernel already exists as SYSTEM.ASM's SYSTEM_S32DIV/S32MOD, but
 ; it is not reachable from here: separate $L .rdf blobs are appended into
 ; the .om archive as opaque data, not symbol-resolved against each other,
-; so EMS.RDF cannot call into SYS.RDF.)  Every routine below saves/
+; so EMS.RDF cannot call into SYSTEM.RDF.)  Every routine below saves/
 ; restores DS around its own access to the module's .data state
 ; (driverPresent/pageFrameObtained/pageFrameSeg/errorCode/moveDesc), loading
-; DS via `mov ax, seg driverPresent` -- the same idiom SYS.ASM uses for its
+; DS via `mov ax, seg driverPresent` -- the same idiom SYSTEM.ASM uses for its
 ; own .data (`mov ax, seg i87` / `mov ax, seg ExitProc`) -- since a FAR
 ; proc's DS on entry is the caller's data segment, not necessarily this
 ; module's, and .data is a segment distinct from .text in this model.
@@ -451,7 +451,7 @@ EMS_CopyToEMS:
 .go:
         ; bx = emsOffset >> PageShift (logical page number); cx = scratch
         ; loop counter for the compile-time-constant 14-bit shift (paid once
-        ; per call, not per byte moved -- see SYS.ASM's div_kernel_32 for the
+        ; per call, not per byte moved -- see SYSTEM.ASM's div_kernel_32 for the
         ; same reasoning applied to its 32-iteration shift loop).
         mov     ax, emsOfs_lo
         mov     dx, emsOfs_hi
@@ -616,7 +616,7 @@ EMS_CopyToDos:
 ; within this file needs a segment-base reference that only a real
 ; RDOFF-relocatable build can resolve (see EMS_MapPtr's note on the same
 ; issue) -- easier to factor the shared logic into a NEAR call instead,
-; matching SYS.ASM's own div_kernel_32/check_8087/MEM_INIT pattern.
+; matching SYSTEM.ASM's own div_kernel_32/check_8087/MEM_INIT pattern.
 ; Clobbers: AX.  Preserves: BX, CX, DX, SI, DI, DS, ES.
 ; -----------------------------------------------------------------------------
 version_near:
@@ -813,7 +813,7 @@ EMS_UnmapPage:
 ; Handle Page gating/call is inlined here rather than calling EMS_MapPage
 ; directly: NASM's `bin`-testable syntax for an intra-file FAR call needs a
 ; segment-base reference that only a real RDOFF-relocatable build can
-; resolve, and SYS.ASM's own routines never call one another's `global` FAR
+; resolve, and SYSTEM.ASM's own routines never call one another's `global` FAR
 ; entry points either -- each externally-callable routine is self-contained.
 ; On success returns DX:AX = far pointer {segment = pageFrameSeg +
 ; physWin*(PageSize/16), offset = offsetInPage}; on failure returns DX:AX =
@@ -832,7 +832,7 @@ EMS_MapPtr:
         push    cx
         ; No push dx: this routine returns DX:AX (far pointer / NIL), so DX
         ; is a result register here, not a callee-saved one -- same
-        ; convention SYS.ASM's SYSTEM_Alloc follows for its DX:AX result.
+        ; convention SYSTEM.ASM's SYSTEM_Alloc follows for its DX:AX result.
 
         mov     ax, seg driverPresent
         mov     ds, ax

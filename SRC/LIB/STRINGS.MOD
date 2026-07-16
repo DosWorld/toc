@@ -1,6 +1,9 @@
 (*$R-,D-*)
 MODULE Strings;
 
+TYPE
+PCHAR*=SYSTEM.ADDRESS;
+
 (* Length: compute the length of a NUL-terminated string.
    Parameters: s — the string to measure.
    Result: number of characters before the terminating 0X. *)
@@ -14,38 +17,47 @@ BEGIN
   RETURN SYSTEM.LENGTH(s)
 END NearLength;
 
-(* Pos: find the first occurrence of pat in s starting the scan at pos.
-   Parameters: pat — substring to search for; s — string to search within;
-   pos — 0-based index to start scanning from.
-   Result: 0-based index of the first match, or -1 if not found. *)
-PROCEDURE Pos*(pat, s: ARRAY OF CHAR; pos: INTEGER): INTEGER;
-VAR i, j, lp, ls, r: INTEGER; found: BOOLEAN;
+(* Pos: find the first occurrence of substr in string, starting the scan at
+   the offset passed in pos.
+   Parameters: substr — substring to search for; string — string to search
+   within; pos — in/out: on entry, the 0-based index to start scanning from;
+   on a TRUE result, overwritten with the 0-based index of the match. On a
+   FALSE result, pos is left unspecified (callers must not rely on its value).
+   Result: TRUE if substr was found at or after the original pos, FALSE if
+   not found or if the original pos was already past the end of string. *)
+PROCEDURE Pos*(substr, string: ARRAY OF CHAR; VAR pos: WORD): BOOLEAN;
+VAR i, j, lp, ls, r, startpos: INTEGER; found: BOOLEAN;
 BEGIN
-  lp := NearLength(pat);
-  ls := NearLength(s);
-  IF lp = 0 THEN RETURN pos END;
+  lp := NearLength(substr);
+  ls := NearLength(string);
+  startpos := INTEGER(pos);
+  IF startpos > ls THEN RETURN FALSE END;
+  IF lp = 0 THEN RETURN TRUE END;
   IF lp = 1 THEN
     (* Single-char pattern: dispatch to the fast REPNE SCASB scan instead of
        the general double loop below. *)
-    r := SYSTEM.FINDBYTE(s[pos], BYTE(pat[0]), WORD(ls - pos));
-    IF r = WORD(ls - pos) THEN RETURN -1 ELSE RETURN pos + r END
+    r := SYSTEM.FINDBYTE(string[startpos], BYTE(substr[0]), WORD(ls - startpos));
+    IF r = ls - startpos THEN RETURN FALSE END;
+    pos := WORD(startpos + r);
+    RETURN TRUE
   END;
-  i := pos; found := FALSE;
+  i := startpos; found := FALSE;
   WHILE (i <= ls - lp) & ~found DO
     j := 0;
-    WHILE (j < lp) & (s[i + j] = pat[j]) DO
+    WHILE (j < lp) & (string[i + j] = substr[j]) DO
       INC(j)
     END;
     IF j = lp THEN found := TRUE ELSE INC(i) END
   END;
-  IF found THEN RETURN i ELSE RETURN -1 END
+  IF found THEN pos := WORD(i) END;
+  RETURN found
 END Pos;
 
 (* Append: append s to the end of the NUL-terminated string d, truncating
    if d's buffer is too small.
    Parameters: s — string to append; d — destination string, modified in place. *)
 PROCEDURE Append*(s: ARRAY OF CHAR; VAR d: ARRAY OF CHAR);
-VAR dl, len: INTEGER;
+VAR dl, len: WORD;
 BEGIN
   dl := NearLength(d);
   (* len = number of CHARACTERS to copy (excludes the NUL terminator,
@@ -57,7 +69,7 @@ BEGIN
      entirely (e.g. an 8-char string in a 9-byte buffer appending a single
      space) -- found while porting SRC/TLINK's /N: device-name padding. *)
   len := SYSTEM.MIN(NearLength(s), LEN(d) - 1 - dl);
-  IF len > 0 THEN
+  IF len # 0 THEN
     SYSTEM.MOVE(s[0], d[dl], len);
     d[dl + len] := 0X
   END
@@ -388,5 +400,42 @@ BEGIN
   WordToHexStr(val, v);
   Append(v, str);
 END AppendHexWord;
+
+(* LTrim: remove leading whitespace from s, in place.
+   Parameters: s — string to trim, modified in place.
+   Whitespace is any byte SYSTEM.ISSPACE accepts (ORD 1..32, i.e. space and
+   the low control characters), matching the rest of this module's charset
+   assumptions (e.g. Val's own leading/trailing skip loops). *)
+PROCEDURE LTrim*(VAR s: ARRAY OF CHAR);
+VAR l, n: WORD;
+BEGIN
+  l := NearLength(s);
+  n := 0;
+  WHILE (n < l) & SYSTEM.ISSPACE(s[n]) DO INC(n) END;
+  IF n > 0 THEN Delete(s, 0, n) END
+END LTrim;
+
+(* RTrim: remove trailing whitespace from s, in place.
+   Parameters: s — string to trim, modified in place.
+   No SYSTEM intrinsic scans backward (SYSTEM.FINDBYTE is forward-only via
+   REPNE SCASB), so the search for the new length is a plain reverse loop;
+   the actual truncation is a single NUL write, no MOVE needed. *)
+PROCEDURE RTrim*(VAR s: ARRAY OF CHAR);
+VAR l: WORD;
+BEGIN
+  l := NearLength(s);
+  WHILE (l > 0) & SYSTEM.ISSPACE(s[l - 1]) DO DEC(l) END;
+  s[l] := 0X
+END RTrim;
+
+(* Trim: remove leading and trailing whitespace from s, in place.
+   Parameters: s — string to trim, modified in place.
+   RTrim first: shrinking the tail before LTrim's SYSTEM.MOVE shift-left
+   means that MOVE (if any leading whitespace is found) copies fewer bytes. *)
+PROCEDURE Trim*(VAR s: ARRAY OF CHAR);
+BEGIN
+  RTrim(s);
+  LTrim(s)
+END Trim;
 
 END Strings.

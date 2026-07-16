@@ -419,7 +419,7 @@ PROCEDURE RdfAddGlobal*(obj: ObjFile; name: ARRAY OF CHAR; segId: BYTE; offset: 
 BEGIN
   NEW(g);
   (* flags=0 matches real NASM's RDOFF2 writer (verified against
-     SRC/LIB/SYS.RDF); LINK.MOD never reads this byte (grep found zero
+     SRC/LIB/SYSTEM.RDF); LINK.MOD never reads this byte (grep found zero
      references), so the value has no linking effect either way -- kept at
      0 purely so a TASM-produced .rdf can byte-diff against a NASM oracle. *)
   g^.flags := BYTE(0);
@@ -523,7 +523,7 @@ BEGIN
   (* Real NASM's own RDOFF2 writer under-reports modSize by exactly 10
      bytes (the trailing type=0 EOF segment marker's own 10-byte header is
      always present on disk but excluded from the recorded module size) --
-     verified against SYS.RDF: both a NASM-built file and a from-scratch
+     verified against SYSTEM.RDF: both a NASM-built file and a from-scratch
      byte-count agree the real file is 10 bytes longer than its own
      modSize field claims.  DOCS/RDOFF2.MD doesn't document this as
      intentional, and no reader in this codebase (RdfLoad/ScanHeader) uses
@@ -538,7 +538,7 @@ BEGIN
 
   (* Record order: GLOBAL, then IMPORT, then RELOC/SEGRELOC (interleaved in
      original emission order), then BSS -- matches real NASM's own RDOFF2
-     writer (verified against SRC/LIB/SYS.RDF, an oracle built by real NASM:
+     writer (verified against SRC/LIB/SYSTEM.RDF, an oracle built by real NASM:
      all GLOBAL records first, then the RELOC/SEGRELOC stream in emission
      order). The linker (ScanHeader/ScanRelocs) reads records by type, not
      position, so this ordering has no effect on linking -- it exists purely

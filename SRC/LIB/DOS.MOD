@@ -80,14 +80,6 @@ VAR
     argOfs   : ARRAY 32 OF INTEGER;
     argCount : INTEGER;
 
-PROCEDURE ReadByte(seg, ofs: INTEGER): CHAR;
-VAR
-    p : POINTER TO CHAR;
-BEGIN
-    p := SYSTEM.PTR(seg, ofs);
-    RETURN p^
-END ReadByte;
-
 (* GetPsp: retrieve the segment address of the current process's Program
    Segment Prefix, via INT 21h AH=62h.
    Parameters: none.
@@ -103,31 +95,28 @@ END GetPsp;
 
 PROCEDURE ArgInit;
 VAR
-    psp     : INTEGER;
-    len     : INTEGER;
-    pos     : INTEGER;
+    len     : WORD;
+    pos     : WORD;
     ai      : INTEGER;
     bi      : INTEGER;
     ch      : CHAR;
     inQuote : BOOLEAN;
     inArg   : BOOLEAN;
+    k       : SYSTEM.ADDRESS;
 BEGIN
-    psp  := GetPsp();
-    len  := ORD(ReadByte(psp, 80H));
-    IF len = 0 THEN
-        argCount := 0;
-        RETURN
-    END;
+    argCount := 0;
+    k := SYSTEM.PTR(GetPsp(), 80H);
+    len := ORD(k^);
+    IF len = 0 THEN RETURN END;
 
     pos     := 0;
     inQuote := FALSE;
     inArg   := FALSE;
     ai      := 1;
     bi      := 1;
-    argCount := 0;
-
+    INC(k);
     WHILE (pos < len) & (ai < 32) DO
-        ch := ReadByte(psp, 81H + pos);
+        ch := k^[pos];
         INC(pos);
 
         IF ch = 22X THEN
@@ -189,30 +178,28 @@ END ParamCount;
    Result: none (p is filled in place; empty string if i is out of
    range). *)
 PROCEDURE ParamStr*(i: INTEGER; VAR p: ARRAY OF CHAR);
-    VAR src, dst, envseg, ofs : INTEGER; ch : CHAR;
+    VAR src, dst, envseg : WORD; ch : CHAR; k : SYSTEM.ADDRESS;
 BEGIN
     IF i = 0 THEN
         (* Argv[0] = EXE filename, retrieved from PSP environment block. *)
         dst := 0;
-        envseg := ORD(ReadByte(GetPsp(), 2CH)) + ORD(ReadByte(GetPsp(), 2DH)) * 256;
-        IF envseg = 0 THEN
-            p[0] := 0X;
-            RETURN
-        END;
-        ofs := 0;
-        WHILE ReadByte(envseg, ofs) # 0X DO
-            WHILE ReadByte(envseg, ofs) # 0X DO INC(ofs) END;
-            INC(ofs)
+        k := SYSTEM.PTR(GetPsp(), 2CH);
+        envseg := ORD(k^) + ORD(k^[1]) * 256;
+        IF envseg = 0 THEN p[0] := 0X; RETURN END;
+        k := SYSTEM.PTR(envseg, 0);
+        WHILE k^ # 0X DO
+            WHILE k^ # 0X DO INC(k) END;
+            INC(k)
         END;
         (* now at the empty-string marker (single 0 byte) — skip it *)
-        INC(ofs);
+        INC(k);
         (* now at the 2-byte program-string count (always 1 under DOS 3.0+) *)
-        INC(ofs, 2);
+        INC(k, 2);
         (* now at the ASCIIZ program-name *)
-        ch := ReadByte(envseg, ofs);
+        ch := k^;
         WHILE (ch # 0X) & (dst < LEN(p) - 1) DO
-            p[dst] := ch; INC(dst); INC(ofs);
-            ch := ReadByte(envseg, ofs)
+            p[dst] := ch; INC(dst); INC(k);
+            ch := k^
         END;
         p[dst] := 0X
     ELSE
@@ -243,7 +230,6 @@ END ParamStr;
 PROCEDURE GetEnv*(envvar: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR
     envseg : INTEGER;
-    ofs    : INTEGER;
     ei     : INTEGER;
     di     : INTEGER;
     ch     : CHAR;
@@ -254,12 +240,11 @@ BEGIN
     pw := SYSTEM.PTR(GetPsp(), 2CH);
     envseg := pw^;
     IF envseg = 0 THEN RETURN END;
-
-    ofs := 0;
-    WHILE ReadByte(envseg, ofs) # 0X DO
+    pw := SYSTEM.PTR(envseg, 0);
+    WHILE pw^ # 0X DO
         ei := 0;
         match := TRUE;
-        ch := ReadByte(envseg, ofs);
+        ch := pw^;
         WHILE (ch # '=') & (ch # 0X) DO
             IF (ei < LEN(envvar) - 1) & match THEN
                 match := SYSTEM.UCASE(ch) = SYSTEM.UCASE(envvar[ei]);
@@ -267,25 +252,25 @@ BEGIN
             ELSE
                 match := FALSE
             END;
-            INC(ofs);
-            ch := ReadByte(envseg, ofs)
+            INC(pw);
+            ch := pw^
         END;
         IF match & (envvar[ei] = 0X) & (ch = '=') THEN
-            INC(ofs);
+            INC(pw);
             di := 0;
-            ch := ReadByte(envseg, ofs);
+            ch := pw^;
             WHILE ch # 0X DO
                 IF di < LEN(dst) - 1 THEN
                     dst[di] := ch; INC(di)
                 END;
-                INC(ofs);
-                ch := ReadByte(envseg, ofs)
+                INC(pw);
+                ch := pw^
             END;
             dst[di] := 0X;
             RETURN
         END;
-        WHILE ReadByte(envseg, ofs) # 0X DO INC(ofs) END;
-        INC(ofs)
+        WHILE pw^ # 0X DO INC(pw) END;
+        INC(pw)
     END
 END GetEnv;
 
@@ -594,10 +579,10 @@ END SetIntVec;
    receiving the expanded ASCIIZ path (truncated to fit).
    Result: none (Dest is filled in place). *)
 PROCEDURE FExpand*(Path: ARRAY OF CHAR; VAR Dest : ARRAY OF CHAR);
-  VAR r: SYSTEM.Registers; p, d: POINTER TO CHAR; i: INTEGER;
+  VAR r: SYSTEM.Registers; p, d: SYSTEM.ADDRESS; i: WORD;
 BEGIN
-  p := SYSTEM.ADR(Path);
-  d := SYSTEM.ADR(Dest);
+  p := SYSTEM.ADR(Path[0]);
+  d := SYSTEM.ADR(Dest[0]);
   r.AX := 6000H;
   r.DS := SYSTEM.SEG(p^);
   r.SI := SYSTEM.OFS(p^);
@@ -606,11 +591,9 @@ BEGIN
   r.Flags := 0;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
-    i := 0;
-    WHILE (i < LEN(Dest)) & (Path[i] # 0X) DO
-      Dest[i] := Path[i]; INC(i)
-    END;
-    IF i < LEN(Dest) THEN Dest[i] := 0X END
+    i := SYSTEM.MIN(LEN(Dest) - 1, SYSTEM.LENGTH(Path));
+    SYSTEM.MOVE(Path[0], Dest[0], i);
+    Dest[i] := 0X
   END
 END FExpand;
 
@@ -672,7 +655,7 @@ END FSplit;
    code can be retrieved separately by calling the DosExitCode function.
 
    Semantics match Turbo Pascal's Dos.Exec.  No Setblock dance: the runtime
-   (SYS.ASM SYSTEM_INIT) allocates only $M max paragraphs, so memory above
+   (SYSTEM.ASM SYSTEM_INIT) allocates only $M max paragraphs, so memory above
    the parent's heap is naturally available to the child.
    Parameters: Path — ASCIIZ path to the executable; CmdLine — ASCIIZ
    command-tail text (without the program name).

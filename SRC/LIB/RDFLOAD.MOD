@@ -70,7 +70,7 @@ TYPE
    Returns NIL for unknown names — callers can fall back to a user resolver. *)
 PROCEDURE BuiltinResolve(name: ARRAY OF CHAR): SYSTEM.ADDRESS;
 BEGIN
-  (* SYSTEM — provided by SYS.ASM at link time *)
+  (* SYSTEM — provided by SYSTEM.ASM at link time *)
   IF    Strings.Equal(name, "SYSTEM_Alloc")   THEN RETURN SYSTEM.ADR(SYSTEM.Alloc)
   ELSIF Strings.Equal(name, "SYSTEM_Free")    THEN RETURN SYSTEM.ADR(SYSTEM.Free)
   ELSIF Strings.Equal(name, "SYSTEM_Halt")    THEN RETURN SYSTEM.ADR(SYSTEM.Halt)
@@ -117,7 +117,14 @@ BEGIN
   ELSIF Strings.Equal(name, "Files_SetFTime")   THEN RETURN SYSTEM.ADR(Files.SetFTime)
   (* Strings *)
   ELSIF Strings.Equal(name, "Strings_Length")   THEN RETURN SYSTEM.ADR(Strings.Length)
+  (* Strings_Pos: signature is now (substr, string: ARRAY OF CHAR; VAR pos: WORD): BOOLEAN
+     -- pos is in/out (start offset in, match offset out) and the result is
+     TRUE/FALSE, not an INTEGER index.  Any external .RDF caller resolving
+     this symbol must match the new calling convention. *)
   ELSIF Strings.Equal(name, "Strings_Pos")      THEN RETURN SYSTEM.ADR(Strings.Pos)
+  ELSIF Strings.Equal(name, "Strings_LTrim")    THEN RETURN SYSTEM.ADR(Strings.LTrim)
+  ELSIF Strings.Equal(name, "Strings_RTrim")    THEN RETURN SYSTEM.ADR(Strings.RTrim)
+  ELSIF Strings.Equal(name, "Strings_Trim")     THEN RETURN SYSTEM.ADR(Strings.Trim)
   ELSIF Strings.Equal(name, "Strings_Append")   THEN RETURN SYSTEM.ADR(Strings.Append)
   ELSIF Strings.Equal(name, "Strings_Insert")   THEN RETURN SYSTEM.ADR(Strings.Insert)
   ELSIF Strings.Equal(name, "Strings_Delete")   THEN RETURN SYSTEM.ADR(Strings.Delete)

@@ -1,4 +1,4 @@
-; SCREEN.ASM -- ported from SCR.PAS (Turbo Pascal UNIT scr): text-mode
+; SCREEN.ASM -- ported from a Turbo Pascal UNIT scr: text-mode
 ; screen buffer driver (shadow buffer + blit, color print/scroll,
 ; cursor, INT 1Ch spinner). Every routine here was originally a
 ; "PROCEDURE/FUNCTION ...; ASSEMBLER; ASM ... END;" body -- translated
@@ -495,7 +495,7 @@ Screen_Show:
         PUSH BP
         MOV  BP, SP
         CALL FAR KMouse_MouseHide
-        CALL Screen_WaitRetrace
+        CALL FAR Screen_WaitRetrace
         PUSH AX
         PUSH CX
         PUSH SI

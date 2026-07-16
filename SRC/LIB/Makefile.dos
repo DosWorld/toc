@@ -6,7 +6,7 @@ OBERON.OM: SYSTEM.om Out.om Out87.om In.om IO.o, Strings.om Files.om Crt.om Dos.
 install: OBERON.OM
         copy OBERON.OM ..\bin\
 
-SYSTEM.om: SYS.RDF SYSTEM.mod ..\src\oc
+SYSTEM.om: SYSTEM.RDF SYSTEM.mod ..\src\oc
         ..\bin\oc /SYSTEM SYSTEM.mod
 
 Out.om: Out.mod SYSTEM.om ..\src\oc

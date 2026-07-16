@@ -29,20 +29,14 @@ TYPE
   END;
 
 VAR
-  tempSeq:  INTEGER;
-
-PROCEDURE DOSGetFileSize(handle: INTEGER): LONGINT;
-BEGIN
-  RETURN SYSTEM.FSIZE(handle)
-END DOSGetFileSize;
+  tempSeq:  WORD;
 
 PROCEDURE CopyName(VAR F: File; VAR name: ARRAY OF CHAR);
   VAR n: WORD;
 BEGIN
   (* name is a value param here at both call sites (Reset/ReWrite), so it can
      never alias F.name -> SYSTEM.MOVE is safe (non-overlapping). *)
-  n := SYSTEM.LENGTH(name);
-  IF n > WORD(255) THEN n := WORD(255) END;
+  n := SYSTEM.MIN(SYSTEM.LENGTH(name), 255);
   SYSTEM.MOVE(name[0], F.name[0], n);
   F.name[n] := 0X
 END CopyName;
@@ -108,13 +102,6 @@ BEGIN
   F.bufPos := 0
 END NextPage;
 
-PROCEDURE SeekTo(VAR F: File; pos: LONGINT);
-BEGIN
-  BufFetch(F, pos DIV BUFSIZE);
-  F.bufPos := SYSTEM.AND(WORD(pos), BUFSIZE - 1);
-  F.pos := pos
-END SeekTo;
-
 (* Seek: move the file's read/write cursor to an absolute byte position,
    clamped to [0, current file size].
    Parameters: F — the open file; pos — target byte offset from the start
@@ -124,7 +111,9 @@ PROCEDURE Seek*(VAR F: File; pos: LONGINT);
 BEGIN
   IF pos < 0 THEN pos := 0 END;
   IF pos > F.size THEN pos := F.size END;
-  SeekTo(F, pos)
+  BufFetch(F, pos DIV BUFSIZE);
+  F.bufPos := SYSTEM.AND(WORD(pos), BUFSIZE - 1);
+  F.pos := pos
 END Seek;
 
 PROCEDURE AbsPos(VAR F: File): LONGINT;
@@ -433,24 +422,37 @@ END Truncate;
    Parameters: F — file record to initialize; name — path of the file to open.
    Result: TRUE if the file was opened successfully. *)
 PROCEDURE Reset*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
-  VAR r: SYSTEM.Registers;
+  VAR r: SYSTEM.Registers; p : SYSTEM.ADDRESS;
 BEGIN
   F.handle := -1;
   F.buf := NIL;
   F.backend := BkDisk;
-  CopyName(F, name);
+  F.pos := 0; F.size := -1;
   F.delOnClose := FALSE;
-  r.Flags := 0; r.ES := 0;
-  r.AX := 3D02H;
-  r.DS := SYSTEM.SEG(name);
-  r.DX := SYSTEM.OFS(name);
+  CopyName(F, name);
+
+  p := SYSTEM.ADR(name[0]);
+
+  r.AX := 716CH;
+  r.BX := 22H;
+  r.CX := 0;
+  r.DX := 1;
+  r.DS := SYSTEM.SEG(p^);
+  r.SI := SYSTEM.OFS(p^);
+  r.DI := 0;
+  r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
-  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0 THEN
-    F.handle := r.AX
+
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
+    r.Flags := 0;
+    r.AX := 3D02H;
+    r.DS := SYSTEM.SEG(p^);
+    r.DX := SYSTEM.OFS(p^);
+    SYSTEM.Intr(21H, r)
   END;
-  IF F.handle = -1 THEN
-    F.pos := 0; F.size := -1; RETURN FALSE
-  END;
+
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN RETURN FALSE ELSE F.handle := r.AX END;
+
   NEW(F.buf);
   IF F.buf = NIL THEN
      SYSTEM.FCLOSE(F.handle);
@@ -462,7 +464,7 @@ BEGIN
   F.bufPos := 0;
   F.dirty := FALSE;
   F.pos := 0;
-  F.size := DOSGetFileSize(F.handle);
+  F.size := SYSTEM.FSIZE(F.handle);
   F.backend := BkDisk;
   IF F.size > 0 THEN
     BufFetch(F, LONGINT(0)); F.bufPos := 0
@@ -477,25 +479,36 @@ END Reset;
    create/truncate.
    Result: TRUE if the file was created successfully. *)
 PROCEDURE ReWrite*(VAR F: File; name: ARRAY OF CHAR): BOOLEAN;
-  VAR r: SYSTEM.Registers;
+  VAR r: SYSTEM.Registers; p : SYSTEM.ADDRESS;
 BEGIN
   F.handle := -1;
   F.buf := NIL;
   F.backend := BkDisk;
+  p := SYSTEM.ADR(name[0]);
   CopyName(F, name);
   F.delOnClose := FALSE;
-  r.Flags := 0; r.ES := 0;
-  r.AX := 3C00H;
+  F.pos := 0; F.size := -1;
+
+  r.AX := 716CH;
+  r.BX := 1;
   r.CX := 0;
-  r.DS := SYSTEM.SEG(name);
-  r.DX := SYSTEM.OFS(name);
+  r.DX := 12H;
+  r.DS := SYSTEM.SEG(p^);
+  r.SI := SYSTEM.OFS(p^);
+  r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
-  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0 THEN
-    F.handle := r.AX
+
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
+     r.Flags := 0;
+     r.AX := 3C00H;
+     r.CX := 0;
+     r.DS := SYSTEM.SEG(p^);
+     r.DX := SYSTEM.OFS(p^);
+     SYSTEM.Intr(21H, r);
   END;
-  IF F.handle = -1 THEN
-    F.pos := 0; F.size := -1; RETURN FALSE
-  END;
+
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN RETURN FALSE ELSE F.handle := r.AX END;
+
   NEW(F.buf);
   IF F.buf = NIL THEN
      SYSTEM.FCLOSE(F.handle);

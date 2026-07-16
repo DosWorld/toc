@@ -1,4 +1,4 @@
-; KMOUSE.ASM -- ported from KMOUSE.PAS (Turbo Pascal UNIT KMouse): extended
+; KMOUSE.ASM -- ported from a Turbo Pascal UNIT KMouse: extended
 ; keyboard + Microsoft-mouse (INT 33h) driver.  Every routine here was
 ; originally a Pascal "PROCEDURE/FUNCTION ...; ASSEMBLER; ASM ... END;"
 ; body -- straight NASM translation, same register/flag conventions,
