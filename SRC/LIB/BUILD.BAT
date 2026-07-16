@@ -23,6 +23,7 @@ del *.om
 ..\..\BIN\toc KMOUSE.MOD
 ..\..\BIN\toc WINCB.MOD
 ..\..\BIN\toc SCREEN.MOD
+..\..\BIN\toc BASE64.MOD
 
 echo SYSTEM.MOD > oberon.lst
 echo OUT.MOD >> oberon.lst
@@ -45,6 +46,7 @@ echo DETECT.MOD >> oberon.lst
 echo KMOUSE.MOD >> oberon.lst
 echo WINCB.MOD >> oberon.lst
 echo SCREEN.MOD >> oberon.lst
+echo BASE64.MOD >> oberon.lst
 
 del OBERON.OM
 ..\..\BIN\tolib.exe merge OBERON.OM @oberon.lst
