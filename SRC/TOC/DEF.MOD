@@ -91,7 +91,13 @@ BEGIN
     Files.Write(f, "POINTER ");
     IF t.base # Syms.NoType THEN
       FindTypeName(t.base, nm);
-      IF nm[0] # 0X THEN Files.Write(f, nm); RETURN END
+      IF nm[0] # 0X THEN Files.Write(f, nm); RETURN END;
+      (* Anonymous base (e.g. POINTER TO ARRAY N OF T with no named alias
+         for the array itself) — the base has no symbol table name to
+         reference, so write its structure inline.  ParseDefType's own
+         POINTER case already accepts any type token here, including
+         "ARRAY ...", so this round-trips.  See PTR.MD. *)
+      IF t.base.form = Syms.TFArray THEN WriteType(f, t.base); RETURN END
     END;
     Files.Write(f, "VOID"); RETURN
   END;

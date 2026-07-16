@@ -1,1 +1,2 @@
-toc /entry=Run toc.mod /m
+..\..\boot\toc /entry=Run toc.mod /m
+del *.om

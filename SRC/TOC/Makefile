@@ -17,10 +17,11 @@ XT       = xt
 # OBERON.OM (which lives OUTSIDE this dir, in BIN/) is not reachable via a DOS
 # path — anything above the -c mount root is invisible.  We therefore copy
 # BIN/OBERON.OM into the CWD and let the compiler find it via the CWD search.
-# (TOOLS/ instead mounts the repo root with `-c ../../` and points a
-# single-quoted OBERON_LIB at BIN/OBERON.OM with forward slashes — see those
-# makefiles and DOCS/XT.MD §"Filesystem and path conventions" for the quoting
-# rule that keeps such paths safe.)
+# (TOOLS/ also copies BIN/OBERON.OM into its `-c ../../` mount root rather
+# than using OBERON_LIB: this xt build's `-e`/`--env=` flags do not actually
+# populate the child DOS process's environment block -- confirmed empirically
+# 2026-07-16, see SRC/TASM/TASM.MD §K -- so an OBERON_LIB env var is never a
+# working option here regardless of quoting/slash convention.)
 XTRUN  = $(XT) run --max=40000000000
 OCBOOT = toc_boot.exe
 

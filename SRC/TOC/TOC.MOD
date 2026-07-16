@@ -781,7 +781,7 @@ END Cleanup;
    Cleanup.  This is the single-Halt rule: no module below may abort the
    process — they latch/return errors that funnel here. *)
 PROCEDURE RunBody(): INTEGER;
-  VAR argc, i: INTEGER;
+  VAR argc, i : INTEGER;
       mainMod, m: ModEntry;
       mr: ModRec;
       arg: ARRAY 128 OF CHAR;
@@ -792,7 +792,7 @@ PROCEDURE RunBody(): INTEGER;
       hasEntry, hasSystem, force, genDbg: BOOLEAN;
       stem: ARRAY NameLen OF CHAR;
       omPath: ARRAY MaxPath OF CHAR;
-      memBefore: WORD;
+      memBefore, k: WORD;
 BEGIN
   LogErr.SetLevel(LogErr.LINFO);
   argc := Dos.ParamCount();
@@ -867,7 +867,8 @@ BEGIN
   IF ~OpenModFile() THEN RETURN 1 END;
 
   (* Determine if input is a filename or module name *)
-  IF Strings.Pos(".", srcFile, 0) >= 0 THEN
+  k := 0;
+  IF Strings.Pos(".", srcFile, k) THEN
     BaseStem(srcFile, stem);
     mainMod := AddMod(stem);
     ModRead(mainMod, mr);

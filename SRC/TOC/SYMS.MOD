@@ -480,7 +480,7 @@ BEGIN
   RETURN t
 END TypeNewRecord;
 
-PROCEDURE TypeAddField*(rec: TypeDesc; VAR name: ARRAY OF CHAR; ftype: TypeDesc): Symbol;
+PROCEDURE TypeAddField*(rec: TypeDesc; name: ARRAY OF CHAR; ftype: TypeDesc): Symbol;
   VAR f: Symbol; align, off: LONGINT;
 BEGIN
   f := NewSymRec(StrTab.Intern(name), KField);
@@ -628,6 +628,30 @@ BEGIN
   RETURN FALSE
 END TypeAssignCompat;
 
+(* Structural equality for VAR-parameter binding across independently
+   elaborated type descriptors (once in the defining module, once again in
+   an importing module via .def).  Mirrors the RECORD structural fallback
+   below but for ARRAY element types, recursing through nested arrays and
+   pointer-to-record so a POINTER TO ARRAY N OF T (any T) gets the same
+   cross-module fallback POINTER TO RECORD already has.  See PTR.MD. *)
+PROCEDURE TypeStructEq(a, b: TypeDesc): BOOLEAN;
+BEGIN
+  IF a = b THEN RETURN TRUE END;
+  IF a.form # b.form THEN RETURN FALSE END;
+  IF a.form = TFArray THEN
+    RETURN (a.len = b.len) & TypeStructEq(a.elem, b.elem)
+  END;
+  IF a.form = TFRecord THEN
+    IF (a.fields = b.fields) & (a.size = b.size) THEN RETURN TRUE END;
+    RETURN TypeIsExtension(b, a) OR TypeIsExtension(a, b)
+  END;
+  IF a.form = TFPointer THEN
+    IF (a.base = NIL) OR (b.base = NIL) THEN RETURN a.base = b.base END;
+    RETURN TypeStructEq(a.base, b.base)
+  END;
+  RETURN TRUE
+END TypeStructEq;
+
 PROCEDURE TypeParamCompat*(formal, actual: TypeDesc; isVar: BOOLEAN): BOOLEAN;
 BEGIN
   IF formal = actual THEN RETURN TRUE END;
@@ -638,6 +662,11 @@ BEGIN
      (formal.len >= 0) & (formal.len = actual.len) &
      (formal.elem = actual.elem) THEN RETURN TRUE END;
   IF isVar THEN
+    IF (formal.form = TFArray) & (actual.form = TFArray) &
+       (formal.len >= 0) & (formal.len = actual.len) &
+       TypeStructEq(formal.elem, actual.elem) THEN
+      RETURN TRUE
+    END;
     IF (formal.form = TFRecord) & (actual.form = TFRecord) THEN
       IF (formal.fields = actual.fields) & (formal.size = actual.size) THEN
         RETURN TRUE
@@ -653,6 +682,12 @@ BEGIN
           RETURN TRUE
         END;
         RETURN TypeIsExtension(actual.base, formal.base)
+      END;
+      IF (formal.base # NIL) & (actual.base # NIL) &
+         (formal.base.form = TFArray) & (actual.base.form = TFArray) &
+         (formal.base.len = actual.base.len) &
+         TypeStructEq(formal.base.elem, actual.base.elem) THEN
+        RETURN TRUE
       END;
       RETURN FALSE
     END;
@@ -784,10 +819,9 @@ BEGIN
   RETURN SymFindId(StrTab.Find(name))
 END SymFind;
 
-PROCEDURE SymFindField*(rec: TypeDesc; VAR name: ARRAY OF CHAR): Symbol;
-  VAR f: Symbol; id: WORD;
+PROCEDURE SymFindFieldId*(rec: TypeDesc; id: WORD): Symbol;
+  VAR f: Symbol;
 BEGIN
-  id := StrTab.Find(name);
   IF id = 0 THEN RETURN NIL END;
   WHILE rec # NIL DO
     f := rec.fields;
@@ -798,6 +832,11 @@ BEGIN
     rec := rec.base
   END;
   RETURN NIL
+END SymFindFieldId;
+
+PROCEDURE SymFindField*(rec: TypeDesc; VAR name: ARRAY OF CHAR): Symbol;
+BEGIN
+  RETURN SymFindFieldId(rec, StrTab.Find(name))
 END SymFindField;
 
 (* ---- universe initialisation ---- *)

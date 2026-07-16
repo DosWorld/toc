@@ -137,7 +137,7 @@ END ParseSizeArg;
 (* ---- const folding ---- *)
 
 (* The host compiler's own LONGINT DIV/MOD (via SYSTEM_S32DIV/S32MOD in
-   SYS.ASM) are already floored per Oberon-07 semantics, so no fixup is
+   SYSTEM.ASM) are already floored per Oberon-07 semantics, so no fixup is
    needed here -- applying one would double-correct (see the DEC(q)/INC(r)
    history this replaced: it corrected a truncating DIV/MOD that no longer
    exists). *)
@@ -361,9 +361,15 @@ BEGIN
      (scalar or array), a computed value, or a procedure has no caller storage
      to bind and is rejected.  (Passing a string literal to a VAR ARRAY formal
      used to be miscompiled into a far ref with a bad length, hanging the
-     compiler in the INLINE name scan — now a clean compile error.) *)
+     compiler in the INLINE name scan — now a clean compile error.)
+     A string literal's item also has mode = MGlobal (it lives in the data
+     segment like any other global), so mode alone can't tell it apart from a
+     real global variable — rootSym is NoSym for a literal (ParseFactor's
+     Scan.TString case never sets it) but always set for a designator, so it
+     is the actual l-value discriminant for the MGlobal/MLocal cases. *)
   IF (formal.kind = Syms.KVarParam) & ~formal.typeless THEN
-    IF ~((arg.mode = Cgen.MLocal) OR (arg.mode = Cgen.MGlobal) OR
+    IF ~(((arg.mode = Cgen.MLocal) & (arg.rootSym # Syms.NoSym)) OR
+         ((arg.mode = Cgen.MGlobal) & (arg.rootSym # Syms.NoSym)) OR
          ((arg.mode = Cgen.MReg) & arg.isRef)) THEN
       StrTab.Get(formal.nameId, nbuf);
       Error2("VAR parameter requires a variable (not a literal, constant, or expression)", nbuf);
@@ -438,8 +444,15 @@ BEGIN
            VAR open-array formal also needs LEN pushed first (deepest).
            Pascal l-to-r push order (first push = deepest = highest BP offset):
              VAR open-array: PUSH LEN, PUSH segment, PUSH offset
-             other VAR:                PUSH segment, PUSH offset *)
-        ParseDesignator(arg);
+             other VAR:                PUSH segment, PUSH offset
+           A non-l-value actual (string literal, constant expression, ...)
+           is rejected by CheckParamCompat below — but ParseDesignator itself
+           demands an identifier and would abort the parse with a harsher
+           "identifier expected" first.  Route anything that isn't the start
+           of a designator through ParseExpression instead, purely so the
+           actual gets consumed and CheckParamCompat can give its intended
+           clean rejection message. *)
+        IF sc.sym = Scan.TIdent THEN ParseDesignator(arg) ELSE ParseExpression(arg) END;
         MarkRead(arg);
         CheckParamCompat(p, arg);
         isOpenFormal := (p.type # Syms.NoType) & (pty.form = Syms.TFArray) & (pty.len < 0);
