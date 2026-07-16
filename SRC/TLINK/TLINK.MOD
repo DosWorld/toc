@@ -19,7 +19,7 @@ MODULE TLink;
   DWORD size, sequential, '.'-prefixed entries (e.g. ".sig") are metadata
   and skipped.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Strings, Tar;
+IMPORT Dos, Files, LogErr, Rdoff, Strings, Tar, Out;
 
 CONST
   ModeCom = 0;
@@ -471,28 +471,37 @@ BEGIN
   IF bssBase > LONGINT(65530) THEN LogErr.Error("tlink: total size exceeds 64KB (Tiny Model)") END
 END CalculateLayoutTiny;
 
-(* CalculateLayoutSmall: three independently paragraph-aligned regions
-   (code/data/bss each start at a 16-byte boundary — the MZ small-model
-   convention: CS=0, DS/SS computed from the code paragraph count).
+(* CalculateLayoutSmall: CS is its own 64K segment (code, paragraph-
+   aligned).  DS=SS is a SECOND 64K segment holding data+bss+stack
+   together (small model): bss is placed right after data within that
+   same DS-relative address space, NOT independently from 0 -- otherwise
+   a bss variable and a data variable at the same module-relative offset
+   would alias onto the same DS:offset at runtime.
    Parameters: none.
-   Result: none (fatal via LogErr if code or data exceeds 64KB). *)
+   Result: none (fatal via LogErr if code or data+bss exceeds 64KB). *)
 PROCEDURE CalculateLayoutSmall;
   VAR m: Module; codeBase, dataBase, bssBase: LONGINT;
 BEGIN
-  codeBase := LONGINT(0); dataBase := LONGINT(0); bssBase := LONGINT(0);
+  codeBase := LONGINT(0); dataBase := LONGINT(0);
   m := modHead;
   WHILE m # NIL DO
     IF m.used THEN
-      m.finalCodeOfs := codeBase; m.finalDataOfs := dataBase; m.finalBssOfs := bssBase;
+      m.finalCodeOfs := codeBase; m.finalDataOfs := dataBase;
       codeBase := Align16(codeBase + m.codeSize);
-      dataBase := Align16(dataBase + m.dataSize);
-      bssBase  := Align16(bssBase  + m.bssSize)
+      dataBase := Align16(dataBase + m.dataSize)
     END;
     m := m.next
   END;
-  totalCodeLen := codeBase; totalDataLen := dataBase; totalBssLen := bssBase;
+  totalCodeLen := codeBase; totalDataLen := dataBase;
+  bssBase := totalDataLen;
+  m := modHead;
+  WHILE m # NIL DO
+    IF m.used THEN m.finalBssOfs := bssBase; bssBase := Align16(bssBase + m.bssSize) END;
+    m := m.next
+  END;
+  totalBssLen := bssBase - totalDataLen;
   IF totalCodeLen > LONGINT(65520) THEN LogErr.Error("tlink: code > 64KB") END;
-  IF totalDataLen > LONGINT(65520) THEN LogErr.Error("tlink: data > 64KB") END
+  IF totalDataLen + totalBssLen > LONGINT(65520) THEN LogErr.Error("tlink: data+bss > 64KB (DS/SS segment)") END
 END CalculateLayoutSmall;
 
 (* ---- relocation patching ---- *)
@@ -565,7 +574,11 @@ BEGIN
   IF rrefSeg = Rdoff.SegCode THEN RETURN curMod.finalCodeOfs
   ELSIF rrefSeg = Rdoff.SegData THEN RETURN curMod.finalDataOfs
   ELSIF rrefSeg = Rdoff.SegBss THEN
-    IF mode = ModeExe THEN RETURN totalDataLen + curMod.finalBssOfs END;
+    (* finalBssOfs is already DS-relative (CalculateLayoutSmall starts
+       bssBase at totalDataLen; CalculateLayoutTiny starts it at
+       totalCodeLen+totalDataLen) -- no extra totalDataLen addition here,
+       that would double-count it (was needed only when bssBase used to
+       start independently at 0 in small-model mode). *)
     RETURN curMod.finalBssOfs
   ELSE
     ImpFind(rrefSeg, e);
@@ -574,9 +587,7 @@ BEGIN
     owner := SymOwner(e);
     IF SymSegId(e) = Rdoff.SegCode THEN RETURN val + owner.finalCodeOfs
     ELSIF SymSegId(e) = Rdoff.SegData THEN RETURN val + owner.finalDataOfs
-    ELSE
-      IF mode = ModeExe THEN RETURN totalDataLen + owner.finalBssOfs + val END;
-      RETURN owner.finalBssOfs + val
+    ELSE RETURN owner.finalBssOfs + val
     END
   END
 END ResolveTarget;
@@ -765,7 +776,15 @@ PROCEDURE WriteOutputExe;
 BEGIN
   IF ~Files.ReWrite(fout, outFileName) THEN LogErr.Error2("tlink: cannot write ", outFileName); RETURN END;
 
+  (* codePara must round UP (ceiling), not truncate: SS is set to codePara,
+     so if totalCodeLen isn't a multiple of 16, truncating leaves the last
+     <16 bytes of code physically inside the stack segment -- stack pushes
+     during execution then overwrite the tail of the code image (observed
+     as a live jnz/jmp target silently corrupted to different bytes at
+     runtime while the on-disk .EXE stayed correct -- see VOIDF.C's putint
+     loop, TESTS/FIX/CC repro). *)
   codePara := WORD(SYSTEM.LSR(WORD(totalCodeLen), 4));
+  IF SYSTEM.AND(WORD(totalCodeLen), 15) # 0 THEN INC(codePara) END;
   dataPara := WORD(SYSTEM.LSR(WORD(totalDataLen), 4));
   IF SYSTEM.AND(WORD(totalDataLen), 15) # 0 THEN INC(dataPara) END;
 
@@ -773,7 +792,15 @@ BEGIN
 
   IF dataPara < 1000H THEN extraMem := 1000H - dataPara ELSE extraMem := 0 END;
 
-  exeSize  := LONGINT(hdrPara) * LONGINT(16) + totalCodeLen + totalDataLen;
+  (* the on-disk code region is padded up to codePara*16 bytes (below) so
+     that DS (set at runtime to SS=codePara via "mov ax,ss / mov ds,ax")
+     really does point at the first byte of data -- otherwise DS:0 would
+     land codePara*16 - totalCodeLen bytes before the true start of .data,
+     corrupting every "mov ax, label" / "mov ax, label+N" data reference
+     (observed as HELLO.C's string losing its first byte: PatchMem/
+     ResolveTarget compute data-buffer-relative offsets under exactly this
+     assumption -- see CalculateLayoutSmall / ResolveTarget's SegData case). *)
+  exeSize  := LONGINT(hdrPara) * LONGINT(16) + LONGINT(codePara) * LONGINT(16) + totalDataLen;
   pageCnt  := WORD(exeSize DIV LONGINT(512));
   partPage := WORD(exeSize MOD LONGINT(512));
   IF partPage # 0 THEN INC(pageCnt) END;
@@ -810,6 +837,8 @@ BEGIN
   IF Files.BlockWrite(fout, codeBuf^[0], WORD(totalCodeLen)) # WORD(totalCodeLen) THEN
     LogErr.Error("tlink: write error (code)")
   END;
+  gapBytes := LONGINT(codePara) * LONGINT(16) - totalCodeLen;
+  WHILE gapBytes > LONGINT(0) DO Files.BlockWrite(fout, pad, 1); DEC(gapBytes) END;
   IF totalDataLen > LONGINT(0) THEN
     IF Files.BlockWrite(fout, dataBuf^[0], WORD(totalDataLen)) # WORD(totalDataLen) THEN
       LogErr.Error("tlink: write error (data)")
@@ -886,17 +915,21 @@ END ParseListFile;
 
 PROCEDURE Usage;
 BEGIN
-  LogErr.Info("tlink - Trubo Link: RDOFF2 linker for .COM/.SYS/.EXE");
-  LogErr.Info("Usage: tlink [options] <input> ... <output>");
-  LogErr.Info("Options:");
-  LogErr.Info("  /T=com      Tiny model .COM output (default)");
-  LogErr.Info("  /T=sys      Tiny model .SYS device driver output");
-  LogErr.Info("  /T=exe      Small model .EXE output");
-  LogErr.Info("  /A:xxxx     Device attribute (hex) — implies /T=sys");
-  LogErr.Info("  /N:name     Device name (max 8 chars, /T=sys only)");
-  LogErr.Info("  /LOG=level  debug|info|warn|error");
-  LogErr.Info("  @list.lst   Process list file");
-  LogErr.Info("Inputs: .rdf, .rdl, .tar")
+  Out.String("Trubo Link, (c) 2026 DosWord, Public domain (unlicense)"); Out.Ln;
+  Out.Ln;
+  Out.String("Usage: TLINK [options] <input> ... <output>"); Out.Ln;
+  Out.Ln;
+  Out.String("Options:"); Out.Ln;
+  Out.Ln;
+  Out.String(" /T=com      Tiny model .COM output (default)"); Out.Ln;
+  Out.String(" /T=sys      Tiny model .SYS device driver output"); Out.Ln;
+  Out.String(" /T=exe      Small model .EXE output"); Out.Ln;
+  Out.String(" /A=xxxx     Device attribute (hex) - implies /T=sys"); Out.Ln;
+  Out.String(" /N=name     Device name (max 8 chars, /T=sys only)"); Out.Ln;
+  Out.String(" /LOG=level  debug|info|warn|error"); Out.Ln;
+  Out.String(" @list.lst   Process list file"); Out.Ln;
+  Out.Ln;
+  Out.String("Inputs: .rdf, .rdl, .tar"); Out.Ln
 END Usage;
 
 (* RunBody: parse arguments, drive the four link phases, and report the
@@ -944,10 +977,11 @@ BEGIN
       ELSIF Strings.EqualICase(val, "exe") THEN mode := ModeExe
       ELSE LogErr.Error2("tlink: unknown /T= mode: ", val); RETURN 1
       END
-    ELSIF MatchSwitchVal(arg, "/A:", val) THEN
+    ELSIF MatchSwitchVal(arg, "/A=", val) THEN
       mode := ModeSys;
       sysAttr := ParseHex(val)
-    ELSIF MatchSwitchVal(arg, "/N:", val) THEN
+    ELSIF MatchSwitchVal(arg, "/N=", val) THEN
+      mode := ModeSys;
       Strings.Extract(val, 0, 8, sysName);
       WHILE Strings.Length(sysName) < 8 DO Strings.Append(" ", sysName) END
     ELSIF arg[0] = "@" THEN
