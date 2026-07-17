@@ -92,6 +92,7 @@ BEGIN
   ELSIF Strings.Equal(name, "Files_Seek")       THEN RETURN SYSTEM.ADR(Files.Seek)
   ELSIF Strings.Equal(name, "Files_Position")   THEN RETURN SYSTEM.ADR(Files.Position)
   ELSIF Strings.Equal(name, "Files_Size")       THEN RETURN SYSTEM.ADR(Files.Size)
+  ELSIF Strings.Equal(name, "Files_Eof")        THEN RETURN SYSTEM.ADR(Files.Eof)
   ELSIF Strings.Equal(name, "Files_BlockRead")  THEN RETURN SYSTEM.ADR(Files.BlockRead)
   ELSIF Strings.Equal(name, "Files_BlockWrite") THEN RETURN SYSTEM.ADR(Files.BlockWrite)
   ELSIF Strings.Equal(name, "Files_BlockCopy")  THEN RETURN SYSTEM.ADR(Files.BlockCopy)
