@@ -173,7 +173,7 @@ supplies the body later in the same declaration sequence — useful for
 mutual recursion. `EXTERNAL` declares a signature with **no** body at all;
 the implementation is supplied by a hand-assembled `.rdf` object linked in
 via a `$L` directive (this is exactly how `SYSTEM.MOD`'s primitives —
-`Halt`, `Alloc`, `Intr`, … — are wired to `SYS.ASM`). Both accept `FAR`/`NEAR`,
+`Halt`, `Alloc`, `Intr`, … — are wired to `SYSTEM.ASM`). Both accept `FAR`/`NEAR`,
 neither can be combined with `INLINE`, and neither can be both at once.
 
 ```oberon
@@ -411,7 +411,7 @@ of which can be combined in one comment separated by commas:
 
 | Directive | Meaning |
 |---|---|
-| `$L path` | Pack the `.rdf` at `path` into this module's `.om` archive (used to attach hand-assembled helpers, e.g. `SYSTEM.MOD`'s `$L SYS.RDF`) |
+| `$L path` | Pack the `.rdf` at `path` into this module's `.om` archive (used to attach hand-assembled helpers, e.g. `SYSTEM.MOD`'s `$L SYSTEM.RDF`) |
 | `$M stack,min,max` | Stack size hint (bytes) and heap min/max (bytes), all three required. Only takes effect with `/ENTRY=`. Defaults: `8192, 131072, 262144` |
 | `$R+` / `$R-` | Enable/disable runtime array-bounds checks from this point in the file onward (default off) |
 | `$D+` / `$D-` | Enable/disable Turbo-Debugger symbol/line collection for this module (default off) — see [Debug info](#debug-info-for-turbo-debugger) |
@@ -883,7 +883,7 @@ PROCEDURE MouseGetX*/MouseGetY*(): INTEGER;
 Extended (101/102/122-key) BIOS keyboard access via INT 16h, plus a
 Microsoft Mouse (INT 33h)-compatible driver. `~90` `ScanXxx` CONSTs cover
 the full scan-code set (`ScanF1`, `ScanCtrlHome`, `ScanAltF10`, …). Ported
-from the Turbo Pascal `KMOUSE.PAS` UNIT.
+from a Turbo Pascal UNIT.
 
 ### `Screen` — text-mode shadow-buffer driver
 
@@ -902,10 +902,10 @@ PROCEDURE FadeIn*; PROCEDURE FadeOut*;              (* VGA palette fades *)
 
 A shadow-buffer text-mode driver: colour print/scroll, a save/restore
 screen stack, cursor control, a background spinner animation (installed as
-a real INT 1Ch handler), and VGA DAC palette fades. Ported from the Turbo
-Pascal `SCR.PAS` UNIT — see `DOCS/PORTING.MD` §16.1 for the general
-Pascal-`ASM`-block porting pattern this module (along with `Detect`/
-`WinCB`/`KMouse`) established.
+a real INT 1Ch handler), and VGA DAC palette fades. Ported from a Turbo
+Pascal UNIT — see `DOCS/PORTING.MD` §16.1 for the general Pascal-`ASM`-
+block porting pattern this module (along with `Detect`/`WinCB`/`KMouse`)
+established.
 
 ---
 

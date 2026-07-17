@@ -374,6 +374,152 @@ fills the buffer with zero bytes to spare), the one-byte-of-room case (the
 bug), and the plenty-of-room case, all producing correct truncation and a
 correct final NUL either way.
 
+### TASM (`SRC/TASM/`) — design decisions and known limitations
+
+TASM is a self-hosted NASM-subset 8086 assembler (`.asm` → RDOFF2 `.rdf`),
+the tool of record for every hand-assembled `.ASM` file in `SRC/LIB/`
+(`SYS`, `EMS`, `DETECT`, `WINCB`, `KMOUSE`, `SCREEN`). Architecture mirrors
+`SRC/TOC`'s own split: `Scan.MOD` (tokenizer) → `Sym.MOD` (label table +
+`%define` substitution, two-pass forward-reference friendly) → `Dir.MOD`
+(directives) / `Enc.MOD` (mnemonic → byte sequence + relocation info,
+dispatches via `CASE mnemId OF` keyed on `Lex.MOD` integer IDs, not a flat
+`IF/ELSIF` chain) → `Parse.MOD` (top-level two-pass driver) → `Tasm.MOD`
+(entry point, `RunBody`/single-`Halt` pattern). Uses `Rdoff`'s existing
+RDOFF2 writer (`EmitByte*`/`RdfAddReloc`/`RdfAddSegReloc`/`RdfWriteTo`) —
+TASM itself never touches RDOFF2 encoding, purely front-end (tokenize →
+parse → encode → call `Rdoff`). Routes all diagnostics through `LogErr`
+and has its own private `LeakGuard` copy (same shape as `TOC.MOD`'s),
+wrapped around each assemble-one-file run and each of the two passes.
+
+Five design decisions, each resolved with concrete evidence before coding
+(not guesses):
+
+- **Short-vs-near jump sizing:** requires a single-pass rel8 assumption
+  followed by a validation pass (fatal error if any branch doesn't fit
+  rel8), rather than NASM's real iterative multi-pass sizing algorithm.
+  Verified sufficient because every `jmp`/`Jcc` target in the actual
+  `SRC/LIB/*.ASM` corpus is a same-routine local label within a few dozen
+  lines — comfortably inside the rel8 ±127-byte range. If a future `.ASM`
+  file needs a genuine long-range branch, this needs revisiting (either an
+  explicit `NEAR`-forcing qualifier or real iterative sizing).
+- **FPU instructions are out of scope entirely.** All FPU code in this
+  repo lives as raw `INLINE(...)` byte sequences inside `.MOD` files
+  (`SRC/LIB/MATH.MOD`), never in a `.ASM` file — except `SYSTEM.ASM`'s three
+  trivial no-operand FPU opcodes (`FNINIT`/`FSTCW`/`FWAIT`), which TASM
+  supports as plain no-operand mnemonics. No general FPU operand/
+  addressing-mode support exists or is planned.
+- **`%define`/`%undef` are whole-token substitution only** — no
+  parameterized `%define NAME(params) ...` form. Every actual use in the
+  `.ASM` corpus is a bare constant, a mnemonic alias, or a bracketed
+  memory-operand expression. (`%macro`/`%endmacro` with `%1..%9`/`%%local`
+  IS supported, added 2026-07-16 — see below; it is a separate mechanism
+  from `%define`, not an extension of it.)
+- **No RDOFF2 MODNAME record (type 8) is ever emitted** — `Rdoff.MOD`'s
+  own writer (`RdfWriteTo`) never emits one either, so TASM matches it
+  exactly rather than adding an unused record kind.
+- **CLI is DOS-style** (`tasm.exe file.asm [/LOG=level]`, one positional
+  arg, output auto-named `FILE.RDF` uppercase 8.3), matching every other
+  tool in this repo (`toc.exe`, `tolib.exe`, `rdfgrep.exe`) rather than
+  NASM's Unix-style `-f rdf -o file` flags — an intentional, documented
+  deviation from real NASM.
+
+**Known limitation — no `[label+register]` combined addressing.** A
+data-segment label combined with a base register inside one bracket pair
+(e.g. `MOV AL, [spinnerChars+BX]`) is not supported; work around it with
+`MOV reg, label` (load the address) + `ADD reg, indexReg` + `[reg]`
+(three instructions instead of one addressing form). Found while
+implementing `SCREEN.ASM`'s `Spinner1c` handler; not fixed, since this
+addressing form is rare in the actual `.ASM` corpus.
+
+**Explicitly out of scope** (no current `.ASM` file needs them, and won't
+be speculatively added per Simplicity First): 32-bit/protected-mode
+forms, `IMUL`'s 2-/3-operand forms (186++ only), `%macro` default/greedy
+params (`%macro x 1-3`)/`%0`/`%rotate`/`%rep`/`%ifmacro`/macro overloading
+by arity, `%if`/`%elif` numeric preprocessing (only `%ifdef` exists),
+`struc` nesting, `group`/`class` segment attributes, `org`, external
+linker scripts. TASM is a leaf tool, not part of the compiler's
+self-hosting chain, and not a hard `make all` dependency (it needs a
+fully-built `OBERON.OM` to run, which itself needs `SYSTEM.RDF` — a
+circular dependency if TASM were required to produce it).
+
+**`%include "FILE.INC"` and `%macro NAME NPARAMS ... %endmacro`**
+(2026-07-16, TASM.MD §I): the single module-global `Scan.Scanner` in
+`Parse.MOD` was replaced with an 8-deep input-source stack
+(`Parse.MaxSrcDepth`); `%include` pushes a real file, `%macro`
+invocation pushes a memory-source scanner (`Scan.InitMem`) over the
+macro's captured body with `%1..%9`/`%%ident` already substituted.
+`%include` resolves relative to CWD (no search path), rejects cycles and
+over-deep nesting, and is skipped-without-opening inside a false
+`%ifdef` branch. `%macro` bodies are captured as raw text (not
+tokenize-and-reserialize, to preserve strings/comments/spacing byte-
+exact) up to a 4096-byte cap (`Scan.MaxMemText`); nested `%macro` and
+macro-recursion bombs are both fatal errors. `-Dname[=value]` CLI
+predefines apply once per `Assemble`, before Pass 1, via the same
+`Sym.Define` path a source-level `%define` uses.
+
+**Compiler limitation found while implementing `%macro`** (not fixed,
+worked around — see TASM.MD §I for the full writeup): `SRC/TOC/SYMS.MOD`'s
+`TypeParamCompat` (VAR-parameter type compatibility) has a structural-
+equality fallback for `POINTER TO RECORD` types re-elaborated
+independently by each importing module's own compile, but no equivalent
+fallback for `POINTER TO ARRAY` — passing a bare `POINTER TO ARRAY OF T`
+as a VAR parameter across a THREE-module chain (type declared in module
+A, used as a VAR param type in a procedure in module B, called from
+module C) fails with a spurious "type mismatch in actual parameter" even
+on a clean, non-stale build. Worked around in `Scan.MemText` by wrapping
+the array in a one-field `RECORD`. Real fix would be a `TFArray`-base
+branch in `TypeParamCompat`, left undone as out of scope for TASM
+feature work.
+
+**Full 8086 base instruction-set coverage is complete** (91 mnemonic IDs
+in `Lex.MOD`, including `SECTION .bss`/`RESB`/`RESW`/`RESD`, the full
+`Jcc` set, `IMUL`/`DIV`/`IDIV`, shift/rotate group, `LOCK`/`REP*` prefix
+bytes, far-direct `JMP`/`CALL`, and `LDS`/`LES`) — verified byte-identical
+against real NASM for `SYSTEM.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM`. For
+`DETECT.ASM`/`SCREEN.ASM`, real NASM interleaves IMPORT records with
+GLOBAL records in source-declaration order while TASM always emits all
+GLOBAL records before all IMPORT records (`RdfWriteTo`'s fixed order,
+tuned to match `SYSTEM.RDF`/`EMS.RDF`) — semantically inert (readers
+resolve by record type, not position) but a byte-diff mismatch, so these
+two oracles were demoted 2026-07-14 to self-consistency baselines
+(TASM's own previously-verified output, like `WINCB`/`KMOUSE`) rather
+than real-NASM proofs — see `TESTS/test_tasm.sh`'s header comment. See
+`TESTS/TESTS.MD` §"TASM assembler regression test" for the full check
+breakdown.
+
+**Bugs found and fixed while adding the `SRC/CC` ccasm backend
+(2026-07-14):**
+- **`PARSE.MOD`'s bare-label immediate operand didn't consume a trailing
+  `+`/`-` displacement** (`mov ax, label+N`, e.g. ccasm's array-address
+  form): the leftover `+`/`-` token was never advanced past, so
+  `RunPass`'s main loop span forever (never reaching `TEol`/`TEof`) —
+  this hung TASM on any `.ASM` using that form (`HELLO.C`'s ccasm output
+  via `SMOKEASM.SH`). Fixed by consuming an optional `+ disp`/`- disp`
+  chain after the label, mirroring `ParseMemBody`'s bracketed-operand
+  logic. `ParseMemBody` itself was unaffected (already had this).
+- **`TLINK.MOD`'s small-model `.EXE` writer had two related bugs**, both
+  in `WriteOutputExe`/`CalculateLayoutSmall` (`SRC/TLINK/`, see that
+  file's own header for the small/tiny model split): (1) `codePara`
+  (used directly as `SS`) truncated instead of rounding up, so a
+  non-16-aligned code length left the stack segment physically
+  overlapping the tail of the code image — runtime stack pushes silently
+  corrupted live code bytes (observed as a `jnz` target flipping mid-
+  execution, `VOIDF.C`'s `putint` looping extra times); (2) the on-disk
+  layout appended `.data` immediately after `.text` with no padding, but
+  `SS`(`=DS`, set at runtime via `mov ax,ss / mov ds,ax`) points at
+  `codePara*16` — if that didn't equal the true on-disk code length, `DS:0`
+  landed a few bytes before the real start of `.data`, corrupting every
+  `mov ax, label`-style data reference (`HELLO.C` printing `ello, CC!`,
+  losing its first byte). Fixed by rounding `codePara` up and padding the
+  on-disk code region to `codePara*16` bytes before writing `.data`;
+  `CalculateLayoutSmall`'s BSS placement was adjusted to match (BSS
+  starts right after data within the DS/SS segment, not independently
+  from 0 — small model is CS as one 64K segment, DS=SS as a *second* 64K
+  segment holding data+bss+stack together; tiny model, unaffected by
+  either bug, keeps CS=DS=SS as one shared segment with no MZ relocation
+  table). See `TESTS/FIX/`'s `SRC/CC` fixtures (`VOIDF.C`, `HELLO.C` via
+  `SMOKEASM.SH`) for the regressions these fixed.
+
 ---
 
 ## DOS memory model constraints  ← CRITICAL
@@ -545,7 +691,7 @@ detector for the zero-leak rule.  When adding any allocation to a compile path, 
 compiler, recompile a heavily-importing module (e.g. `TAR.MOD`, `CGEN.MOD`) and confirm the
 guard reports **0 paragraphs**.  `SYSTEM.MemAvail` is exact (a free-list walk; verified
 stable across repeated calls), so a non-zero delta is a real leak, not measurement noise.
-The heap allocator coalesces *adjacent* freed blocks fully (SYS.ASM `SYSTEM_Free`
+The heap allocator coalesces *adjacent* freed blocks fully (SYSTEM.ASM `SYSTEM_Free`
 merges next+prev), so a clean NEW/DISPOSE pairing returns the heap to its starting
 level.  Coalescing cannot merge **non-adjacent** holes, though — see the defrag note.
 
@@ -750,10 +896,30 @@ single-process self-host's free heap (see [opt_meas.md](../opt_meas.md)).
   value / imported-record VAR arg" bug: `Syms.SymNew` had `VAR name` but was
   called with literals `"FLOAT"`/`"SYSTEM"`/`"$lim"`/`"$case"`.)  Two guards keep
   it from recurring: (1) cold-path helpers called with literals (e.g.
-  `Syms.SymNew`) take `name` **by value**, not `VAR`; (2)
-  `PExpr.CheckParamCompat` rejects a non-l-value VAR actual at compile time
-  ("VAR parameter requires a variable …").  Keep `VAR name` only where every
-  caller passes an l-value (the hot `SymFind*`/`TypeAddField`/`PredeclType`).
+  `Syms.SymNew`, and since 2026-07-16 also `Syms.TypeAddField` — it only
+  forwards to `StrTab.Intern`, itself by-value, and its two real compiler
+  call sites already pass local variables) take `name` **by value**, not
+  `VAR`; (2) `PExpr.CheckParamCompat` rejects a non-l-value VAR actual at
+  compile time ("VAR parameter requires a variable …").  Keep `VAR name`
+  only where every caller passes an l-value (the hot `SymFind*`/
+  `PredeclType`) — `Syms.SymFindField` stays `VAR` under this rule, but
+  gained a by-value sibling `SymFindFieldId*(rec, id: WORD)` (mirroring
+  the existing `SymFindLocalId`/`SymFindId`) for callers that only have a
+  literal, e.g. test code (see `TESTS/TDEF.MOD`).
+  **2026-07-16 addendum (see [PTR.MD](../PTR.MD)):** guard (2) above was
+  itself unreachable for a string-literal VAR actual until this date —
+  `PExpr.ParseActualParameters` parsed every VAR-param actual via
+  `ParseDesignator`, which demands an identifier token and aborted with a
+  harder, less helpful `"identifier expected"` *before* `CheckParamCompat`
+  ever ran. Fixed by routing a non-identifier actual through
+  `ParseExpression` instead when the formal is a VAR param. Separately,
+  `CheckParamCompat`'s l-value test checked only `arg.mode`
+  (`MLocal`/`MGlobal`/`MReg&isRef`) — but a string literal's `Cgen.Item`
+  also has `mode = MGlobal` (it lives in the data segment like any real
+  global), so the guard would have silently accepted it once the parser
+  stopped crashing first. Fixed by additionally requiring
+  `arg.rootSym # Syms.NoSym`, which `ParseDesignator` sets for every real
+  symbol but a literal factor never sets.
 
 #### DEAD END — a mutable-record cache over `GetSym`/`GetType` (reverted 2026-07-03, do not retry this shape)
 
@@ -909,9 +1075,18 @@ shell's escape character, so an **unquoted** DOS path is silently corrupted befo
 ever reaches `xt` or the compiler: `\123\DIR` → `123DIR`, `OBERON_LIB=C:\lib` → `C:lib`
 (library not found → compile fails silently).  This is a shell issue, not an xt or
 compiler bug.  **Always single-quote** such arguments in makefiles/scripts —
-`-e 'OBERON_LIB=C:\lib'`, `-c '\path\to\dir'` — or double each backslash (`\\`).
+`-c '\path\to\dir'` — or double each backslash (`\\`).
 The project's makefiles avoid the trap by using forward-slash host paths for `-c`
-(`../../`, `$wd`) and single-quoting `OBERON_LIB`; keep it that way.  See
+(`../../`, `$wd`); keep it that way.
+
+**`OBERON_LIB` via `-e`/`--env=` does not work at all on this xt build** (2026-07-16,
+confirmed empirically — see `SRC/TASM/TASM.MD` §K): `-e KEY=VALUE` does not populate
+the child DOS process's environment block, so `Dos.GetEnv("OBERON_LIB", ...)` always
+returns empty regardless of quoting. This is separate from (and not fixed by) the
+shell-quoting rule above. No Makefile in this project passes `-e OBERON_LIB=...`
+anymore; every one that needs `OBERON.OM` visible to `toc.exe` copies
+`BIN/OBERON.OM` into the `-c` mount root (or CWD) before invoking it, relying on
+`IMPORT.MOD`'s current-directory search step instead. See
 [XT.MD](XT.MD) §"Filesystem and path conventions".
 
 ---
@@ -926,7 +1101,7 @@ This ensures every named type is defined before it is referenced.
 
 ```
 MODULE ModuleName
-CONST  ModuleName_SymName  intValue
+CONST  ModuleName_SymName  TYPE  intValue
 TYPE   ModuleName_TypeName
 TYPE   ModuleName_RecName RECORD totalSize
   FIELD fieldName type offset
@@ -966,18 +1141,25 @@ lines on `exported`, but the `RECORD <size> … END` wrapper is unconditional.
 - Terminated by `END`
 - Even procedures with **no parameters** use this format
 
-**CONST line has no type token — the reader infers it from magnitude.**
-`Def.DefWrite` writes only the decimal value (`CONST fullname intValue`); it
-never carries the exporting module's declared CONST type (INTEGER/WORD/
-LONGINT — recall CONST is integer-family-only, see §"CONST declarations are
-integer-only" in OBERLANG.MD).  `Def.DefRead` types the imported symbol
-LONGINT when the value falls outside signed INTEGER range (-32768..32767),
-INTEGER otherwise.  A value in that range is always typed INTEGER on import
-even if the exporter declared it WORD or LONGINT — this is a lossy but safe
-default (the bit pattern is identical for all three types at that magnitude).
-Without this inference, `CONST Big* = 100000` imported as INTEGER silently
-truncated to 34464 at every use site with no diagnostic (found and fixed
-2026-07-11).
+**CONST line carries the declared type (since 2026-07-17).**
+`Def.DefWrite` writes `CONST fullname TYPE intValue` where TYPE is the
+exporting module's declared CONST type keyword (INTEGER/WORD/BYTE/LONGINT —
+recall CONST is integer-family-only, see §"CONST declarations are
+integer-only" in OBERLANG.MD).  This closes the old type-loss hole where a
+WORD/INTEGER constant in 32768..65535 (e.g. `Rdoff.SegLimit* = 65000`)
+imported as LONGINT — a *different type on the two sides of the module
+boundary* (the likely root cause of the 2026-07-11 literal-typing
+self-host regression documented in PEXPR.MOD).
+
+**Legacy form still accepted:** `Def.DefRead` detects the old value-only
+line (`CONST fullname intValue`) by peeking for a digit/`-` after the name
+and then falls back to magnitude inference: LONGINT when the value falls
+outside signed INTEGER range (-32768..32767), INTEGER otherwise.  This keeps
+archives produced by older writers (e.g. the frozen BOOT binaries during a
+bootstrap) readable.  Note the reverse is NOT true: an old reader given a
+new-format line reads the value as 0 — never feed new-format `.om` archives
+to a pre-2026-07-17 `BOOT/TOC.EXE` (the normal `make` flow never does: BOOT
+only reads `.def`s it wrote itself).
 
 ---
 

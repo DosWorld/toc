@@ -71,7 +71,7 @@ line to distinguish a normal `--max` stop from a real emulator error.
 - All filenames in program arguments must use DOS paths (`C:\lib\SYSTEM.OM` or just
   `SYSTEM.OM` for files in the root). Paths are case-insensitive inside xt.
 - `OBERON_LIB` uses semicolon `;` as path separator (DOS convention), e.g.
-  `-e "OBERON_LIB=C:\;C:\lib"`.
+  `-e "OBERON_LIB=C:\;C:\lib"` — IN THEORY (see the STRONG caveat below).
 - **ALWAYS QUOTE any DOS path that contains a backslash** (`-c`, `-e OBERON_LIB=…`,
   and DOS-path program arguments).  A backslash is the shell's escape character, so
   an **unquoted** `\123\DIR` reaches xt as `123DIR` (backslashes silently eaten) and
@@ -83,6 +83,19 @@ line to distinguish a normal `--max` stop from a real emulator error.
   (Host `-c dir` paths normally use forward slashes — `-c /tmp/work`, `-c ../../`
   — which need no quoting unless they contain spaces, so this project's makefiles
   are already safe; the rule matters whenever a backslash DOS path is introduced.)
+- **`-e KEY=VALUE` / `--env=KEY=VALUE` do not actually populate the child DOS
+  process's environment block on this xt build (confirmed empirically
+  2026-07-16, see `SRC/TASM/TASM.MD` §K).** A minimal Oberon program calling
+  `Dos.GetEnv("OBERON_LIB", ...)` immediately on entry sees an empty string
+  regardless of `-e`/`--env=`, with no error or warning from xt — this is NOT
+  the shell-quoting issue above (quoting correctly, with a value that
+  contains no backslash at all, still fails). Every Makefile in this repo
+  that needed `OBERON_LIB` (`SRC/TOC/Makefile`, `SRC/TOOLS/Makefile`) works
+  around this by copying `BIN/OBERON.OM` into the `-c` mount root (or CWD,
+  when not using `-c`) before invoking `toc.exe`, and removing the copy
+  after — relying on `IMPORT.MOD`'s own current-directory search step
+  instead of the environment variable. Do not add a new `-e OBERON_LIB=...`
+  invocation anywhere in this project; it will not work.
 - **Do not leave stale zero-byte `.OM` files in the `-c dir` mount root.**
   The compiler reads `.def` content exclusively from inside `.om` archives (standalone
   `.def` files are ignored). A 0-byte or truncated `.om` causes import failures.

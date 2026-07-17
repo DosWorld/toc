@@ -122,6 +122,7 @@ DOS command-line limit, pass `@listfile` with one path per line.
 
 ```
 tasm.exe [/LOG=level] File.asm
+tasm.exe /BIN=code|data /NAME=GlobalName [/LOG=level] File.bin
 ```
 
 `BIN/TASM.EXE` assembles a NASM-subset `.asm` source file straight to a single RDOFF2
@@ -129,38 +130,84 @@ tasm.exe [/LOG=level] File.asm
 (the `.asm` path); the output filename is auto-derived (`File.asm` → `File.rdf`).  `/LOG=`
 works exactly like `toc.exe`'s (`/LOG=debug|info|warn|error`, case-insensitive).
 
+**bin2obj mode** (`/BIN=code|data /NAME=GlobalName File.bin`, 2026-07-16):
+converts any binary file (< 64 KB, strictly — the real limit is
+`Rdoff.SegLimit-1` = 64999 bytes, one 16-bit segment) into an RDOFF2
+object with the blob as `/BIN=`'s named segment's entire content and one
+GLOBAL record (named by `/NAME=`) at offset 0 — no RELOC/IMPORT/BSS
+records. Does not touch the Scan/Sym/Parse/Enc assembler pipeline at all;
+a separate branch in `TASM.MOD` that builds the RDOFF2 object directly
+via `Rdoff` (`Files.BlockCopy` straight into the `ObjFile`'s own
+code/data temp file, the same pattern `Rdoff.RdfLoad` itself uses to
+read a segment back out of a `.rdf`). `/NAME=` is required in this mode
+and validated as an identifier (first-char alpha/`_`/`$`/`?`/`@`, rest
+ident chars, length ≤ 63) — invalid or missing names are a usage error,
+never silently truncated or ignored. `/BIN=bss` is not offered (a blob
+has content; BSS is contentless by definition). Inspect the result with
+`rdfgrep has-global`/`code-contains`/`data-contains` (see
+`DOCS/TESTS.MD`).
+
+Real consumer: `SRC/CC/CBCVM.MAK` (a hand-written 8086 byte-code
+interpreter) uses `/BIN=code /NAME=cbc FOO.CBC` to link a compiled `.cbc`
+program directly into its own `.EXE` instead of loading it from disk at
+runtime — see `SRC/CC/PLAN.MD`'s "CBCVM.MAK — linked-in `.cbc`" section
+and `SRC/CC/Makefile`'s `%.exe: %.CBC` pattern rule.
+
 Covers a practical 8086 subset: the general-purpose/segment/string instructions
 (including `LDS`/`LES`), shift/rotate (by 1 or `CL` only, matching real 8086),
 `MUL`/`DIV`/`IMUL`/`IDIV`, `Jcc`, `LOCK`/`REP` prefixes, `BITS`/`CPU`/
 `SECTION .text|.data|.bss`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added
 synonym)/`STRUC`/`ENDSTRUC`/`RESB`/`RESW`/`RESD` (valid only inside
-`SECTION .bss`)/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`DB`/`DW`/`TIMES`,
-plus `SEG`/`BYTE`/`WORD`/`FAR`/`SHORT`/`NEAR` operand qualifiers and
-character-literal immediates.  `EXTERN`/`IMPORT` symbols resolve through
+`SECTION .bss`)/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`%INCLUDE`/
+`%MACRO`/`%ENDMACRO`/`DB`/`DW`/`TIMES`, plus `SEG`/`BYTE`/`WORD`/`FAR`/
+`SHORT`/`NEAR` operand qualifiers, character-literal immediates, and
+`-Dname[=value]` CLI predefines.  `EXTERN`/`IMPORT` symbols resolve through
 RDOFF2 `RDFREC_IMPORT` records, so a `.rdf` produced by `tasm` can reference
 symbols defined in another module exactly like one produced by real NASM
 (`CALL FAR`, not a bare `CALL`, is required for such cross-module calls — see
 §16.1 below). **Not supported:** `[label+register]` combined addressing (a
 data-segment label combined with a base register in one bracket) — load the
-label address into a register first, then add the index register separately.
+label address into a register first, then add the index register separately;
+`%macro` default/greedy params (`%macro x 1-3`), `%0`, `%rotate`, `%rep`,
+`%ifmacro`, macro overloading by arity; `%if`/`%elif` numeric preprocessing
+(only `%ifdef` exists).
+
+`%include "FILE.INC"` (2026-07-16): textual inclusion, resolved relative to
+CWD (no search path). Nested up to 8 levels deep (`Parse.MaxSrcDepth`); a
+cycle (a file including itself, directly or transitively) is a fatal
+"recursive %include" error. Skipped without opening the file at all when
+inside a false `%ifdef` branch — the `%ifdef DOS_BUILD / %include
+"dosonly.inc"` idiom works even when `dosonly.inc` doesn't exist on this
+build.
+
+`%macro NAME NPARAMS ... %endmacro` (2026-07-16): `%1`..`%9` parameter
+substitution (`NPARAMS` 0..9) and `%%ident` macro-local-label uniquing
+(expands to `?Mk?ident`, `k` a per-invocation counter). A macro body is
+captured as raw text (byte-exact, comments/strings/spacing preserved) up
+to a fixed 4096-byte cap (`Scan.MaxMemText`); nested `%macro` and macro-
+invokes-itself recursion (past the same 8-level source-stack depth as
+`%include`) are both fatal errors, not hangs or silent mis-scoping.
 
 `tasm` is the tool of record for six hand-written `SRC/LIB/*.asm` files:
-`SYS.ASM`→`SYS.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`,
+`SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`,
 `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, and
 `SCREEN.ASM`→`SCREEN.RDF`.  It is **not** a prerequisite of `make all` —
 `tasm` itself needs a fully-built `OBERON.OM`, which in turn is built from
-`SYS.RDF`, so making `tasm` a hard build dependency would be circular.
+`SYSTEM.RDF`, so making `tasm` a hard build dependency would be circular.
 Instead, all six `.RDF` files are checked into the repo, and regenerated only
 via the manual `SRC/LIB/Makefile` target `regen-asm` (uses `BOOT/TASM.EXE`,
 not `BIN/TASM.EXE`). See [BUILD.MD](BUILD.MD) §"Refreshing `BOOT/TASM.EXE`"
 for the maintainer-only install step — like `BOOT/TOC.EXE`, `BOOT/TASM.EXE`
 is never touched by `make` and is installed manually by the maintainer only.
-`SYS.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM` are fully byte-identical to real
+`SYSTEM.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM` are fully byte-identical to real
 NASM output; `DETECT.ASM`/`SCREEN.ASM` are byte-identical in code/data with
-only a benign header-record ordering difference (see `DOCS/TASM_PLAN.MD`).
+only a benign header-record ordering difference. See `DOCS/IMPLRULE.MD`
+§"TASM — design decisions and known limitations" for the resolved design
+questions (jump sizing, FPU/`%define` scope, CLI conventions) and the
+`[label+register]` addressing limitation.
 
 Source: `SRC/TASM/{SCAN,SYM,LEX,DIR,ENC,PARSE,TASM}.MOD`.  Tests:
-`TESTS/test_tasm.sh` — 16 checks: 3 real-NASM oracles (`SYS.ASM`/`EMS.ASM`/
+`TESTS/test_tasm.sh` — 16 checks: 3 real-NASM oracles (`SYSTEM.ASM`/`EMS.ASM`/
 `DETECT.ASM`), 11 byte-diff self-consistency/synthetic fixtures (incl.
 `WINCB.ASM`/`KMOUSE.ASM`/`SCREEN.ASM` and the `TESTS/FIX/*.ASM` STRUC/EXTERN/
 shift/Jcc/no-operand/REP/`.bss` fixtures), 2 `check_fails` error-path
@@ -886,7 +933,7 @@ Returns the total amount of free heap, in 16-byte paragraphs, by walking the
 SYSTEM.MemMaxAvail(): WORD
 ```
 Returns the size of the largest contiguous free block, in 16-byte paragraphs.
-Both procedures are exported FAR from `SYSTEM.MOD` / `SYS.ASM`.
+Both procedures are exported FAR from `SYSTEM.MOD` / `SYSTEM.ASM`.
 
 ```oberon
 SYSTEM.UCASE(c: CHAR): CHAR
@@ -1099,9 +1146,13 @@ Strings.Length(s: ARRAY OF CHAR): INTEGER
 Length of `s` excluding the NUL terminator.
 
 ```oberon
-Strings.Pos(pat, s: ARRAY OF CHAR; pos: INTEGER): INTEGER
+Strings.Pos(substr, string: ARRAY OF CHAR; VAR pos: WORD): BOOLEAN
 ```
-Find first occurrence of `pat` in `s` starting at `pos`.  Returns index or −1 if not found.
+Find the first occurrence of `substr` in `string`, starting the scan at the offset passed in
+`pos`.  `pos` is in/out: on entry it's the 0-based index to start scanning from (0 to search
+the whole string); on a `TRUE` result it's overwritten with the 0-based index of the match;
+on a `FALSE` result it's left unspecified.  Returns `TRUE` if found, `FALSE` if not found or
+if the original `pos` was already past the end of `string`.
 
 ```oberon
 Strings.Append(s: ARRAY OF CHAR; VAR d: ARRAY OF CHAR)
@@ -1147,6 +1198,23 @@ TRUE if `str` ends with `substr`.  `ICase` = TRUE compares case-insensitively.
 Strings.Copy(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR)
 ```
 Copy `src` into `dst`.
+
+```oberon
+Strings.LTrim(VAR s: ARRAY OF CHAR)
+```
+Remove leading whitespace from `s`, in place.  Whitespace is any byte `SYSTEM.ISSPACE`
+accepts (`ORD` 1..32: space plus the low control characters).
+
+```oberon
+Strings.RTrim(VAR s: ARRAY OF CHAR)
+```
+Remove trailing whitespace from `s`, in place.  Same whitespace definition as `LTrim`.
+
+```oberon
+Strings.Trim(VAR s: ARRAY OF CHAR)
+```
+Remove both leading and trailing whitespace from `s`, in place (equivalent to `RTrim`
+followed by `LTrim`).  Internal whitespace is left untouched.
 
 ---
 
@@ -1443,11 +1511,11 @@ from small Turbo Pascal `UNIT`s this way), is a **companion `.ASM` file**:
    name, underscore, original name) since that's how the linker resolves
    `EXTERNAL` procedures against `.ASM` globals.
 2. **Translate MASM syntax to NASM syntax**: `BYTE PTR [x]` → `BYTE[x]`,
-   `@label` → a plain NASM local label, `$hex` → `hexH`, etc. — see
-   `DOCS/TASM_PLAN.MD`'s "Scope: NASM subset actually used in this repo"
-   for the exact accepted subset (this compiler's own assembler, TASM,
-   only understands NASM syntax, and even where `SRC/LIB/*.RDF` files are
-   built with real NASM instead, the source must still be NASM-syntax).
+   `@label` → a plain NASM local label, `$hex` → `hexH`, etc. — see §1.7
+   above for the exact NASM subset TASM accepts (this compiler's own
+   assembler, TASM, only understands NASM syntax, and even where
+   `SRC/LIB/*.RDF` files are built with real NASM instead, the source must
+   still be NASM-syntax).
 3. **Stack arguments use a `%define`/`%undef` bracket, not manual offset
    arithmetic**: every parameterized routine follows
    `PUSH BP; MOV BP,SP; %define argName [BP+RSIZE+N]; ...body...; %undef
@@ -1492,9 +1560,9 @@ from small Turbo Pascal `UNIT`s this way), is a **companion `.ASM` file**:
    an independent NASM build and byte-diff its `.rdf` against TASM's own
    output. A pure content match with only header-record-*ordering*
    differences (NASM interleaves `IMPORT` records at their point of
-   declaration; TASM groups them after all `GLOBAL`s) is expected and fine
-   — see `DOCS/TASM_PLAN.MD`'s "Real-NASM cross-verification" note. A
-   genuine code/data byte difference is not.
+   declaration; TASM groups them after all `GLOBAL`s) is expected and
+   fine — see `DOCS/IMPLRULE.MD` §"TASM — design decisions and known
+   limitations". A genuine code/data byte difference is not.
 10. **Wire the new module into `SRC/LIB/Makefile`** (`STDLIB_OMS`, the
     `regen-asm` target, and a per-module `.OM` build rule depending on its
     checked-in `.RDF`) and, if it's assembled by TASM as part of the

@@ -6,13 +6,13 @@
 |--------|--------|---------|
 | `BOOT/TOC.EXE` | checked-in MS-DOS binary | Bootstrap compiler — seeds the self-hosted build; **never modified by `make`** |
 | `BOOT/TOLIB.EXE` | checked-in MS-DOS binary | Bootstrap archive manager — used only during stdlib merge; **never modified by `make`** |
-| `BOOT/TASM.EXE` | checked-in MS-DOS binary | Bootstrap NASM-subset assembler — tool of record for `SYS.ASM`→`SYS.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`, `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, `SCREEN.ASM`→`SCREEN.RDF`; **never modified by `make`** |
+| `BOOT/TASM.EXE` | checked-in MS-DOS binary | Bootstrap NASM-subset assembler — tool of record for `SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`, `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, `SCREEN.ASM`→`SCREEN.RDF`; **never modified by `make`** |
 | `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `SRC/TOOLS/` (Oberon) | .OM archive manager (list/extract/create/merge); supports `@listfile` |
 | `BIN/RDFGREP.EXE` | `SRC/TOOLS/` (Oberon) | RDOFF/.om/.exe introspection for tests |
 | `BIN/TDINFO.EXE` | `SRC/TOOLS/` (Oberon) | TDS/TDINFO (0x52FB) debug-block inspector for `.exe` files |
 | `BIN/TOSTRIP.EXE` | `SRC/TOOLS/` (Oberon) | Strips debug info from `.exe` (TDS block) or `.om` (`.DBG` member) files |
-| `BIN/TASM.EXE` | `SRC/TASM/` (Oberon) | Self-hosted NASM-subset assembler (`.asm` → RDOFF2 `.rdf`); see `DOCS/TASM_PLAN.MD` |
+| `BIN/TASM.EXE` | `SRC/TASM/` (Oberon) | Self-hosted NASM-subset assembler (`.asm` → RDOFF2 `.rdf`); see `DOCS/PORTING.MD` §1.7 |
 | `BIN/TLINK.EXE` | `SRC/TLINK/` (Oberon) | Merged RDOFF2 linker: tiny-model `.COM`/`.SYS` and small-model `.EXE` output (`/T=com\|sys\|exe`) |
 
 All binaries are MS-DOS MZ executables that run on real MS-DOS or under `xt`.
@@ -21,9 +21,9 @@ binaries in the repository; everything else is built from Oberon source by
 the bootstrap.  `BOOT/TASM.EXE` is a bootstrap binary (not rebuilt by `make
 all`) for a structural reason, not just caution: TASM itself needs a
 fully-built `OBERON.OM` (Files/Strings/LogErr/Rdoff/Out/Dos) to run, and
-`OBERON.OM`'s own `SYSTEM.OM` is built *from* `SYS.RDF` — so TASM cannot be
+`OBERON.OM`'s own `SYSTEM.OM` is built *from* `SYSTEM.RDF` — so TASM cannot be
 a hard prerequisite of the stdlib build without a circular dependency. See
-`SRC/LIB/Makefile`'s `regen-asm` target and the `SYS.RDF`/`EMS.RDF`
+`SRC/LIB/Makefile`'s `regen-asm` target and the `SYSTEM.RDF`/`EMS.RDF`
 sections below.
 
 ---
@@ -59,12 +59,12 @@ BOOT/TOLIB.EXE (via xt)
 ```
 
 **Separate, manual step (not part of `make all`)** — regenerating
-`SYS.RDF`/`EMS.RDF`/`DETECT.RDF`/`WINCB.RDF`/`KMOUSE.RDF`/`SCREEN.RDF` from
+`SYSTEM.RDF`/`EMS.RDF`/`DETECT.RDF`/`WINCB.RDF`/`KMOUSE.RDF`/`SCREEN.RDF` from
 their `.ASM` sources via the bootstrap assembler:
 
 ```
 BOOT/TASM.EXE (via xt, run manually: cd SRC/LIB && make regen-asm)
-  └─ SRC/LIB/SYS.ASM     → SRC/LIB/SYS.RDF
+  └─ SRC/LIB/SYSTEM.ASM     → SRC/LIB/SYSTEM.RDF
   └─ SRC/LIB/EMS.ASM     → SRC/LIB/EMS.RDF
   └─ SRC/LIB/DETECT.ASM  → SRC/LIB/DETECT.RDF
   └─ SRC/LIB/WINCB.ASM   → SRC/LIB/WINCB.RDF
@@ -74,9 +74,10 @@ BOOT/TASM.EXE (via xt, run manually: cd SRC/LIB && make regen-asm)
 
 `DETECT.RDF`/`SCREEN.RDF` are also verified against real NASM (byte-
 identical code/data segments; only header-record ordering differs — see
-`DOCS/TASM_PLAN.MD`); `WINCB.RDF`/`KMOUSE.RDF` are TASM self-consistency
-baselines. `SYS.RDF`/`EMS.RDF`/`WINCB.RDF`/`KMOUSE.RDF` are fully
-byte-identical to real NASM output.
+`DOCS/IMPLRULE.MD` §"TASM — design decisions and known limitations");
+`WINCB.RDF`/`KMOUSE.RDF` are TASM self-consistency baselines.
+`SYSTEM.RDF`/`EMS.RDF`/`WINCB.RDF`/`KMOUSE.RDF` are fully byte-identical to
+real NASM output.
 
 ### Per sub-project
 
@@ -118,23 +119,23 @@ half-written `.exe`/`.om`** behind.
 `SYSTEM.om` is built from two sources:
 
 - `SRC/LIB/SYSTEM.MOD` — Oberon source for the SYSTEM module (compiled with `/SYSTEM`)
-- `SRC/LIB/SYS.RDF` — pre-assembled RDOFF2 object for `SRC/LIB/SYS.ASM` (hand-assembled helpers);
-  packed into the output `.om` via a `(*$LSYS.RDF*)` directive in `SYSTEM.MOD`
+- `SRC/LIB/SYSTEM.RDF` — pre-assembled RDOFF2 object for `SRC/LIB/SYSTEM.ASM` (hand-assembled helpers);
+  packed into the output `.om` via a `(*$LSYSTEM.RDF*)` directive in `SYSTEM.MOD`
 
 ```bash
 # Done automatically by: cd SRC/LIB && make install
 xt run --max=50000000 -c . 'BOOT/TOC.EXE' /SYSTEM 'SRC/LIB\SYSTEM.MOD'
 ```
 
-**IMPORTANT — `SYS.RDF` is a checked-in binary, built by TASM:**
-`SRC/LIB/SYS.RDF` is the pre-assembled RDOFF2 object for `SRC/LIB/SYS.ASM`,
+**IMPORTANT — `SYSTEM.RDF` is a checked-in binary, built by TASM:**
+`SRC/LIB/SYSTEM.RDF` is the pre-assembled RDOFF2 object for `SRC/LIB/SYSTEM.ASM`,
 produced by `BOOT/TASM.EXE` (the self-hosted assembler — see
-`DOCS/TASM_PLAN.MD`), the tool of record for this `.asm`→`.rdf` step.
+`DOCS/PORTING.MD` §1.7), the tool of record for this `.asm`→`.rdf` step.
 `SRC/LIB/Makefile` has **no rule** to rebuild it automatically as part of
 `make all`/`make install` (TASM needs a fully-built `OBERON.OM` to run,
-which itself needs `SYS.RDF` — see the toolchain-binaries table above for
-why this can't be a normal build dependency). After editing `SYS.ASM`, run
-`cd SRC/LIB && make regen-asm` to regenerate both `SYS.RDF` and
+which itself needs `SYSTEM.RDF` — see the toolchain-binaries table above for
+why this can't be a normal build dependency). After editing `SYSTEM.ASM`, run
+`cd SRC/LIB && make regen-asm` to regenerate both `SYSTEM.RDF` and
 `EMS.RDF` via `BOOT/TASM.EXE`, verify `bash TESTS/test_tasm.sh` still
 passes, then `make install` and commit the regenerated `.rdf` alongside
 the `.asm` change.
@@ -160,7 +161,7 @@ the `.asm` change.
   `EMS.MOD`
 
 **IMPORTANT — `EMS.RDF` is a checked-in binary, built by TASM**, same
-as `SYS.RDF`: `SRC/LIB/Makefile` has no rule to rebuild it automatically
+as `SYSTEM.RDF`: `SRC/LIB/Makefile` has no rule to rebuild it automatically
 as part of `make all`/`make install`. After editing `EMS.ASM`, run
 `cd SRC/LIB && make regen-asm`, verify `bash TESTS/test_tasm.sh` still
 passes, then `make install` and commit the regenerated `.rdf`.
@@ -174,9 +175,9 @@ probe are issued directly from `EMS.ASM` via `INT 67h`/`INT 21h` — no
 points (an intra-file FAR `call` needs a segment-base reference only a real
 RDOFF-relocatable build can resolve); where logic must be shared (e.g.
 `EMS_Version`/`EMS_RequireVersion`), it is factored into a `NEAR` helper
-instead, matching `SYS.ASM`'s own `div_kernel_32`/`check_8087`/`MEM_INIT`
+instead, matching `SYSTEM.ASM`'s own `div_kernel_32`/`check_8087`/`MEM_INIT`
 pattern. `EMS.ASM` accesses its own `.data` state the same way
-`SYS.ASM` does — `mov ax, seg driverPresent` / `mov ds, ax` before any
+`SYSTEM.ASM` does — `mov ax, seg driverPresent` / `mov ds, ax` before any
 read/write, never `mov ax, cs`, since `.data` and `.text` are distinct
 segments in this linking model.
 
@@ -195,13 +196,13 @@ built from a companion `.ASM`:
 
 | Module | `.ASM` | Ported from | NASM-verified? |
 |--------|--------|--------------|-----------------|
-| `Detect` | `DETECT.ASM` | (native NASM source, no Pascal original) | code/data byte-identical; header record order differs only (see `DOCS/TASM_PLAN.MD`) |
+| `Detect` | `DETECT.ASM` | (native NASM source, no Pascal original) | code/data byte-identical; header record order differs only (see `DOCS/IMPLRULE.MD` §"TASM") |
 | `WinCB`  | `WINCB.ASM`  | Turbo Pascal `WinCB` UNIT (Windows 3.x clipboard) | byte-identical |
-| `KMouse` | `KMOUSE.ASM` | Turbo Pascal `KMOUSE.PAS` UNIT (ext. keyboard + INT 33h mouse) | byte-identical |
-| `Screen` | `SCREEN.ASM` | Turbo Pascal `SCR.PAS` UNIT (text-mode screen driver) | code/data byte-identical; header record order differs only |
+| `KMouse` | `KMOUSE.ASM` | Turbo Pascal UNIT (ext. keyboard + INT 33h mouse) | byte-identical |
+| `Screen` | `SCREEN.ASM` | Turbo Pascal UNIT (text-mode screen driver) | code/data byte-identical; header record order differs only |
 
 All four are packed into their output `.om` via a `(*$L NAME.RDF*)`
-directive in the corresponding `.MOD`, same as `SYS.RDF`/`EMS.RDF`. Same
+directive in the corresponding `.MOD`, same as `SYSTEM.RDF`/`EMS.RDF`. Same
 **IMPORTANT** caveat applies: these `.RDF` files are checked-in binaries
 built by TASM, with no automatic rebuild rule — after editing any of the
 four `.ASM` files, run `cd SRC/LIB && make regen-asm`, verify
@@ -295,8 +296,8 @@ oberonc/
   BOOT/               Bootstrap DOS binaries (immutable — updated manually)
     TOC.EXE              All-in-one compiler/linker/dep-scan (MS-DOS MZ)
     TOLIB.EXE            Archive manager (MS-DOS MZ)
-    TASM.EXE             NASM-subset assembler; tool of record for SYS.ASM/
-                          EMS.ASM -> .RDF (MS-DOS MZ, see DOCS/TASM_PLAN.MD)
+    TASM.EXE             NASM-subset assembler; tool of record for SYSTEM.ASM/
+                          EMS.ASM -> .RDF (MS-DOS MZ, see DOCS/PORTING.MD §1.7)
   SRC/                Oberon source for all tools
     TOC/                Compiler + linker (Main, Parser, Link, …)
       SCAN.MOD          Scanner (Scan)
@@ -569,7 +570,7 @@ the linker deduplicates at the RDF level: the first-scanned `.om` wins; subseque
 occurrences of the same RDF (identified by their first exported GLOBAL symbol) are
 silently skipped.  Similarly, the compiler (`IMPORT.MOD`) deduplicates `.def` loading
 at the alias level: if a module alias was already loaded, the `.def` is not re-read.
-This prevents the "two copies of SYS.RDF linked in" problem that would result in two
+This prevents the "two copies of SYSTEM.RDF linked in" problem that would result in two
 separate code segments for the same runtime helper, each with its own `MemStartSeg`
 copy, causing `SYSTEM.MemAvail()` to read from the wrong segment.  The lesson:
 **avoid shipping the same RDF member in both a dedicated `.om` and `OBERON.OM`.**
@@ -632,5 +633,5 @@ cp TASM.exe ../../BOOT/TASM.EXE   # manual; never done by make
 `BOOT/TASM.EXE` is only ever consumed by `SRC/LIB/Makefile`'s `regen-asm`
 target (see above) — it is not part of the `make all`/`make test` build
 graph, so a stale `BOOT/TASM.EXE` cannot break the normal build; it only
-affects `make regen-asm`'s output next time someone edits `SYS.ASM` or
+affects `make regen-asm`'s output next time someone edits `SYSTEM.ASM` or
 `EMS.ASM`.

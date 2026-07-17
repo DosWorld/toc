@@ -51,7 +51,7 @@ every change.
 
 That means:
 
-- No hidden C runtime. `SYSTEM.MOD` + a small `SYS.ASM` are the entire
+- No hidden C runtime. `SYSTEM.MOD` + a small `SYSTEM.ASM` are the entire
   foundation.
 - No 32-bit protected-mode escape hatch. Real segmented 8086 memory, real
   64 KB segments, real far pointers.
@@ -88,11 +88,20 @@ That means:
 - **Self-hosted assembler (TASM).** `SRC/TASM/` is a self-hosted NASM-subset
   8086 assembler (`.asm` → RDOFF2 `.rdf`), verified against real-NASM-built
   oracles for every hand-assembled `.ASM` file in the standard library
-  (`SYS.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
+  (`SYSTEM.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
   `SCREEN.ASM`) — four fully byte-identical, two identical in code/data with
   only a benign header-record-ordering difference. It's the toolchain's tool
-  of record for regenerating those files — see `DOCS/TASM_PLAN.MD` and
+  of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
+- **Turbo Pascal `UNIT` porting path.** Small DOS-era Turbo Pascal driver
+  units (BIOS/DOS interrupt wrappers with inline `ASM` bodies) port cleanly
+  to this toolchain: `Detect` (hardware/environment probing), `WinCB`
+  (Windows 3.x clipboard access), `KMouse` (extended keyboard + Microsoft
+  mouse), and `Screen` (text-mode shadow-buffer driver with cursor, colour
+  print/scroll, a background spinner, and VGA palette fades) are all
+  real ports shipped in the standard library — see `DOCS/PORTING.MD` §16.1
+  for the conventions (companion NASM `.ASM` file, `%define`/`%undef`
+  stack-argument aliasing, `PCHAR` → `SYSTEM.ADDRESS`).
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
   `SRC/TLINK/` is one Oberon tool (`tlink /T=com|sys|exe`) covering both
   tiny model (`.COM`/`.SYS`, no relocation table) and small model (`.EXE`
@@ -225,8 +234,8 @@ BIN/TOC.EXE
 
 BOOT/TASM.EXE  (checked-in seed binary — never touched by `make`, installed
                 manually by the maintainer, same status as BOOT/TOC.EXE)
-  |-- SRC/LIB/SYS.ASM, EMS.ASM, DETECT.ASM, WINCB.ASM, KMOUSE.ASM,
-      SCREEN.ASM -> SYS.RDF, EMS.RDF, DETECT.RDF, WINCB.RDF, KMOUSE.RDF,
+  |-- SRC/LIB/SYSTEM.ASM, EMS.ASM, DETECT.ASM, WINCB.ASM, KMOUSE.ASM,
+      SCREEN.ASM -> SYSTEM.RDF, EMS.RDF, DETECT.RDF, WINCB.RDF, KMOUSE.RDF,
       SCREEN.RDF  (`make regen-asm`, a manual step — not part of
       `make all`, see the circular-dependency note in DOCS/BUILD.MD)
 ```
@@ -301,6 +310,7 @@ reproduce itself?).
 | [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) | RDOFF2 object file format specification |
 | [`DOCS/TD-SPEC.MD`](DOCS/TD-SPEC.MD) | Turbo Debugger TDS/TDINFO format notes |
 | [`DOCS/PORTING.MD`](DOCS/PORTING.MD) | Guide for porting code from C/Pascal |
+| [`DOCS/HISTORY.MD`](DOCS/HISTORY.MD) | Dated changelog of resolved bugs, refactors, and features |
 
 ---
 

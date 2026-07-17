@@ -74,6 +74,7 @@ RDF predicates:
   has-global        FILE.RDF NAME
   code-starts       FILE.RDF HEX
   code-contains     FILE.RDF HEX
+  data-contains     FILE.RDF HEX
   code-count        FILE.RDF HH MIN
   code-byte-at      FILE.RDF OFS HH
   init-imports      FILE.RDF
@@ -157,6 +158,7 @@ Supported EXPECT predicates:
 | `code-starts` | code segment must start with hex bytes `arg` |
 | `code-contains` | code segment must contain hex byte sequence `arg` |
 | `no-code-contains` | code segment must NOT contain hex byte sequence `arg` |
+| `data-contains` | data segment must contain hex byte sequence `arg` |
 | `code-byte-at` | byte at offset `OFS` must equal `HH` (arg = `OFS HH`) |
 | `code-count` | byte `HH` must appear at least `MIN` times (arg = `HH MIN`) |
 | `init-imports-empty` | `__init` procedure has no IMPORT records |
@@ -452,25 +454,35 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 ## TASM assembler regression test
 
 `TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
-`.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7 and `DOCS/TASM_PLAN.MD`) by byte-diffing
-its output against expected `.rdf` files. 16 checks total:
+`.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7) by byte-diffing
+its output against expected `.rdf` files. 83 checks total as of
+2026-07-16 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
+behind each batch — the four categories below cover the original 16;
+everything added since is a per-bug or per-feature regression row, not
+worth re-narrating here row-by-row): the original 16 (below), plus
+regression rows for every bug found in the 2026-07-15/16 review passes
+(§A–§H's undefined-symbol/hang/garbage-encoding/EXTERN-reloc/etc. fixes,
+§C's minor-bug batch, §D's 8086-coverage additions), `§J` bin2obj-mode
+rows, and `§I`'s `-D`/`%include`/`%macro` rows (15 rows: 3 `-D`, 5
+`%include`, 7 `%macro`).
 
 1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
    compiler's own self-host).
-2. **Real-NASM oracles** (3) — assembles `SRC/LIB/SYS.ASM`, `SRC/LIB/EMS.ASM`, and
-   `SRC/LIB/DETECT.ASM`, byte-diffing against the checked-in `SYS.RDF`/`EMS.RDF`/
+2. **Real-NASM oracles** (3) — assembles `SRC/LIB/SYSTEM.ASM`, `SRC/LIB/EMS.ASM`, and
+   `SRC/LIB/DETECT.ASM`, byte-diffing against the checked-in `SYSTEM.RDF`/`EMS.RDF`/
    `DETECT.RDF`, all originally produced by real NASM. This is the authoritative
    correctness signal. `DETECT.ASM` is the only `.text`-only oracle (no `SECTION
    .data`) — it caught a real bug (`RDOFF.MOD`'s `RdfWriteTo` used to skip the
    `.data` segment header entirely when `dataLen=0`, but real NASM always emits
-   it) that `SYS.ASM`/`EMS.ASM`'s real `.data` sections never exercised. A later
+   it) that `SYSTEM.ASM`/`EMS.ASM`'s real `.data` sections never exercised. A later
    independent full re-verification against fresh real-NASM builds of every
-   `SRC/LIB/*.ASM` file confirmed `SYS.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM`
+   `SRC/LIB/*.ASM` file confirmed `SYSTEM.ASM`/`EMS.ASM`/`WINCB.ASM`/`KMOUSE.ASM`
    are fully byte-identical to NASM, and `DETECT.ASM`/`SCREEN.ASM` are
    byte-identical in their code/data segments with only a benign header-record
    *ordering* difference (NASM interleaves `IMPORT` records at their point of
-   declaration; TASM groups them after all `GLOBAL` records — semantically inert,
-   see `DOCS/TASM_PLAN.MD`).
+   declaration; TASM groups them after all `GLOBAL` records — semantically
+   inert, see `DOCS/IMPLRULE.MD` §"TASM — design decisions and known
+   limitations").
 3. **Synthetic / self-consistency fixtures** (11) — `TESTS/FIX/TSTRUC.ASM`
    (STRUC/ENDSTRUC field-offset and `_size` arithmetic), `TEXTERN.ASM`
    (EXTERN/IMPORT cross-module relocations), `TMULDIV.ASM` (IMUL/DIV/IDIV
@@ -496,10 +508,23 @@ Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
 
 ```bash
 bash TESTS/test_tasm.sh
-# Results: 16 passed, 0 failed
+# Results: 83 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
+
+**Adding a new TASM fixture:** prefer a real-NASM-produced oracle `.rdf`
+(`nasm -f rdf`) over a self-consistency fixture whenever one is
+obtainable — check `nasm -hf` for `rdf` backend support first (some local
+`nasm` builds lack it entirely, e.g. `TMULDIV.ASM`/`TSHIFT.ASM`/
+`TJCC2.ASM`/`TNOOP4.ASM`/`TREP.ASM` all fell back to hand-verifying the
+expected `.rdf` against the 8086 opcode table by hand, documented in each
+fixture's own header comment, when no oracle was available). Group
+fixtures by feature/batch (e.g. one `.ASM` per encoding-group addition)
+rather than one per mnemonic. Whichever path is used, the fixture's header
+comment must say so explicitly (real-NASM oracle vs. hand-verified
+baseline) so a future reader knows how much independent correctness
+weight to give it.
 
 ---
 
