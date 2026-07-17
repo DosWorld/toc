@@ -85,7 +85,7 @@ That means:
   object files, so hand-written assembly modules assembled with NASM, YASM,
   or MSA2 (`-f rdf`) can be linked directly alongside Oberon-compiled
   `.rdf`/`.om` modules — no C shim required.
-- **Self-hosted assembler (TASM).** `SRC/TASM/` is a self-hosted NASM-subset
+- **Trubo Assembler (TASM).** `SRC/TASM/` is a self-hosted NASM-subset
   8086 assembler (`.asm` → RDOFF2 `.rdf`), verified against real-NASM-built
   oracles for every hand-assembled `.ASM` file in the standard library
   (`SYSTEM.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
