@@ -93,15 +93,6 @@ That means:
   only a benign header-record-ordering difference. It's the toolchain's tool
   of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
-- **Turbo Pascal `UNIT` porting path.** Small DOS-era Turbo Pascal driver
-  units (BIOS/DOS interrupt wrappers with inline `ASM` bodies) port cleanly
-  to this toolchain: `Detect` (hardware/environment probing), `WinCB`
-  (Windows 3.x clipboard access), `KMouse` (extended keyboard + Microsoft
-  mouse), and `Screen` (text-mode shadow-buffer driver with cursor, colour
-  print/scroll, a background spinner, and VGA palette fades) are all
-  real ports shipped in the standard library — see `DOCS/PORTING.MD` §16.1
-  for the conventions (companion NASM `.ASM` file, `%define`/`%undef`
-  stack-argument aliasing, `PCHAR` → `SYSTEM.ADDRESS`).
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
   `SRC/TLINK/` is one Oberon tool (`tlink /T=com|sys|exe`) covering both
   tiny model (`.COM`/`.SYS`, no relocation table) and small model (`.EXE`
