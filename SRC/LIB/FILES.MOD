@@ -21,6 +21,8 @@ TYPE
     bufPos     : WORD;
     delOnClose : BOOLEAN;
     dirty      : BOOLEAN;
+    wrErr      : BOOLEAN;   (* latched on any failed flush (disk full etc.);
+                               survives Close — poll with Ok(F) *)
     pos        : LONGINT;
     size       : LONGINT;
     backend    : INTEGER;
@@ -30,6 +32,8 @@ TYPE
 
 VAR
   tempSeq:  WORD;
+  pspSeg:   WORD;   (* this process' PSP segment — makes temp names unique
+                       across concurrent processes (Dos.Exec children) *)
 
 PROCEDURE CopyName(VAR F: File; VAR name: ARRAY OF CHAR);
   VAR n: WORD;
@@ -60,13 +64,30 @@ BEGIN
   IF F.backend = BkEms THEN
     IF EmsEnsureCap(F, (F.bufTag + 1) * LONGINT(BUFSIZE)) THEN
       EMS.CopyToEMS(F.buf^, F.emsHandle, F.bufTag * BUFSIZE, WORD(BUFSIZE))
+    ELSE
+      F.wrErr := TRUE   (* EMS exhausted: the page was silently dropped before *)
     END
   ELSE
     SYSTEM.FSEEK(F.handle, F.bufTag * BUFSIZE);
-    SYSTEM.BLOCKWRITE(F.handle, F.buf^, F.bufSize);
+    (* A short write (disk full / write-protected / bad handle) used to be
+       silently ignored, leaving a truncated file that reported success.
+       Latch it; callers poll Ok(F) at their output boundary. *)
+    IF SYSTEM.BLOCKWRITE(F.handle, F.buf^, F.bufSize) # F.bufSize THEN
+      F.wrErr := TRUE
+    END
   END;
   F.dirty := FALSE
 END BufFlush;
+
+(* Ok*: TRUE while no buffered write has failed on F (disk full, EMS
+   exhausted, ...).  The flag survives Close, so the pattern
+   `Close(F); IF ~Ok(F) THEN report END` catches the final flush too.
+   Parameters: F — the file (open or already closed).
+   Result: TRUE if every flush so far succeeded. *)
+PROCEDURE Ok*(VAR F: File): BOOLEAN;
+BEGIN
+  RETURN ~F.wrErr
+END Ok;
 
 PROCEDURE BufFetch(VAR F: File; tag: LONGINT);
   VAR avail, pageOfs: LONGINT;
@@ -139,7 +160,7 @@ END ClampLen;
 (* BlockRead: read up to len bytes from F into x, advancing the cursor.
    Works transparently for both disk-backed and EMS-backed files via the
    shared 8 KB page buffer.
-   Parameters: F — the open file; x — destination buffer; len — requested
+   Parameters: F - the open file; x - destination buffer; len - requested
    number of bytes.
    Result: number of bytes actually read (less than len at end-of-file). *)
 PROCEDURE BlockRead*(VAR F: File; VAR x; len: WORD): WORD;
@@ -168,7 +189,7 @@ END BlockRead;
 
 (* BlockWrite: write len bytes from x into F, advancing the cursor and
    growing the file if the write extends past its current size.
-   Parameters: F — the open file; x — source buffer; len — number of bytes
+   Parameters: F - the open file; x - source buffer; len - number of bytes
    to write.
    Result: number of bytes actually written (equals len; only fails to
    short-circuit on len=0). *)
@@ -198,7 +219,7 @@ BEGIN
 END BlockWrite;
 
 (* WriteByte: write a single byte to F at the current cursor position.
-   Parameters: F — the open file; b — byte value to write.
+   Parameters: F - the open file; b - byte value to write.
    Result: always 1 (bytes written). *)
 PROCEDURE WriteByte*(VAR F: File; b: BYTE) : WORD;
 BEGIN
@@ -333,15 +354,15 @@ PROCEDURE ReadLine*(VAR f: File; VAR buf: ARRAY OF CHAR; maxLen: WORD): WORD;
 BEGIN
   len := 0;
   IF ReadByte(f, b) THEN n := 1 ELSE n := 0 END;
-  WHILE n > 0 DO
+  WHILE (n # 0) & (len < maxLen - 1) DO
     IF b = 0DH THEN
-      IF ReadByte(f, b) THEN n := 1 ELSE n := 0 END;
-    ELSIF b = 0AH THEN
-      n := 0
-    ELSE
-      IF len < maxLen - 1 THEN buf[len] := CHR(b); INC(len) END;
-      n := 1;
-      ReadByte(f, b)
+      IF ReadByte(f, b) THEN n := 1 ELSE n :=0 END
+    END;
+    IF b = 0AH THEN n := 0 END;
+    IF (n # 0) & (len < maxLen - 1) THEN
+      buf[len] := CHR(b);
+      INC(len);
+      n := 1; ReadByte(f, b)
     END
   END;
   buf[len] := 0X;
@@ -393,6 +414,15 @@ BEGIN
   RETURN F.size
 END Size;
 
+(* Eof: return End Of File status
+   everything after it.
+   Parameters: F - the open file.
+   Result: TRUE, if current position is set at end of file. *)
+PROCEDURE Eof*(VAR F: File): BOOLEAN;
+BEGIN
+  RETURN Size(F) <= Position(F);
+END Eof;
+
 (* Truncate: cut the file off at the current cursor position, discarding
    everything after it.
    Parameters: F — the open file.
@@ -429,6 +459,7 @@ BEGIN
   F.backend := BkDisk;
   F.pos := 0; F.size := -1;
   F.delOnClose := FALSE;
+  F.wrErr := FALSE;
   CopyName(F, name);
 
   p := SYSTEM.ADR(name[0]);
@@ -487,6 +518,7 @@ BEGIN
   p := SYSTEM.ADR(name[0]);
   CopyName(F, name);
   F.delOnClose := FALSE;
+  F.wrErr := FALSE;
   F.pos := 0; F.size := -1;
 
   r.AX := 716CH;
@@ -541,12 +573,27 @@ BEGIN
   RETURN TRUE
 END Append;
 
-PROCEDURE MakeTempName(VAR dst: ARRAY OF CHAR);
-  VAR i: INTEGER; v: LONGINT;
+PROCEDURE HexDigit(v: WORD): CHAR;
 BEGIN
+  v := SYSTEM.AND(v, 0FH);
+  IF v < 10 THEN RETURN CHR(ORD("0") + INTEGER(v)) END;
+  RETURN CHR(ORD("A") + INTEGER(v) - 10)
+END HexDigit;
+
+PROCEDURE MakeTempName(VAR dst: ARRAY OF CHAR);
+  VAR i: INTEGER; v: LONGINT; p: WORD;
+BEGIN
+  (* Name = 4 hex digits of the PSP segment + 4 decimal digits of a
+     per-process sequence counter.  A sequence-only name ("00000001.TMP")
+     collided between concurrent processes (e.g. a Dos.Exec child running in
+     the same directory) and they destroyed each other's temp files. *)
   INC(tempSeq);
+  p := pspSeg;
+  i := 0;
+  WHILE i < 4 DO dst[3 - i] := HexDigit(p); p := SYSTEM.LSR(p, 4); INC(i) END;
   v := LONGINT(tempSeq);
-  i := 0; WHILE i < 8 DO dst[7 - i] := CHR(ORD("0") + INTEGER(v MOD LONGINT(10))); v := v DIV LONGINT(10); INC(i) END;
+  i := 0;
+  WHILE i < 4 DO dst[7 - i] := CHR(ORD("0") + INTEGER(v MOD LONGINT(10))); v := v DIV LONGINT(10); INC(i) END;
   dst[8] := "."; dst[9] := "T"; dst[10] := "M"; dst[11] := "P"; dst[12] := 0X
 END MakeTempName;
 
@@ -564,6 +611,7 @@ BEGIN
     IF F.buf = NIL THEN ok := EMS.Free(handle); RETURN FALSE END;
     F.name[0] := 0X;
     F.delOnClose := FALSE;
+    F.wrErr := FALSE;
     F.bufTag := -1;
     F.bufSize := 0;
     F.bufPos := 0;
@@ -742,7 +790,19 @@ BEGIN
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
 
-  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0 THEN RETURN TRUE END;
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0 THEN
+    (* AX=714Eh returns a search handle in AX that MUST be released via
+       AX=71A1h (FindClose) — one handle leaked per call otherwise on any
+       LFN-capable DOS.  The xt emulator answers 714Eh with carry clear but
+       AX UNCHANGED (no handle) and aborts on an unimplemented 71A1h, so
+       only close when a real handle came back. *)
+    IF r.AX # 714EH THEN
+      r.BX := r.AX;
+      r.AX := 71A1H;
+      SYSTEM.Intr(21H, r)
+    END;
+    RETURN TRUE
+  END;
   IF r.AX # 7100H THEN RETURN FALSE END;
 
   r.AX := 2F00H;
@@ -802,6 +862,15 @@ BEGIN
   SYSTEM.Intr(21H, r);
 END SetFTime;
 
+PROCEDURE InitPsp;
+  VAR r: SYSTEM.Registers;
 BEGIN
-  tempSeq := 0
+  r.AX := 6200H;             (* DOS get PSP segment -> BX *)
+  SYSTEM.Intr(21H, r);
+  pspSeg := WORD(r.BX)
+END InitPsp;
+
+BEGIN
+  tempSeq := 0;
+  InitPsp
 END Files.
