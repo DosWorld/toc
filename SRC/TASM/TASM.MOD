@@ -220,7 +220,12 @@ BEGIN
        plausible (one GLOBAL record, empty segment) with no diagnostic. *)
     LogErr.Error2("tasm: empty input file: ", srcPath); Files.Close(f); RETURN FALSE
   END;
-  IF size > MaxBlobSize THEN
+  (* LONGINT() cast is generation-proof: MaxBlobSize (= SegLimit-1 = 64999)
+     may fold as INTEGER or WORD depending on which compiler generation
+     built this binary; a bare const here sign-extended to -537 under the
+     INTEGER folding and rejected every input.  The cast always loads the
+     constant's true value. *)
+  IF size > LONGINT(MaxBlobSize) THEN
     LogErr.Error2("tasm: input exceeds 64K segment limit: ", srcPath);
     Files.Close(f); RETURN FALSE
   END;

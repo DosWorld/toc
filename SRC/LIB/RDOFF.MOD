@@ -126,7 +126,13 @@ PROCEDURE AddRelocNode(obj: ObjFile; physSeg: BYTE; offset: LONGINT;
 BEGIN
   (* append to the tail chunk; allocate a fresh chunk only when it fills *)
   IF (obj^.relocTail = NIL) OR (obj^.relocTail^.count >= RelocChunk) THEN
-    NEW(r); r^.count := 0; r^.next := NIL;
+    NEW(r);
+    IF r = NIL THEN
+      (* Fatal-NEW rule: a NIL far write lands in the IVT.  Latch and drop the
+         reloc; the compile dies at the next LogErr boundary. *)
+      LogErr.Error("out of memory (reloc chunk)"); RETURN
+    END;
+    r^.count := 0; r^.next := NIL;
     IF obj^.relocTail # NIL THEN obj^.relocTail^.next := r ELSE obj^.relocHead := r END;
     obj^.relocTail := r
   END;
@@ -202,12 +208,21 @@ BEGIN RETURN LONGINT(obj^.dataLen) END DataLen;
    Result: none. *)
 PROCEDURE EmitByte*(obj: ObjFile; seg: INTEGER; b: BYTE);
 BEGIN
+  (* The WORD counters must not wrap silently: a module emitting > 64 KB of
+     code purely through EmitByte would wrap codeLen past 65535 and sneak a
+     falsely-small value past RdfWriteTo's one-shot >= SegLimit check,
+     producing a corrupt .rdf instead of an error.  The guard is a WORD
+     compare + INC — cheap even on this hottest path. *)
   IF seg = SegCode THEN
     Files.WriteByte(obj^.codeFile, b);
-    INC(obj^.codeLen)
+    IF obj^.codeLen >= WORD(SegLimit) THEN
+      LogErr.Error("error: code segment exceeds limit")
+    ELSE INC(obj^.codeLen) END
   ELSE
     Files.WriteByte(obj^.dataFile, b);
-    INC(obj^.dataLen)
+    IF obj^.dataLen >= WORD(SegLimit) THEN
+      LogErr.Error("error: data segment exceeds limit")
+    ELSE INC(obj^.dataLen) END
   END
 END EmitByte;
 
@@ -396,6 +411,9 @@ PROCEDURE RdfAddImport*(obj: ObjFile; name: ARRAY OF CHAR): INTEGER;
   VAR imp: ImportNode;
 BEGIN
   NEW(imp);
+  IF imp = NIL THEN
+    LogErr.Error("out of memory (import record)"); RETURN -1
+  END;
   imp^.flags := BYTE(0);
   imp^.segId := obj^.nextImportId; INC(obj^.nextImportId);
   Strings.Copy(name, imp^.name);
@@ -418,6 +436,9 @@ PROCEDURE RdfAddGlobal*(obj: ObjFile; name: ARRAY OF CHAR; segId: BYTE; offset: 
   VAR g: GlobalNode;
 BEGIN
   NEW(g);
+  IF g = NIL THEN
+    LogErr.Error("out of memory (global record)"); RETURN
+  END;
   (* flags=0 matches real NASM's RDOFF2 writer (verified against
      SRC/LIB/SYSTEM.RDF); LINK.MOD never reads this byte (grep found zero
      references), so the value has no linking effect either way -- kept at
@@ -709,6 +730,10 @@ BEGIN
       Files.ReadWord(f, segIdWord);
       ok := Rs(f, name);
       NEW(imp);
+      IF imp = NIL THEN
+        LogErr.Error("out of memory (import record)");
+        Files.Close(f); RETURN FALSE
+      END;
       imp^.flags := flags; imp^.segId := segIdWord; imp^.next := NIL;
       n := 0;
       WHILE (n < MaxName - 1) & (name[n] # 0X) DO imp^.name[n] := name[n]; INC(n) END;
@@ -723,6 +748,10 @@ BEGIN
       Files.ReadDWord(f, offset);
       ok := Rs(f, name);
       NEW(g);
+      IF g = NIL THEN
+        LogErr.Error("out of memory (global record)");
+        Files.Close(f); RETURN FALSE
+      END;
       g^.flags := flags; g^.segId := segIdByte; g^.offset := offset; g^.next := NIL;
       n := 0;
       WHILE (n < MaxName - 1) & (name[n] # 0X) DO g^.name[n] := name[n]; INC(n) END;

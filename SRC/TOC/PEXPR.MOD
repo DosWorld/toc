@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE PExpr;
 IMPORT Scan, Syms, Cgen, Rdoff, Strings, LogErr, StrTab;
 
@@ -309,7 +309,11 @@ BEGIN
   ELSE
     Cgen.Emit2(03BH, 0C1H)
   END;
-  Cgen.CgCondShort(Cgen.OpJl, ok2);
+  (* UNSIGNED below: len may legally exceed 32767 (arrays up to 64000 bytes);
+     a signed JL would treat such a len as negative and flag every index as
+     out of bounds.  The JGE sign check above already handled negative
+     indices, so JB here is exact. *)
+  Cgen.CgCondShort(Cgen.OpJb, ok2);
   Cgen.CgCallFar(errId);
   Cgen.CgPatchShort(ok2)
 END EmitBoundsCheck;
@@ -350,8 +354,7 @@ END FwdPatchCalls;
    typeless VAR, single-char string -> CHAR/BYTE, string -> ARRAY OF CHAR/BYTE,
    or implicit INTEGER->LONGINT / REAL->LONGREAL widening (handled at codegen). *)
 PROCEDURE CheckParamCompat(formal: Syms.Symbol; VAR arg: Cgen.Item);
-  VAR ft, at, atElem, ftElem: Syms.TypeDesc; isVar: BOOLEAN;
-      atef, ftef: INTEGER;
+  VAR ft, at: Syms.TypeDesc; isVar: BOOLEAN;
       nbuf: ARRAY Syms.NameLen OF CHAR;
 BEGIN
   IF formal = Syms.NoSym THEN RETURN END;
@@ -367,10 +370,19 @@ BEGIN
      real global variable — rootSym is NoSym for a literal (ParseFactor's
      Scan.TString case never sets it) but always set for a designator, so it
      is the actual l-value discriminant for the MGlobal/MLocal cases. *)
-  IF (formal.kind = Syms.KVarParam) & ~formal.typeless THEN
+  IF formal.kind = Syms.KVarParam THEN
+    (* A typeless VAR formal (SYSTEM.ADR/MOVE/FILL/...) additionally accepts
+       a procedure value — its far address is a legal "address of" source
+       (the documented SYSTEM.ADR(SomeProc) / ADR(SYSTEM.Alloc) idiom).
+       Everything else follows the same l-value rule as a typed VAR formal:
+       a literal, constant, or computed expression has no caller storage to
+       bind (SYSTEM.ADR(42) used to slip through the old typeless
+       exemption and yielded a garbage DS:42 far pointer). *)
     IF ~(((arg.mode = Cgen.MLocal) & (arg.rootSym # Syms.NoSym)) OR
          ((arg.mode = Cgen.MGlobal) & (arg.rootSym # Syms.NoSym)) OR
-         ((arg.mode = Cgen.MReg) & arg.isRef)) THEN
+         ((arg.mode = Cgen.MReg) & arg.isRef) OR
+         (formal.typeless &
+          ((arg.mode = Cgen.MProc) OR (arg.mode = Cgen.MImport)))) THEN
       StrTab.Get(formal.nameId, nbuf);
       Error2("VAR parameter requires a variable (not a literal, constant, or expression)", nbuf);
       RETURN
@@ -379,17 +391,19 @@ BEGIN
   IF (formal.type = Syms.NoType) OR (arg.type = Syms.NoType) THEN RETURN END;
   IF formal.typeless THEN RETURN END;
   ft := formal.type; at := arg.type;
-  atElem := at.elem; ftElem := ft.elem;
-  atef := atElem.form; ftef := ftElem.form;   (* read elem forms once *)
+  (* .elem is NIL (= Syms.NoType) for every non-ARRAY type: it may only be
+     dereferenced AFTER the form/NIL guards below.  (An earlier version read
+     both elem forms up front "once" — a NIL far read through 0000:0000 on
+     virtually every checked call.) *)
   (* Single-char string -> CHAR / BYTE *)
-  IF (at.form = Syms.TFArray) & (at.len = 2) & (atElem # Syms.NoType) &
-     (atef = Syms.TFChar) &
+  IF (at.form = Syms.TFArray) & (at.len = 2) & (at.elem # Syms.NoType) &
+     (at.elem.form = Syms.TFChar) &
      ((ft.form = Syms.TFChar) OR (ft.form = Syms.TFByte)) THEN RETURN END;
   (* String -> ARRAY OF CHAR / BYTE *)
-  IF (at.form = Syms.TFArray) & (atElem # Syms.NoType) &
-     (atef = Syms.TFChar) &
-     (ft.form = Syms.TFArray) & (ftElem # Syms.NoType) &
-     ((ftef = Syms.TFChar) OR (ftef = Syms.TFByte)) THEN
+  IF (at.form = Syms.TFArray) & (at.elem # Syms.NoType) &
+     (at.elem.form = Syms.TFChar) &
+     (ft.form = Syms.TFArray) & (ft.elem # Syms.NoType) &
+     ((ft.elem.form = Syms.TFChar) OR (ft.elem.form = Syms.TFByte)) THEN
     RETURN
   END;
   (* INTEGER/BYTE/WORD -> LONGINT widening *)
@@ -463,7 +477,11 @@ BEGIN
           ELSIF (arg.mode = Cgen.MLocal) & (arg.type # Syms.NoType) & (arg.type.len < 0) THEN
             Cgen.CgLoadBp(arg.adr + 4)               (* forward open-array formal's LEN *)
           ELSE
-            Cgen.CgLoadImm(0)                         (* unknown fallback *)
+            (* No compile-time length and no runtime LEN slot: silently
+               passing LEN=0 handed the callee an "empty" array with a live
+               pointer — reject instead. *)
+            Error("cannot determine LEN of open-array actual parameter");
+            Cgen.CgLoadImm(0)
           END;
           Cgen.Emit1(BYTE(Cgen.OpPushAx))  (* PUSH LEN *)
         END;
@@ -540,6 +558,8 @@ BEGIN
           ELSIF arg.mode = Cgen.MLocal THEN
             Cgen.CgLoadBp(arg.adr + 4)               (* forward open-array formal's LEN *)
           ELSE
+            (* Same rule as the VAR path above: no LEN source -> reject. *)
+            Error("cannot determine LEN of open-array actual parameter");
             Cgen.CgLoadImm(0)
           END;
           Cgen.Emit1(BYTE(Cgen.OpPushAx));  (* PUSH LEN *)
@@ -901,12 +921,20 @@ BEGIN
           Syms.KConst:  item.mode := Cgen.MConst
         | Syms.KVar:
             IF sym2.level = 0 THEN
-              (* Cross-module imported VAR: emit a 4-byte far-pointer slot
-                 in this module's data segment and let the linker patch it
-                 with the address of the imported symbol. *)
-              item.rdoffId := GetSystemImport(impName);
+              (* Cross-module imported VAR: a 4-byte far-pointer slot in this
+                 module's data segment, patched by the linker with the address
+                 of the imported symbol.  The slot is emitted ONCE per
+                 imported symbol and cached in sym2 (rdoffId/adr) — emitting a
+                 fresh slot per *use* wasted 4 data bytes + 2 relocs for every
+                 source reference.  (sym2.adr's .def-supplied remote offset is
+                 never used for VAR imports — the linker patches by name.) *)
+              IF sym2.rdoffId = -1 THEN
+                sym2.rdoffId := GetSystemImport(impName);
+                sym2.adr     := Cgen.CgImportVarSlot(sym2.rdoffId)
+              END;
+              item.rdoffId := sym2.rdoffId;
               item.mode    := Cgen.MGlobal;
-              item.adr     := Cgen.CgImportVarSlot(item.rdoffId);
+              item.adr     := sym2.adr;
               item.isRef   := TRUE;
               item.isFar   := FALSE
             ELSE item.mode := Cgen.MLocal END
@@ -1155,21 +1183,33 @@ BEGIN
   CASE sc.sym OF
     Scan.TInt:
       item.mode := Cgen.MConst; item.val := sc.ival;
-      (* NOTE: the natural fix here (type any literal >= 32768 as LONGINT
-         instead of INTEGER, since it doesn't fit signed 16-bit range) was
-         tried and reverted 2026-07-11 — it breaks self-hosting.  RDOFF.MOD's
-         own `CONST SegLimit* = 65530` picks up LONGINT under that rule, and
-         retyping this single widely-imported CONST (via Parser.ParseConstDecl,
-         not the DefRead import path) ripples into a real, reproducible
-         self-host regression: a freshly self-hosted TOC.EXE rejects
-         `Halt(code: INTEGER)` called with a same-module INTEGER CONST
-         actual — `Syms.TypeParamCompat`'s pointer-identity check for
-         non-VAR params apparently gets a different `TypeInteger`/`TypeLongint`
-         resolution somewhere downstream.  Root cause not fully traced; the
-         threshold stays at 65536 (matching WORD's actual range) until this
-         is understood.  See CLAUDE.md's changelog for this date. *)
-      IF sc.ival >= 65536 THEN
+      (* Literal typing: 0..32767 INTEGER; 32768..65535 WORD (the value's
+         actual nature — unsigned 16-bit); >= 65536 LONGINT.
+         History: typing 32768..65535 as LONGINT was tried and reverted
+         2026-07-11 (self-host regression).  The root cause turned out to be
+         the .def CONST format, which carried no type: the value-only reader
+         re-derived LONGINT by range, so `Rdoff.SegLimit = 65000` was
+         INTEGER in its defining module but LONGINT in every importer — two
+         different types for one constant.  With typed .def CONST lines
+         (2026-07-17) the declared type round-trips exactly, and with the
+         LONGINT-comparison zero-extension fix (same date) a WORD constant
+         compares correctly against LONGINT operands — so the WORD typing
+         is now sound end-to-end (verified by full make test + gen2==gen3
+         self-host).  Note ParseSimpleExpression retypes a negated WORD
+         constant back to INTEGER/LONGINT (negation is a signed operation). *)
+      (* GENERATION-PROOF thresholds: the bounds MUST be written as
+         LONGINT(...) casts.  A bare `32768` here is itself a literal typed
+         by the PREVIOUS compiler generation: under the old rule it is
+         INTEGER, gets CWD-sign-extended to -32768 in this LONGINT
+         comparison, and the test degenerates to always-TRUE — every
+         literal became WORD.  This exact self-referential trap is what
+         sank the 2026-07-11 attempt.  A cast is immune: the constant's
+         .val always holds the true value and LONGINT(c) loads it via
+         CgLoadLongImm under every generation. *)
+      IF sc.ival >= LONGINT(65536) THEN
         item.type := Syms.TypeLongint
+      ELSIF sc.ival >= LONGINT(32768) THEN
+        item.type := Syms.TypeWord
       ELSE item.type := Syms.TypeInteger END;
       Scan.Next(sc)
 
@@ -1271,7 +1311,12 @@ BEGIN
                 IF (arg.mode = Cgen.MConst) & (srcForm # Syms.TFReal) & (srcForm # Syms.TFLongreal) THEN
                   item.mode := Cgen.MConst;
                   item.val := SYSTEM.AND(arg.val, 0FFFFH);
-                  IF item.val >= 08000H THEN item.val := item.val - 010000H END;
+                  (* LONGINT() casts: bare 08000H/010000H in a LONGINT
+                     comparison/subtraction are generation-sensitive (see
+                     the TInt threshold comment above). *)
+                  IF item.val >= LONGINT(08000H) THEN
+                    item.val := item.val - LONGINT(010000H)
+                  END;
                   item.type := Syms.TypeInteger
                 ELSE
                   Cgen.CgLoadItem(arg);
@@ -1412,20 +1457,9 @@ BEGIN
         pt := item.type; varAdr := item.adr;
         varGlobal := (item.mode = Cgen.MGlobal); varRef := (item.mode = Cgen.MReg) & item.isRef;
         IF varRef THEN
-          Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES *)
+          Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
           ParseActualParameters(pt);
-          Cgen.Emit2(089H, 0E3H);
-          IF pt.argSize > 0 THEN
-            IF pt.argSize <= 127 THEN
-              Cgen.Emit2(083H, 0C3H); Cgen.Emit1(BYTE(INTEGER(pt.argSize) MOD 256))
-            ELSE
-              Cgen.Emit2(081H, 0C3H); Cgen.EmitW(INTEGER(SYSTEM.AND(pt.argSize, LONGINT(0FFFFH))))
-            END
-          END;
-          (* SS: MOV CX,[BX] / SS: MOV BX,[BX+2] / MOV ES,CX *)
-          Cgen.EmitCodeStr("36,8B,0F,36,8B,5F,02,8E,C1");
-          Cgen.CgCallProcVarEsbx();
-          Cgen.EmitCodeStr("83,C4,04")  (* ADD SP,4 *)
+          Cgen.CgCallProcVarRefTail(pt.argSize)
         ELSE
           ParseActualParameters(pt);
           (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
@@ -1616,11 +1650,14 @@ BEGIN
             Cgen.Emit2(033H, 0D2H)
           ELSE Cgen.Emit1(099H) END
         END;
+        (* NOTE: op = TAnd never reaches this dispatch — `&` is always consumed
+           by the short-circuit ParseAndTail above (rhsLoaded = FALSE).  The
+           former TAnd arms here were dead code from the pre-short-circuit
+           implementation and have been removed. *)
         CASE op OF
           Scan.TStar: Cgen.CgPushDxax(); Cgen.CgCallFar(GetSystemImport("SYSTEM_S32MUL"))
         | Scan.TDiv:  Cgen.CgPushDxax(); Cgen.CgCallFar(GetSystemImport("SYSTEM_S32DIV"))
         | Scan.TMod:  Cgen.CgPushDxax(); Cgen.CgCallFar(GetSystemImport("SYSTEM_S32MOD"))
-        | Scan.TAnd:  Cgen.CgPopCxbx(); Cgen.CgAnd32()
         ELSE Error("operator not supported for LONGINT") END;
         item.type := Syms.TypeLongint; item.mode := Cgen.MReg
       ELSIF isWord THEN
@@ -1629,9 +1666,8 @@ BEGIN
           Scan.TStar: Cgen.CgMulU()
         | Scan.TDiv:  Cgen.CgDivU()
         | Scan.TMod:  Cgen.CgModU()
-        | Scan.TAnd:  Cgen.CgAnd(); item.type := Syms.TypeBoolean
         ELSE Error("operator not supported for WORD") END;
-        IF op # Scan.TAnd THEN item.type := Syms.TypeWord END;
+        item.type := Syms.TypeWord;
         item.mode := Cgen.MReg
       ELSE
         Cgen.Emit1(BYTE(Cgen.OpPopCx));
@@ -1639,7 +1675,6 @@ BEGIN
           Scan.TStar: Cgen.CgMul()
         | Scan.TDiv:  Cgen.CgDiv()
         | Scan.TMod:  Cgen.CgMod()
-        | Scan.TAnd:  Cgen.CgAnd(); item.type := Syms.TypeBoolean
         ELSE Error("operator not supported") END;
         item.mode := Cgen.MReg
       END
@@ -1677,7 +1712,18 @@ BEGIN
   END;
   ParseTerm(item);
   IF negate THEN
-    IF (item.mode = Cgen.MConst) & ~IsFpuType(item) THEN item.val := -item.val
+    IF (item.mode = Cgen.MConst) & ~IsFpuType(item) THEN
+      item.val := -item.val;
+      (* Negation is a SIGNED operation: `-40000` etc. must not stay
+         WORD-typed (WORD operands force unsigned comparisons).  A negated
+         WORD constant becomes INTEGER when it fits, else LONGINT. *)
+      IF (item.type # Syms.NoType) & (item.type.form = Syms.TFWord) THEN
+        IF (item.val >= LONGINT(-32768)) & (item.val <= LONGINT(32767)) THEN
+          item.type := Syms.TypeInteger
+        ELSE
+          item.type := Syms.TypeLongint
+        END
+      END
     ELSE
       Cgen.CgLoadItem(item);
       IF (item.type # Syms.NoType) & (item.type.form = Syms.TFLongint) THEN Cgen.CgNeg32(); item.mode := Cgen.MReg
@@ -1886,6 +1932,12 @@ BEGIN
     IF (item.type # Syms.NoType) & ((item.type.form = Syms.TFPointer) OR
         (item.type.form = Syms.TFAddress) OR (item.type.form = Syms.TFNiltype) OR
         ((item.type.form = Syms.TFProc) & item.type.isFar)) THEN
+      (* Only equality is defined for pointers/procedures.  An ordered relop
+         used to fall through silently to the # codegen — wrong runtime
+         behaviour with no diagnostic. *)
+      IF (op # Scan.TEql) & (op # Scan.TNeq) THEN
+        Error("only = and # are defined for pointer/procedure operands")
+      END;
       Cgen.EmitCodeStr("52,50");  (* PUSH DX; PUSH AX *)
       ParseSimpleExpression(rhs); Cgen.CgLoadItem(rhs);
       Cgen.CgPtrCmpEq();
@@ -1898,7 +1950,18 @@ BEGIN
         Cgen.CgFcmp(FrelopJcc(op));
         item.type := Syms.TypeBoolean; item.mode := Cgen.MReg; RETURN
       END;
-      IF (rhs.type # Syms.NoType) & (rhs.type.form # Syms.TFLongint) THEN Cgen.Emit1(099H) END;
+      IF (rhs.type # Syms.NoType) & (rhs.type.form # Syms.TFLongint) THEN
+        (* Widen rhs to 32 bits with the SAME rule as the +/- path: WORD/BYTE/
+           CHAR/BOOLEAN are unsigned -> zero-extend; only signed INTEGER gets
+           CWD.  (CWD on a WORD >= 32768 made it negative and the LONGINT
+           comparison wrong.) *)
+        IF (rhs.type.form = Syms.TFWord) OR (rhs.type.form = Syms.TFByte)
+            OR (rhs.type.form = Syms.TFChar) OR (rhs.type.form = Syms.TFBoolean) THEN
+          Cgen.Emit2(033H, 0D2H)   (* XOR DX,DX *)
+        ELSE
+          Cgen.Emit1(099H)         (* CWD *)
+        END
+      END;
       Cgen.CgPopCxbx();
       CASE op OF
         Scan.TEql: Cgen.CgCmp32Eq()
@@ -1970,7 +2033,12 @@ BEGIN
     Cgen.CgLoadItem(item); Cgen.Emit1(BYTE(Cgen.OpPushAx));
     ParseSimpleExpression(rhs); Cgen.CgLoadItem(rhs);
     Cgen.EmitCodeStr("89,C3,58,8A,C8");   (* MOV BX,AX; POP AX; MOV CL,AL *)
-    Cgen.Emit1(0B8H); Cgen.EmitW(0001H);
+    Cgen.Emit1(0B8H); Cgen.EmitW(0001H);  (* MOV AX,1 *)
+    (* `x IN s` with x >= 16 must be deterministically FALSE: without this
+       guard the raw `SHL AX,CL` result was CPU-dependent (8086 shifts by the
+       full CL and yields 0; 286+ masks CL mod 32, so `33 IN s` behaved like
+       `1 IN s`).  CMP CL,16; JB +2; XOR AX,AX — AX=0 shifted is still 0. *)
+    Cgen.EmitCodeStr("80,F9,10,72,02,33,C0");
     Cgen.CgShlCl();
     Cgen.Emit2(085H, 0C3H);
     Cgen.CgSetcc(Cgen.OpJnz);

@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE StrTab;
 (*
   Interned string table (opt.md §12 Layer 1).
@@ -6,7 +6,7 @@ MODULE StrTab;
   Every identifier/name in the symbol table is stored here exactly once; a
   name is identified by a WORD id (1-based; 0 = "no string").  Two names are
   equal iff their ids are equal, so symbol lookup is a WORD compare — no
-  string comparison, no hash pre-filter file.
+  string comparison.
 
   Storage is RAM-resident and chunked:
     - text chunks: the name characters, 0X-terminated, appended densely;
@@ -19,7 +19,7 @@ IMPORT Strings, LogErr;
 
 CONST
   TextSize = 8*1024; (* chars per text chunk *)
-  MaxText  = 24;      (* up to 192 KB of distinct name text *)
+  MaxText  = 8;      (* up to 192 KB of distinct name text *)
   EntBits  = 8;
   EntPer   = 256;     (* entries per entry chunk (2 KB/chunk) *)
   MaxEnt   = 32;      (* up to 8192 distinct names *)

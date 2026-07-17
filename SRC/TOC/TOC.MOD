@@ -1,5 +1,5 @@
-(*$M 32000, 262144, 650000*)
-(*$D+*)
+(*$M 26000, 320000, 400000*)
+(*$D-*)
 MODULE TOC;
 (*
   All-in-one build driver: dependency scan + incremental compile + link.
@@ -310,9 +310,14 @@ END AddMod;
 
 PROCEDURE ScanDeps(mod: ModEntry); FORWARD;
 
-PROCEDURE ParseAndScan(srcPath: ARRAY OF CHAR; owner: ModEntry): BOOLEAN;
-  VAR sc: Scan.Scanner;
-      modName, realName, alias: ARRAY NameLen OF CHAR;
+(* ParseAndScanS: dep-scan one source file using a caller-supplied Scanner.
+   The Scanner record is ~2 KB (sysArgs alone is 1 KB); the recursive walk
+   ParseAndScan -> ScanDeps -> ParseAndScan must NOT keep one per stack frame
+   (SP wrap hazard, see DOCS/IMPLRULE.MD stack-frame rule), so the wrapper
+   below heap-allocates it per recursion level instead. *)
+PROCEDURE ParseAndScanS(VAR sc: Scan.Scanner; srcPath: ARRAY OF CHAR;
+                        owner: ModEntry): BOOLEAN;
+  VAR modName, realName, alias: ARRAY NameLen OF CHAR;
       dep: ModEntry;
       ownerR, depR: ModRec;
       srcPath2: ARRAY MaxPath OF CHAR;
@@ -408,6 +413,19 @@ BEGIN
   n := head;
   WHILE n # NIL DO nx := n^.next; DISPOSE(n); n := nx END;
   RETURN TRUE
+END ParseAndScanS;
+
+PROCEDURE ParseAndScan(srcPath: ARRAY OF CHAR; owner: ModEntry): BOOLEAN;
+  VAR scP: POINTER TO Scan.Scanner; ok: BOOLEAN;
+BEGIN
+  NEW(scP);
+  IF scP = NIL THEN
+    LogErr.Error("oc: out of memory (dep-scan scanner)");
+    RETURN FALSE
+  END;
+  ok := ParseAndScanS(scP^, srcPath, owner);
+  DISPOSE(scP);
+  RETURN ok
 END ParseAndScan;
 
 PROCEDURE ScanDeps;
@@ -568,13 +586,35 @@ PROCEDURE RepackOm(modName: ARRAY OF CHAR; stackSize: LONGINT;
   VAR libName: ARRAY 40 OF CHAR;
       lf: Files.File;
       stackTxt: ARRAY 24 OF CHAR; stackLen: INTEGER;
+      endBuf: ARRAY 512 OF BYTE;
+      omSize: LONGINT; k: INTEGER; endOk: BOOLEAN;
 BEGIN
   MakeOmName(modName, libName);
   IF ~Files.Reset(lf, libName) THEN
     LogErr.Error2("oc: /ENTRY=: cannot reopen ", libName);
     RETURN FALSE
   END;
-  Files.Seek(lf, Files.Size(lf) - LONGINT(1024));
+  (* Validate the archive tail before overwriting it: a well-formed .om ends
+     with TWO all-zero 512-byte end blocks.  Blind-seeking Size-1024 on a
+     truncated/corrupt archive would append MAIN.RDF over live member data
+     and silently produce a corrupt .om. *)
+  omSize := Files.Size(lf);
+  endOk := omSize >= LONGINT(1024);
+  IF endOk THEN
+    Files.Seek(lf, omSize - LONGINT(1024));
+    IF Files.BlockRead(lf, endBuf[0], 512) # WORD(512) THEN endOk := FALSE END;
+    k := 0;
+    WHILE endOk & (k < 512) DO
+      IF endBuf[k] # BYTE(0) THEN endOk := FALSE END;
+      INC(k)
+    END
+  END;
+  IF ~endOk THEN
+    Files.Close(lf);
+    LogErr.Error2("oc: /ENTRY=: malformed .om (missing end blocks): ", libName);
+    RETURN FALSE
+  END;
+  Files.Seek(lf, omSize - LONGINT(1024));
   Files.Seek(mainRdf, LONGINT(0));
   Tar.TarAddFromFile(lf, "MAIN.RDF", mainRdf, Files.Size(mainRdf));
   IF stackSize > LONGINT(0) THEN
@@ -583,6 +623,10 @@ BEGIN
   END;
   Tar.TarEnd(lf);
   Files.Close(lf);
+  IF ~Files.Ok(lf) THEN
+    LogErr.Error2("oc: /ENTRY=: write error (disk full?) on ", libName);
+    RETURN FALSE
+  END;
   RETURN TRUE
 END RepackOm;
 
@@ -605,15 +649,16 @@ VAR memAfter: WORD;
 BEGIN
   memAfter := SYSTEM.MemAvail();
   IF (memAfter < memBefore) THEN
-    IF LogErr.IsDebug() THEN
-          Strings.Copy("Heap leak detected ", msg);
-          Strings.Append(module, msg);
-          Strings.Append(subPart, msg);
-          Strings.Append(" (", msg);
-          Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
-          Strings.Append(" paragraphs)", msg);
-          LogErr.Debug(msg);
-    END
+    (* ZERO HEAP LEAKS is a KEY RULE (CLAUDE.md): a leak is a bug to fix, so
+       the report must be visible at the DEFAULT log level, not gated behind
+       /LOG=debug (where regressions went unseen). *)
+    Strings.Copy("oc: WARNING: heap leak compiling ", msg);
+    Strings.Append(module, msg);
+    Strings.Append(subPart, msg);
+    Strings.Append(" (", msg);
+    Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
+    Strings.Append(" paragraphs)", msg);
+    LogErr.Warn(msg)
   END
 END LeakGuard;
 
@@ -652,6 +697,10 @@ BEGIN
   Scan.Open(sc, srcPath);
   Parser.ParseModule(sc);
   DbgMemSize("Module compiled.");
+  (* Closing through OUR copy of the Scanner is safe even though ParseModule
+     advanced its own copy (PExpr.sc): the scanner is read-only, so there is
+     nothing to flush, and both copies share the one heap buffer/handle —
+     see the aliasing-invariant note at the top of Parser.ParseModule. *)
   Scan.Close(sc);
   Cgen.CgFree();
   LeakGuard(memBefore, srcPath, " in Cgen.CgFree()");
@@ -797,10 +846,9 @@ BEGIN
   LogErr.SetLevel(LogErr.LINFO);
   argc := Dos.ParamCount();
   IF argc < 1 THEN
-    Out.String("Trubo Oberon Compiler. (c) Copyright DosWorld"); Out.Ln;
-    Out.String("License: Unlicense (public domain)"); Out.Ln;
+    Out.String("Trubo Oberon (c) 2026 DosWorld, Public domain (unlicense)"); Out.Ln;
     Out.Ln;
-    Out.String("usage: toc [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <file.Mod>"); Out.Ln;
+    Out.String("usage: TOC [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <file.Mod>"); Out.Ln;
     Out.String("  /ENTRY=Proc  compile + link: build <file.Mod> and all its"); Out.Ln;
     Out.String("               imports, then link an .EXE whose entry point"); Out.Ln;
     Out.String("               calls the exported procedure Proc. Without"); Out.Ln;
@@ -815,8 +863,8 @@ BEGIN
     Out.String("  /G           append a Turbo-Debugger (TDS/TDINFO) debug-info"); Out.Ln;
     Out.String("               block to the linked .EXE, merged from every"); Out.Ln;
     Out.String("               module compiled with (*$D+*). Requires /ENTRY=."); Out.Ln;
-    Out.String("  /LOG=level   set diagnostic verbosity: debug, info, warn"); Out.Ln;
-    Out.String("               (default), or error. Case-insensitive."); Out.Ln;
+    Out.String("  /LOG=level   set diagnostic verbosity: debug, info (default),"); Out.Ln;
+    Out.String("               warn, or error. Case-insensitive."); Out.Ln;
     LogErr.Error("missing <file.Mod> argument");
     RETURN 1
   END;

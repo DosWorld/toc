@@ -68,7 +68,10 @@ BEGIN
      exactly 1 byte of room left, silently dropping the appended character
      entirely (e.g. an 8-char string in a 9-byte buffer appending a single
      space) -- found while porting SRC/TLINK's /N: device-name padding. *)
-  len := SYSTEM.MIN(NearLength(s), LEN(d) - 1 - dl);
+  (* UNSIGNED min: LEN(d)-1-dl exceeds 32767 for a > 32 KB destination
+     buffer; the signed MIN read it as negative, picked it as the "smaller"
+     count, and REP MOVSB then copied tens of KB from a short source. *)
+  len := SYSTEM.UMIN(NearLength(s), LEN(d) - 1 - dl);
   IF len # 0 THEN
     SYSTEM.MOVE(s[0], d[dl], len);
     d[dl + len] := 0X
@@ -135,16 +138,17 @@ END Delete;
    Parameters: src — replacement text; pos — 0-based index in dst to start
    overwriting (clamped to dst's current length); dst — destination string,
    modified in place. *)
-PROCEDURE Replace*(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR);
-VAR sl, dl, n: INTEGER;
+PROCEDURE Replace*(src: ARRAY OF CHAR; pos: WORD; VAR dst: ARRAY OF CHAR);
+VAR sl, dl: INTEGER; n: WORD;
 BEGIN
   sl := NearLength(src);
   dl := NearLength(dst);
   IF pos < 0 THEN pos := 0 END;
   IF pos > dl THEN pos := dl END;
   (* src is a VALUE param (by-value copy on entry), so it can never alias
-     dst — a forward SYSTEM.MOVE is always safe regardless of pos vs dl. *)
-  n := SYSTEM.MIN(sl, LEN(dst) - 1 - pos);
+     dst — a forward SYSTEM.MOVE is always safe regardless of pos vs dl.
+     UNSIGNED min (see Append): LEN(dst)-1-pos can exceed 32767. *)
+  n := SYSTEM.UMIN(sl, LEN(dst) - 1 - pos);
   IF n > 0 THEN SYSTEM.MOVE(src[0], dst[pos], n) END;
   IF pos + n > dl THEN dst[pos + n] := 0X END
 END Replace;
@@ -154,7 +158,7 @@ END Replace;
    src's length); n — number of characters to copy (clamped to src's length
    and dst's buffer size); dst — destination string, overwritten and
    NUL-terminated. *)
-PROCEDURE Extract*(VAR src: ARRAY OF CHAR; pos, n: INTEGER; VAR dst: ARRAY OF CHAR);
+PROCEDURE Extract*(VAR src: ARRAY OF CHAR; pos, n: WORD; VAR dst: ARRAY OF CHAR);
 VAR sl: INTEGER;
 BEGIN
   sl := NearLength(src);
@@ -162,8 +166,9 @@ BEGIN
   IF pos >= sl THEN n := 0 END;
   IF pos + n > sl THEN n := sl - pos END;
   (* dst is a separate array from src, so no overlap is possible — a plain
-     forward SYSTEM.MOVE is always safe here. *)
-  n := SYSTEM.MIN(n, LEN(dst) - 1);
+     forward SYSTEM.MOVE is always safe here.  UNSIGNED min (see Append):
+     LEN(dst)-1 can exceed 32767; n itself is bounded by src's length. *)
+  n := SYSTEM.UMIN(n, LEN(dst) - 1);
   IF n > 0 THEN SYSTEM.MOVE(src[pos], dst[0], n) END;
   dst[n] := 0X
 END Extract;
@@ -172,19 +177,21 @@ END Extract;
    pre-filter so a symbol-table scan rejects most candidates with a 2-byte compare
    and reads the full record only on a hash hit.  Implemented INLINE for speed:
    the open array is pushed {ofs, seg, len}; the pattern POPs it and scans ES:[DI]
-   (avoids LODSB so the caller's DS is untouched), result in AX.  Verified
-   byte-identical to the Oberon `h*43+c` reference for sample names.
+   (avoids LODSB so the caller's DS is untouched), result in AX.  No JCXZ
+   (project rule — slow on real 8086): the count guard is OR CX,CX / JZ.
+   The hash VALUES are unchanged (same h*43+c math) — StrTab buckets and .om
+   content stay identical.
      POP DI; POP ES; POP CX; MOV BX,0CBF0H
-   .loop: JCXZ .done; MOV AL,ES:[DI]; OR AL,AL; JZ .done
+   .loop: OR CX,CX; JZ .done; MOV AL,ES:[DI]; OR AL,AL; JZ .done
           PUSH CX; MOV AH,0; PUSH AX; MOV AX,BX; MOV CX,43; MUL CX
           POP CX(char); ADD AX,CX; MOV BX,AX; POP CX(count); INC DI; DEC CX; JMP .loop
    .done: MOV AX,BX
    Parameters: str — string to hash.
    Result: 16-bit hash of str's characters. *)
 PROCEDURE HashCode*(str: ARRAY OF CHAR): WORD;
-  INLINE(05FH,007H,059H,0BBH,0F0H,0CBH,0E3H,01CH,026H,08AH,005H,008H,0C0H,074H,015H,
+  INLINE(05FH,007H,059H,0BBH,0F0H,0CBH,009H,0C9H,074H,01CH,026H,08AH,005H,008H,0C0H,074H,015H,
          051H,0B4H,000H,050H,089H,0D8H,0B9H,02BH,000H,0F7H,0E1H,059H,001H,0C8H,089H,0C3H,
-         059H,047H,049H,0EBH,0E2H,089H,0D8H);
+         059H,047H,049H,0EBH,0E0H,089H,0D8H);
 
 PROCEDURE EqCh(a, b: SYSTEM.ADDRESS; ICase: BOOLEAN): BOOLEAN; NEAR;
 BEGIN
@@ -255,9 +262,10 @@ END EndsWith;
    Parameters: src — source string; dst — destination string, overwritten
    and NUL-terminated. *)
 PROCEDURE Copy*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
-VAR len : INTEGER;
+VAR len : WORD;
 BEGIN
-  len := SYSTEM.MIN(NearLength(src) + 1, LEN(dst) - 1);
+  (* UNSIGNED min — see Append: a > 32 KB dst made the signed clamp overrun. *)
+  len := SYSTEM.UMIN(NearLength(src) + 1, LEN(dst) - 1);
   SYSTEM.MOVE(src[0], dst[0], len);
   dst[len] := 0X
 END Copy;

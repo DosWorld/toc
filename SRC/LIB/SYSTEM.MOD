@@ -200,12 +200,13 @@ PROCEDURE FINDBYTE*(VAR buf; b: BYTE; maxLen: WORD): WORD;
 (* COMPARE(VAR Mem1, Mem2; len: WORD): BOOLEAN
    Word-compare variant: len DIV 2 words via REPE CMPSW, then the odd trailing
    byte via CMPSB.  Unlike MOVE/FILL, CMPSW clobbers CF, so the odd bit is
-   parked in DX (AND DX,1) instead of the ADC CX,CX trick.
+   parked in DX (AND DX,1) instead of the ADC CX,CX trick.  No JCXZ (project
+   rule): both zero-count guards are OR CX,CX / JZ.
      POP CX=len; POP DI; POP ES (Mem2); POP SI; POP AX (Mem1 seg);
      PUSH DS; MOV DS,AX; CLD; MOV AX,1;
      MOV DX,CX; AND DX,1; SHR CX,1;
-     JCXZ tail; REPE CMPSW; JNZ fail;
-     tail: MOV CX,DX; JCXZ done; CMPSB; JZ done;
+     OR CX,CX; JZ tail; REPE CMPSW; JNZ fail;
+     tail: MOV CX,DX; OR CX,CX; JZ done; CMPSB; JZ done;
      fail: DEC AX; done: POP DS
    Parameters: Mem1, Mem2 — the two buffers to compare; len — number of
    bytes to compare.
@@ -213,8 +214,8 @@ PROCEDURE FINDBYTE*(VAR buf; b: BYTE; maxLen: WORD): WORD;
 PROCEDURE COMPARE*(VAR Mem1, Mem2; len: WORD): BOOLEAN;
   INLINE(059H,05FH,007H,05EH,058H,01EH,08EH,0D8H,0FCH,0B8H,001H,000H,
          089H,0CAH,083H,0E2H,001H,0D1H,0E9H,
-         0E3H,004H,0F3H,0A7H,075H,007H,
-         089H,0D1H,0E3H,004H,0A6H,074H,001H,
+         009H,0C9H,074H,004H,0F3H,0A7H,075H,009H,
+         089H,0D1H,009H,0C9H,074H,004H,0A6H,074H,001H,
          048H,01FH);
 
 (* MAX: larger of two INTEGERs.
@@ -231,14 +232,34 @@ PROCEDURE MAX*(a, b: INTEGER): INTEGER;
 PROCEDURE MIN*(a, b: INTEGER): INTEGER;
   INLINE(05BH, 058H, 03BH, 0C3H, 07CH, 002H, 089H, 0D8H);
 
+(* UMIN: smaller of two WORDs (UNSIGNED compare).  Use this — not MIN — for
+   lengths/sizes that may exceed 32767 (e.g. buffers up to 64000 bytes):
+   the signed MIN treats such values as negative and picks the wrong operand,
+   which turned a length clamp into a multi-KB buffer overrun in Strings.
+   Parameters: a, b — the two values to compare.
+   Result: a if a < b (unsigned), else b.
+   POP BX; POP AX; CMP AX, BX; JB done; MOV AX, BX; done: *)
+PROCEDURE UMIN*(a, b: WORD): WORD;
+  INLINE(05BH, 058H, 03BH, 0C3H, 072H, 002H, 089H, 0D8H);
+
+(* UMAX: larger of two WORDs (UNSIGNED compare).  Companion to UMIN — use for
+   lengths/sizes that may exceed 32767, where the signed MAX picks the wrong
+   operand.
+   Parameters: a, b — the two values to compare.
+   Result: a if a > b (unsigned), else b.
+   POP BX; POP AX; CMP AX, BX; JA done; MOV AX, BX; done: *)
+PROCEDURE UMAX*(a, b: WORD): WORD;
+  INLINE(05BH, 058H, 03BH, 0C3H, 077H, 002H, 089H, 0D8H);
+
 (* LENGTH: length of a NUL-terminated open-array string (the primitive
-   Strings.Length is built on).
+   Strings.Length is built on).  No JCXZ (project rule — slow on real 8086):
+   the zero-length guard is OR CX,CX / JZ.
    Parameters: s — the string to measure.
    Result: number of characters before the terminating 0X.
-   POP DI; POP ES; POP CX; MOV DX, CX; JCXZ done; XOR AL, AL; CLD; REPNZ SCASB;
-   JNZ skip; DEC DX; skip: SUB DX, CX; done: MOV AX, DX *)
+   POP DI; POP ES; POP CX; MOV DX, CX; OR CX, CX; JZ done; XOR AL, AL; CLD;
+   REPNZ SCASB; JNZ skip; DEC DX; skip: SUB DX, CX; done: MOV AX, DX *)
 PROCEDURE LENGTH*(s: ARRAY OF CHAR): WORD;
-  INLINE(05FH, 007H, 059H, 089H, 0CAH, 0E3H, 00AH, 032H, 0C0H, 0FCH, 0F2H, 0AEH, 075H, 001H, 04AH, 029H, 0CAH, 089H, 0D0H);
+  INLINE(05FH, 007H, 059H, 089H, 0CAH, 009H, 0C9H, 074H, 00AH, 032H, 0C0H, 0FCH, 0F2H, 0AEH, 075H, 001H, 04AH, 029H, 0CAH, 089H, 0D0H);
 
 (* UCASE: convert a single CHAR to uppercase (ASCII a..z only).
    Parameters: c — the character to convert.
@@ -290,25 +311,24 @@ PROCEDURE ISHEX*(c: CHAR): BOOLEAN;
    — corrupting the heap and crashing the compiler.  Keep the typed signature.
    Parameters: s — the string to uppercase, modified in place.
    Result: none.
-   POP BX; POP ES; POP CX; JCXZ done; loop: MOV AL, ES:[BX]; OR AL, AL; JZ done;
+   No JCXZ/LOOP (project rule): OR CX,CX / JZ guard, DEC CX / JNZ loop tail.
+   POP BX; POP ES; POP CX; OR CX,CX; JZ done;
+   loop: MOV AL, ES:[BX]; OR AL, AL; JZ done;
    CMP AL, 61H; JB skip; CMP AL, 7AH; JA skip; SUB AL, 20H; MOV ES:[BX], AL;
-   skip: INC BX; LOOP loop; done: *)
-  (* JCXZ/JZ offsets fixed: the proc body is 28 bytes, so `done` is at +28.  The
-     original E3 19 / 74 12 targeted +30 (2 bytes past the end), jumping into the
-     following code and crashing.  Correct: JCXZ +17H (done), JZ +10H (done). *)
+   skip: INC BX; DEC CX; JNZ loop; done: *)
 PROCEDURE UPSTR*(VAR s: ARRAY OF CHAR);
-  INLINE(05BH, 007H, 059H, 0E3H, 017H, 026H, 08AH, 007H, 008H, 0C0H, 074H, 010H, 03CH, 061H, 072H, 009H, 03CH, 07AH, 077H, 005H, 02CH, 020H, 026H, 088H, 007H, 043H, 0E2H, 0E9H);
+  INLINE(05BH, 007H, 059H, 009H, 0C9H, 074H, 018H, 026H, 08AH, 007H, 008H, 0C0H, 074H, 011H, 03CH, 061H, 072H, 009H, 03CH, 07AH, 077H, 005H, 02CH, 020H, 026H, 088H, 007H, 043H, 049H, 075H, 0E8H);
 
 (* LOSTR: lowercase a string in place (ASCII A..Z only). Same open-array
-   requirement as UPSTR.
+   requirement as UPSTR, same JCXZ/LOOP-free shape.
    Parameters: s — the string to lowercase, modified in place.
    Result: none.
-   POP BX; POP ES; POP CX; JCXZ done; loop: MOV AL, ES:[BX]; OR AL, AL; JZ done;
+   POP BX; POP ES; POP CX; OR CX,CX; JZ done;
+   loop: MOV AL, ES:[BX]; OR AL, AL; JZ done;
    CMP AL, 41H; JB skip; CMP AL, 5AH; JA skip; ADD AL, 20H; MOV ES:[BX], AL;
-   skip: INC BX; LOOP loop; done: *)
-  (* JCXZ/JZ offsets fixed (same off-by-2 bug as UPSTR): JCXZ +17H, JZ +10H. *)
+   skip: INC BX; DEC CX; JNZ loop; done: *)
 PROCEDURE LOSTR*(VAR s: ARRAY OF CHAR);
-  INLINE(05BH, 007H, 059H, 0E3H, 017H, 026H, 08AH, 007H, 008H, 0C0H, 074H, 010H, 3CH, 41H, 72H, 09H, 3CH, 5AH, 77H, 05H, 04H, 20H, 26H, 88H, 07H, 43H, 0E2H, 0E9H);
+  INLINE(05BH, 007H, 059H, 009H, 0C9H, 074H, 018H, 026H, 08AH, 007H, 008H, 0C0H, 074H, 011H, 03CH, 041H, 072H, 009H, 03CH, 05AH, 077H, 005H, 004H, 020H, 026H, 088H, 007H, 043H, 049H, 075H, 0E8H);
 
 (* BLOCKWRITE: raw DOS write to an open file handle (INT 21h/AH=40h).
    Parameters: h — DOS file handle; buf — buffer to write from; len — number
@@ -347,15 +367,18 @@ PROCEDURE FPOS*(h: INTEGER): LONGINT;
 
 (* FSIZE: total size of an open file, determined by seeking to end-of-file
    (INT 21h/AH=42h, AL=2) and back to the original position (AL=0) so the
-   handle's seek position is left unchanged.
+   handle's seek position is left unchanged.  The first seek's carry is now
+   checked (an invalid handle returned garbage sizes silently before) — on
+   error the result is -1, matching FPOS.
    Parameters: h — DOS file handle.
-   Result: file size in bytes.
+   Result: file size in bytes, or -1 on a DOS error.
    POP BX; PUSH SI; PUSH DI; XOR CX, CX; XOR DX, DX; MOV AX, 4201H; INT 21H;
-   PUSH DX; PUSH AX; XOR CX, CX; XOR DX, DX; MOV AX, 4202H; INT 21H;
+   JC err; PUSH DX; PUSH AX; XOR CX, CX; XOR DX, DX; MOV AX, 4202H; INT 21H;
    MOV SI, AX; MOV DI, DX; POP DX; POP CX; MOV AX, 4200H; INT 21H;
-   MOV AX, SI; MOV DX, DI; POP DI; POP SI *)
+   MOV AX, SI; MOV DX, DI; JMP done; err: MOV AX, 0FFFFH; MOV DX, AX;
+   done: POP DI; POP SI *)
 PROCEDURE FSIZE*(h: INTEGER): LONGINT;
-  INLINE(05BH, 056H, 057H, 031H, 0C9H, 031H, 0D2H, 0B8H, 001H, 042H, 0CDH, 021H, 052H, 050H, 031H, 0C9H, 031H, 0D2H, 0B8H, 002H, 042H, 0CDH, 021H, 089H, 0C6H, 089H, 0D7H, 05AH, 059H, 0B8H, 000H, 042H, 0CDH, 021H, 089H, 0F0H, 089H, 0FAH, 05FH, 05EH);
+  INLINE(05BH, 056H, 057H, 031H, 0C9H, 031H, 0D2H, 0B8H, 001H, 042H, 0CDH, 021H, 072H, 01CH, 052H, 050H, 031H, 0C9H, 031H, 0D2H, 0B8H, 002H, 042H, 0CDH, 021H, 089H, 0C6H, 089H, 0D7H, 05AH, 059H, 0B8H, 000H, 042H, 0CDH, 021H, 089H, 0F0H, 089H, 0FAH, 0EBH, 005H, 0B8H, 0FFH, 0FFH, 089H, 0C2H, 05FH, 05EH);
 
 (* FSEEK: set the absolute seek position of an open file handle
    (INT 21h/AH=42h, AL=0 — seek-from-start).

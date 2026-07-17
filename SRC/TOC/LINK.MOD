@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Link;
 (*
   RDOFF2 smart linker core for MS-DOS.
@@ -62,7 +62,9 @@ TYPE
     bssSize:       LONGINT;
     groupId:       INTEGER;
     codeFinalOfs:  LONGINT;   (* absolute byte offset in combined code space *)
-    groupCodePara: INTEGER;   (* CS paragraph of the group (0-based from image start) *)
+    groupCodePara: WORD;      (* CS paragraph of the group (0-based from image
+                                 start) — WORD, not INTEGER: paragraphs exceed
+                                 32767 once total code passes 512 KB *)
     groupCodeStart:LONGINT;   (* absolute byte offset of group start in code space *)
     dataFinalOfs:  LONGINT;
     bssFinalOfs:   LONGINT;
@@ -362,6 +364,9 @@ PROCEDURE NewModule(ls: State; path: ARRAY OF CHAR; libOfs: LONGINT;
   VAR m: Module;
 BEGIN
   NEW(m);
+  IF m = NIL THEN
+    LogErr.Error("Out of memory (module record)"); RETURN NIL
+  END;
   (* ModRec is a plain near-heap record (not a far SegBuf array — see the
      "Reusing one shared code buffer" FILL hazard note, which is specific to
      POINTER TO ARRAY 65000 OF BYTE far-heap buffers), so a bulk zero-fill is
@@ -384,7 +389,9 @@ PROCEDURE AddReloc(ls: State; seg, ofs: WORD);
 BEGIN
   (* append to tail chunk; new chunk only when full *)
   IF (ls^.relocTail = NIL) OR (ls^.relocTail^.count >= MZChunk) THEN
-    NEW(r); r^.count := 0; r^.next := NIL;
+    NEW(r);
+    IF r = NIL THEN LogErr.Error("Out of memory (MZ reloc chunk)"); RETURN END;
+    r^.count := 0; r^.next := NIL;
     IF ls^.relocHead = NIL THEN ls^.relocHead := r ELSE ls^.relocTail^.next := r END;
     ls^.relocTail := r
   END;
@@ -470,6 +477,11 @@ BEGIN
      earlier .om — mark it dup and add none of its symbols, so it is never used. *)
   IF curMod^.dup THEN RETURN END;
   IF (curMod^.nGlob = 0) & (FindSymbol(curLs, name) # NoSym) THEN
+    (* Log which member was skipped: duplicates are NORMAL (SYSTEM.RDF lives
+       in both SYSTEM.OM and OBERON.OM), so this is Debug-level — but a
+       genuinely different module whose first global collides is silently
+       dropped by this heuristic, and the trace is the only way to see it. *)
+    LogErr.Debug2("linker: duplicate module skipped, first global: ", name);
     curMod^.dup := TRUE; RETURN
   END;
   INC(curMod^.nGlob);
@@ -483,6 +495,7 @@ PROCEDURE ScanRdf(ls: State; path: ARRAY OF CHAR; libOfs: LONGINT; groupId: INTE
   VAR m: Module; i, dot: INTEGER; plain: BOOLEAN;
 BEGIN
   m := NewModule(ls, path, libOfs, groupId);
+  IF m = NIL THEN RETURN END;   (* OOM latched by NewModule *)
   (* Debug-info stem: "MODNAME.RDF" -> "MODNAME" (so MODNAME.DBG can be
      extracted later).  $L extras carry a "MODNAME/" prefix and never have a
      .DBG member — leave stem empty for those (and for any stem > 8 chars). *)
@@ -586,7 +599,7 @@ PROCEDURE CalculateLayout*(ls: State);
   VAR m, n, prev, cur2, rHead, rTail: Module;
       codeBase, dataBase, bssBase: LONGINT;
       groupCodeStart: LONGINT;
-      groupPara: INTEGER;
+      groupPara: WORD;
       curGroup: INTEGER;
       groupEnd: LONGINT;
       entrySym: Symbol;
@@ -619,7 +632,7 @@ BEGIN
     IF m^.used THEN
       codeBase       := Align16(codeBase);
       groupCodeStart := codeBase;
-      groupPara      := INTEGER(groupCodeStart DIV LONGINT(16));
+      groupPara      := WORD(groupCodeStart DIV LONGINT(16));
       curGroup       := m^.groupId;
 
       n := m;
@@ -704,10 +717,13 @@ END GroupOfs;
 
 (* Patch code or data buffer at group-relative/data offset. *)
 PROCEDURE PatchBuf(rseg: INTEGER; bufOfs: LONGINT; addend: WORD; width: INTEGER);
-  VAR buf: Rdoff.SegBuf; o: INTEGER; cur: WORD;
+  VAR buf: Rdoff.SegBuf; o: WORD; cur: WORD;
 BEGIN
   IF rseg = Rdoff.SegCode THEN buf := lnkCodeBuf ELSE buf := lnkDataBuf END;
-  o := INTEGER(bufOfs);
+  (* WORD, not INTEGER: buffer offsets are 0..64999 and an offset >= 32768
+     carried as a negative INTEGER indexed correctly only via 16-bit
+     wraparound — exactly the trap this module's own comments warn about. *)
+  o := WORD(bufOfs);
   IF width = 2 THEN
     cur := WORD(INTEGER(buf^[o]) + SYSTEM.LSL(INTEGER(buf^[o+1]), 8));
     cur := cur + addend;   (* 16-bit WORD arithmetic wraps mod 65536 *)
@@ -726,7 +742,9 @@ BEGIN
   sym := FindSymbol(lnkLs, name);
   (* append to head chunk; new chunk only when the current head is full *)
   IF (lnkImports = NIL) OR (lnkImports^.count >= ImpChunk) THEN
-    NEW(node); node^.count := 0; node^.next := lnkImports; lnkImports := node
+    NEW(node);
+    IF node = NIL THEN LogErr.Error("Out of memory (import chunk)"); RETURN END;
+    node^.count := 0; node^.next := lnkImports; lnkImports := node
   END;
   k := lnkImports^.count;
   lnkImports^.id[k]  := WORD(segId);
@@ -884,7 +902,12 @@ BEGIN
   END;
   (* not found — append a fresh entry to the tail chunk *)
   IF (ls^.groupTail = NIL) OR (ls^.groupTail^.count >= GrpChunk) THEN
-    NEW(p); p^.count := 0; p^.next := NIL;
+    NEW(p);
+    IF p = NIL THEN
+      LogErr.Error("Out of memory (group chunk)");
+      node := NIL; slot := 0; RETURN
+    END;
+    p^.count := 0; p^.next := NIL;
     IF ls^.groupHead = NIL THEN ls^.groupHead := p ELSE ls^.groupTail^.next := p END;
     ls^.groupTail := p
   END;
@@ -1048,7 +1071,11 @@ END PerformLinking;
    in the heap (chunked, deduplicated, freed in LinkFree). *)
 
 (* Find name in the chunked pool or append it; returns the 1-based string
-   ordinal (TDS pool indices are ordinals, not byte offsets). *)
+   ordinal (TDS pool indices are ordinals, not byte offsets).
+   O(pool) per intern (O(n^2) per link) — ACCEPTED: /G debug links intern a
+   few thousand names at most (measured well under a second under xt); a hash
+   over the pool would cost heap the linker is short of.  Revisit only if /G
+   link time becomes noticeable. *)
 PROCEDURE DbgIntern(ls: State; VAR name: ARRAY OF CHAR): INTEGER;
   VAR p: PoolNode; i, j, k, ord, len: INTEGER; match: BOOLEAN;
 BEGIN
@@ -1070,7 +1097,9 @@ BEGIN
   (* not found: append (strings never span a chunk) *)
   len := 0; WHILE name[len] # 0X DO INC(len) END;
   IF (ls^.dbgPoolTail = NIL) OR (ls^.dbgPoolTail^.used + len + 1 > 2048) THEN
-    NEW(p); p^.used := 0; p^.next := NIL;
+    NEW(p);
+    IF p = NIL THEN LogErr.Error("Out of memory (debug pool)"); RETURN 0 END;
+    p^.used := 0; p^.next := NIL;
     IF ls^.dbgPoolTail = NIL THEN ls^.dbgPool := p ELSE ls^.dbgPoolTail^.next := p END;
     ls^.dbgPoolTail := p
   END;
@@ -1138,7 +1167,9 @@ PROCEDURE AddScope(ls: State; symFirst, symCnt, func, offset, length: WORD);
   VAR n: ScopeNode;
 BEGIN
   IF (ls^.dbgScopeTail = NIL) OR (ls^.dbgScopeTail^.count = DbgScopeChunk) THEN
-    NEW(n); n^.count := 0; n^.next := NIL;
+    NEW(n);
+    IF n = NIL THEN LogErr.Error("Out of memory (debug scope chunk)"); RETURN END;
+    n^.count := 0; n^.next := NIL;
     IF ls^.dbgScopeTail # NIL THEN ls^.dbgScopeTail^.next := n ELSE ls^.dbgScopeHead := n END;
     ls^.dbgScopeTail := n
   END;
@@ -1592,6 +1623,12 @@ BEGIN
   WriteDebugInfo(ls, fout);
 
   Files.Close(fout);
+  IF ~Files.Ok(fout) THEN
+    (* Disk-full during any buffered flush: without this the truncated .exe
+       was reported as linked.  TOC.LinkAll deletes the output on HaveErr. *)
+    LogErr.Error2("Write error (disk full?): ", outPath);
+    RETURN
+  END;
 
   Strings.Copy(outPath, summary);
   Strings.Append(": Code=", summary); Strings.AppendInt(ls^.totalCodeLen, summary);

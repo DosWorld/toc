@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Scan;
 (*
   Oberon compiler scanner.
@@ -250,17 +250,21 @@ END LookupKeyword;
 (* ---- scan helpers ---- *)
 
 PROCEDURE ScanIdent(VAR s: Scanner);
-  VAR i: INTEGER;
+  VAR i: INTEGER; oflow: BOOLEAN;
 BEGIN
-  i := 0;
+  i := 0; oflow := FALSE;
   WHILE SYSTEM.ISALPHA(CHR(s.ch)) OR SYSTEM.ISDIGIT(CHR(s.ch)) DO
     IF i < MaxIdent - 1 THEN
       s.id[i] := CHR(s.ch);
       INC(i)
+    ELSE oflow := TRUE
     END;
     ReadCh(s)
   END;
   s.id[i] := 0X;
+  (* Silent truncation let two distinct long identifiers collide into one
+     symbol — must be a diagnostic. *)
+  IF oflow THEN ScanError(s, "identifier too long (max 32 chars)") END;
   s.sym   := LookupKeyword(s.id)
 END ScanIdent;
 
@@ -396,6 +400,11 @@ BEGIN
   IF oflow THEN ScanError(s, "numeric literal too long"); RETURN END;
 
   IF s.ch = 72 THEN                 (* 'H' = 72: hex integer *)
+    (* > 8 SIGNIFICANT hex digits cannot fit 32 bits — the multiply wrapped
+       silently.  Leading zeros don't count: Oberon hex literals must start
+       with a digit, so e.g. 0FFFF0000H is 9 chars but 8 significant. *)
+    i := 0; WHILE (i < n) & (buf[i] = "0") DO INC(i) END;
+    IF n - i > 8 THEN ScanError(s, "numeric literal too large") END;
     v := 0; ReadCh(s);
     i := 0;
     WHILE i < n DO
@@ -406,6 +415,8 @@ BEGIN
     s.sym  := TInt
 
   ELSIF s.ch = 88 THEN              (* 'X' = 88: char literal *)
+    i := 0; WHILE (i < n) & (buf[i] = "0") DO INC(i) END;
+    IF n - i > 8 THEN ScanError(s, "numeric literal too large") END;
     v := 0; ReadCh(s);
     i := 0;
     WHILE i < n DO
@@ -437,15 +448,18 @@ BEGIN
 END ScanNumber;
 
 PROCEDURE ScanString(VAR s: Scanner; delim: INTEGER);
-  VAR i: INTEGER;
+  VAR i: INTEGER; oflow: BOOLEAN;
 BEGIN
-  i := 0;
+  i := 0; oflow := FALSE;
   ReadCh(s);  (* skip opening delimiter *)
   WHILE (s.ch # delim) & (s.ch # ChLf) & (s.ch # ChEof) DO
-    IF i < MaxStr - 1 THEN s.sval[i] := CHR(s.ch); INC(i) END;
+    IF i < MaxStr - 1 THEN s.sval[i] := CHR(s.ch); INC(i)
+    ELSE oflow := TRUE
+    END;
     ReadCh(s)
   END;
   s.sval[i] := 0X;
+  IF oflow THEN ScanError(s, "string literal too long (max 256 chars)") END;
   IF s.ch = delim THEN ReadCh(s)
   ELSE ScanError(s, "unterminated string")
   END;

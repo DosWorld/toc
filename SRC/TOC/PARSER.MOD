@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Parser;
 (*
   Oberon compiler — declaration parsing (CONST/TYPE/VAR/PROCEDURE) and
@@ -181,7 +181,16 @@ BEGIN
     parserMaxMemPara := (mvals[2] + LONGINT(15)) DIV LONGINT(16);
     parserMemSet     := TRUE
   ELSIF dir = "L" THEN
-    NEW(node); NEW(node^.path); Strings.Copy(val, node^.path^); node^.next := NIL;
+    NEW(node);
+    IF node = NIL THEN
+      LogErr.Error("out of memory ($L directive)"); RETURN
+    END;
+    NEW(node^.path);
+    IF node^.path = NIL THEN
+      DISPOSE(node);
+      LogErr.Error("out of memory ($L directive)"); RETURN
+    END;
+    Strings.Copy(val, node^.path^); node^.next := NIL;
     IF extraRdfsTail # NIL THEN extraRdfsTail^.next := node ELSE extraRdfsHead := node END;
     extraRdfsTail := node
   ELSE
@@ -310,13 +319,24 @@ BEGIN
     head := NIL; tail := NIL; typelessVar := FALSE;
     isVar := (PExpr.sc.sym = Scan.TVar);
     IF isVar THEN Scan.Next(PExpr.sc) END;
-    Strings.Copy(PExpr.sc.id, nm); Scan.Next(PExpr.sc);
-    head := IdListAppend(head, tail, nm, FALSE);
+    (* Each name position MUST hold an identifier: without the check, a
+       malformed list copied whatever stale text sat in sc.id as a
+       parameter name — silently. *)
+    IF PExpr.sc.sym = Scan.TIdent THEN
+      Strings.Copy(PExpr.sc.id, nm); Scan.Next(PExpr.sc);
+      head := IdListAppend(head, tail, nm, FALSE)
+    ELSE
+      PExpr.Error("parameter name expected"); Scan.Next(PExpr.sc)
+    END;
     IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END;
     WHILE (PExpr.sc.sym # Scan.TColon) & (PExpr.sc.sym # Scan.TSemi) &
           (PExpr.sc.sym # Scan.TRparen) & (PExpr.sc.sym # Scan.TEof) DO
-      Strings.Copy(PExpr.sc.id, nm); Scan.Next(PExpr.sc);
-      head := IdListAppend(head, tail, nm, FALSE);
+      IF PExpr.sc.sym = Scan.TIdent THEN
+        Strings.Copy(PExpr.sc.id, nm); Scan.Next(PExpr.sc);
+        head := IdListAppend(head, tail, nm, FALSE)
+      ELSE
+        PExpr.Error("parameter name expected"); Scan.Next(PExpr.sc)
+      END;
       IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
     END;
     IF PExpr.sc.sym = Scan.TColon THEN
@@ -331,6 +351,11 @@ BEGIN
       p.declLine := PExpr.sc.line;
       IF typelessVar THEN p.typeless := TRUE END;
       IF genSyms THEN
+        (* Duplicate parameter names were silently accepted (the later one
+           shadowed the earlier in the scope while both occupied BP slots). *)
+        IF Syms.SymFindLocal(pi^.name) # Syms.NoSym THEN
+          PExpr.Error2("duplicate parameter name", pi^.name)
+        END;
         s := Syms.SymNew(pi^.name, p.kind);
         s.type := ptype;
         s.declLine := PExpr.sc.line;
@@ -908,6 +933,17 @@ BEGIN
               ELSE
                 base := r^.offset[k] - LONGINT(1)   (* RELOC: base = offset - 1 *)
               END;
+              (* Hardening: this pass ASSUMES every reloc against a dead
+                 __init import sits inside a 5-byte CALL FAR.  Verify the
+                 opcode before NOP-patching — a future feature that takes an
+                 __init address any other way would otherwise be silently
+                 destroyed.  90H is equally valid: each call site carries TWO
+                 relocs (offset RELOC + SEGRELOC), so the second one finds
+                 the site already NOP-patched by the first. *)
+              IF (Rdoff.PeekCodeByte(Cgen.CgObj, base) # BYTE(09AH)) &
+                 (Rdoff.PeekCodeByte(Cgen.CgObj, base) # BYTE(090H)) THEN
+                LogErr.Error("internal: __init reloc is not a CALL FAR site (SanitizeImports)")
+              END;
               PatchCallToNops(base);
               j := k;
               WHILE j < r^.count - 1 DO
@@ -984,6 +1020,14 @@ PROCEDURE ParseModule*(VAR s: Scan.Scanner);
       baseStart: INTEGER;
       rfOpen, dfOpen: BOOLEAN;
 BEGIN
+  (* ALIASING INVARIANT (whole-Scanner record copy): PExpr.sc becomes a full
+     copy of the caller's Scanner, including the embedded Files.File RECORD —
+     both copies share the same DOS handle and the same heap `buf` pointer.
+     This is safe ONLY because the scanner never writes (never dirties the
+     buffer): the caller may later Close through its own, position-stale copy
+     (see TOC.CompileModule) and nothing is flushed wrongly, and the shared
+     buf is DISPOSEd exactly once.  If the Scanner ever gains a write path,
+     this copy (and Scan.Mark/Restore's) must become pointer-held instead. *)
   PExpr.sc := s;
   Syms.SymInit;
   IF LogErr.HaveErr() THEN RETURN END;
@@ -1046,7 +1090,11 @@ BEGIN
       Strings.Copy(iname, alias);
       IF PExpr.sc.sym = Scan.TAssign THEN
         Scan.Next(PExpr.sc);
-        Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc)
+        IF PExpr.sc.sym = Scan.TIdent THEN
+          Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc)
+        ELSE
+          PExpr.Error("module name expected after ':=' in IMPORT")
+        END
       END;
       IF ~parserSystemMode & Strings.Equal(iname, "SYSTEM") THEN
         PExpr.Error("SYSTEM is implicitly imported")
@@ -1054,9 +1102,17 @@ BEGIN
         isym := Syms.SymNew(alias, Syms.KImport);
         isym.modId := StrTab.Intern(iname);
         IF ~Strings.Equal(iname, "SYSTEM") THEN
-          NEW(ip); Strings.Copy(iname, ip^.name); ip^.next := NIL;
-          IF initImpsTail # NIL THEN initImpsTail^.next := ip ELSE initImpsHead := ip END;
-          initImpsTail := ip; INC(nInitImps)
+          NEW(ip);
+          IF ip = NIL THEN
+            (* Fatal: a silently-dropped node here means the dep's __init is
+               never called — the same silent-OOM class as the 2026-07-11
+               ident-list bug.  Latch and stop adding. *)
+            LogErr.Error("out of memory (import list)")
+          ELSE
+            Strings.Copy(iname, ip^.name); ip^.next := NIL;
+            IF initImpsTail # NIL THEN initImpsTail^.next := ip ELSE initImpsHead := ip END;
+            initImpsTail := ip; INC(nInitImps)
+          END
         END;
         Import.LoadExplicitImport(iname, alias)
       END;
@@ -1093,7 +1149,11 @@ BEGIN
   hasBody    := (PExpr.sc.sym = Scan.TBegin);
   Strings.Copy(modName, initName); Strings.Append("__init", initName);
 
-  IF ~hasImports & ~hasBody THEN
+  (* The bare-RETF short form is only valid when the module ALSO needs no
+     FPU check: a body-less, import-less module whose procedures use REAL/
+     LONGREAL must still get the SYSTEM_REQUIRE87 call in its __init, or it
+     runs undetected on FPU-less hardware. *)
+  IF ~hasImports & ~hasBody & ~PExpr.modUsesFpu THEN
     initOfs := Cgen.CgPc();
     Rdoff.RdfAddGlobal(Cgen.CgObj, initName, Rdoff.SegCode, initOfs);
     Cgen.Emit1(BYTE(Cgen.OpRetf))
@@ -1241,7 +1301,13 @@ BEGIN
         er := er^.next
       END;
       Tar.TarEnd(lf);
-      Files.Close(lf)
+      Files.Close(lf);
+      (* Disk-full / write errors are latched inside Files (wrErr survives
+         Close); without this check a truncated .om was reported as written. *)
+      IF ~Files.Ok(lf) THEN
+        LogErr.Error2("oc: write error (disk full?) on ", libName);
+        Files.Delete(libName)
+      END
     ELSE
       LogErr.Error2("oc: cannot create ", libName)
     END;
@@ -1255,11 +1321,12 @@ BEGIN
   (* On error, the failing diagnostic was already reported through LogErr; the
      latch suppresses any further output, so nothing more is printed here. *)
   (* Release the symbol/type/scope arena on EVERY path.  The success branch
-     already freed it (line ~1132, before .om packing); the error branch did not,
-     which left ~1800 paragraphs allocated when a compile failed — a leak the
-     per-module LeakGuard reported.  SymsFree is idempotent (guards on
-     symOpen/typeOpen), so calling it again here is safe and makes the
-     error path leak-free too. *)
+     already freed it (before .om packing); the error branch did not, which
+     left ~1800 paragraphs allocated when a compile failed — a leak the
+     per-module LeakGuard reported.  SymsFree is idempotent — FreeChunks and
+     the allInline/allFwd/allScopes walks all no-op on the already-NIL state
+     a first SymsFree leaves behind — so calling it again here is safe and
+     makes the error path leak-free too. *)
   Syms.SymsFree();
   (* Free per-module debug-info chunk tables on EVERY path (success + error). *)
   TDbg.Reset();

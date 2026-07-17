@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Syms;
 (*
   Symbol table: types, symbols, scopes, predeclared universe.
@@ -583,7 +583,7 @@ BEGIN
   RETURN ext = base
 END TypeIsExtension;
 
-PROCEDURE TypeAssignCompat(dst, src: TypeDesc): BOOLEAN;
+PROCEDURE TypeAssignCompat*(dst, src: TypeDesc): BOOLEAN;
 BEGIN
   IF dst = src THEN RETURN TRUE END;
   (* Two distinct TypeDesc records of the same PRIMITIVE (non-structured) form
@@ -655,12 +655,17 @@ END TypeStructEq;
 PROCEDURE TypeParamCompat*(formal, actual: TypeDesc; isVar: BOOLEAN): BOOLEAN;
 BEGIN
   IF formal = actual THEN RETURN TRUE END;
+  (* Element types compare STRUCTURALLY (TypeStructEq), not by pointer
+     identity: a record element type elaborated independently on both sides
+     of a .def boundary is two TypeDesc records for the same type — pointer
+     identity spuriously rejected it for value params while the VAR path
+     already used TypeStructEq. *)
   IF (formal.form = TFArray) & (formal.len < 0) & (actual.form = TFArray) THEN
-    RETURN formal.elem = actual.elem
+    RETURN TypeStructEq(formal.elem, actual.elem)
   END;
   IF (formal.form = TFArray) & (actual.form = TFArray) &
      (formal.len >= 0) & (formal.len = actual.len) &
-     (formal.elem = actual.elem) THEN RETURN TRUE END;
+     TypeStructEq(formal.elem, actual.elem) THEN RETURN TRUE END;
   IF isVar THEN
     IF (formal.form = TFArray) & (actual.form = TFArray) &
        (formal.len >= 0) & (formal.len = actual.len) &
@@ -907,6 +912,13 @@ BEGIN
   AlignFields := FALSE;  (* (*$A-*) default: packed RECORD fields *)
 
   NEW(u);
+  IF u = NIL THEN
+    (* Fatal: a NIL universe scope would send every following declaration
+       through a NIL far write (IVT corruption).  Latch; ParseModule checks
+       LogErr.HaveErr() right after SymInit. *)
+    LogErr.Error("out of memory (universe scope)");
+    RETURN
+  END;
   u^.symbols  := NIL;
   u^.nSyms    := 0;
   u^.outer    := NIL;
@@ -1039,5 +1051,11 @@ BEGIN
   symCount := 0; typeCount := 0;
   bodyI := 0; WHILE bodyI < MaxSymChunks  DO symDir[bodyI]  := NIL; INC(bodyI) END;
   bodyI := 0; WHILE bodyI < MaxTypeChunks DO typeDir[bodyI] := NIL; INC(bodyI) END;
-  NEW(symOom); NEW(typeOom)
+  NEW(symOom); NEW(typeOom);
+  IF (symOom = NIL) OR (typeOom = NIL) THEN
+    (* The OOM fallback nodes themselves failed to allocate at startup: latch
+       now so the first compile dies cleanly instead of NIL-dereferencing the
+       fallback later.  (LogErr's body has already run — Syms imports it.) *)
+    LogErr.Error("out of memory (symbol-table init)")
+  END
 END Syms.

@@ -4,9 +4,13 @@ MODULE LogErr;
 IMPORT IO, Files, Strings;
 
 CONST
+(* Verbosity levels, ordered by increasing verbosity: a message of level lvl
+   is emitted when the current level >= lvl.  Errors always print (and latch)
+   regardless of level.  Note: LWARN < LINFO so that the default (LINFO)
+   shows warnings AND info; /LOG=warn shows warnings but hides info. *)
 LERROR* = 100;
-LINFO*  = 200;
-LWARN*  = 300;
+LWARN*  = 200;
+LINFO*  = 300;
 LDEBUG* = 400;
 
 VAR
@@ -46,25 +50,27 @@ END Close;
 
 PROCEDURE CheckLevel(lvl : INTEGER) : BOOLEAN;
 BEGIN
-  RETURN (level = LERROR) OR (level >= lvl)
+  (* Plain threshold.  The old form `(level = LERROR) OR (level >= lvl)` made
+     /LOG=error (the quietest setting) print EVERYTHING — inverted. *)
+  RETURN level >= lvl
 END CheckLevel;
 
 (* IsDebug*: test whether the current verbosity level would emit DEBUG messages.
-   Parameters: none.  Result: TRUE if level is LERROR or >= LDEBUG. *)
+   Parameters: none.  Result: TRUE if level >= LDEBUG. *)
 PROCEDURE IsDebug*() : BOOLEAN;
 BEGIN
   RETURN CheckLevel(LDEBUG)
 END IsDebug;
 
 (* IsInfo*: test whether the current verbosity level would emit INFO messages.
-   Parameters: none.  Result: TRUE if level is LERROR or >= LINFO. *)
+   Parameters: none.  Result: TRUE if level >= LINFO. *)
 PROCEDURE IsInfo*() : BOOLEAN;
 BEGIN
   RETURN CheckLevel(LINFO)
 END IsInfo;
 
 (* IsWarn*: test whether the current verbosity level would emit WARN messages.
-   Parameters: none.  Result: TRUE if level is LERROR or >= LWARN. *)
+   Parameters: none.  Result: TRUE if level >= LWARN. *)
 PROCEDURE IsWarn*() : BOOLEAN;
 BEGIN
   RETURN CheckLevel(LWARN)
@@ -130,7 +136,7 @@ BEGIN
 END Error;
 
 (* Warn*: report a non-fatal warning.  Prints to stdout (and output.log) if
-   the current level is LERROR or >= LWARN; otherwise silently dropped.
+   the current level is >= LWARN; otherwise silently dropped.
    Parameters: msg — the warning message text.  Result: none. *)
 PROCEDURE Warn*(msg: ARRAY OF CHAR);
 BEGIN
@@ -138,7 +144,7 @@ BEGIN
 END Warn;
 
 (* Info*: report an informational message.  Prints to stdout (and
-   output.log) if the current level is LERROR or >= LINFO; otherwise
+   output.log) if the current level is >= LINFO; otherwise
    silently dropped.
    Parameters: msg — the informational message text.  Result: none. *)
 PROCEDURE Info*(msg: ARRAY OF CHAR);
@@ -147,7 +153,7 @@ BEGIN
 END Info;
 
 (* Debug*: report a debug-level message.  Prints to stdout (and output.log)
-   only if the current level is LERROR or >= LDEBUG (widened via
+   only if the current level is >= LDEBUG (widened via
    /LOG=debug); otherwise silently dropped.
    Parameters: msg — the debug message text.  Result: none. *)
 PROCEDURE Debug*(msg : ARRAY OF CHAR);

@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE PStmt;
 (*
   Statement parser: IF, WHILE, REPEAT, FOR, CASE, RETURN, procedure calls,
@@ -63,6 +63,12 @@ BEGIN
   IF (it.mode = Cgen.MConst) & (tt # Syms.NoType) &
      ((tt.form = Syms.TFInteger) OR (tt.form = Syms.TFChar) OR
       (tt.form = Syms.TFWord)) THEN
+    (* CASE selectors are INTEGER/CHAR: a label outside signed 16-bit range
+       (e.g. a WORD constant 40000) silently truncated to a negative INTEGER
+       and matched the wrong arm. *)
+    IF (it.val < LONGINT(-32768)) OR (it.val > LONGINT(32767)) THEN
+      PExpr.Error("CASE label out of INTEGER range")
+    END;
     val := INTEGER(it.val)
   ELSIF (it.mode = Cgen.MGlobal) & (tt # Syms.NoType) &
         (tt.form = Syms.TFArray) & (tt.len = 2) &
@@ -163,10 +169,14 @@ BEGIN
   Scan.Next(PExpr.sc);
   IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("identifier expected"); RETURN END;
   varSym := Syms.SymFind(PExpr.sc.id); Scan.Next(PExpr.sc);
-  IF (varSym = Syms.NoSym) OR (varSym.type.form # Syms.TFInteger) THEN
+  (* kind check FIRST: a non-variable symbol (e.g. a KImport module alias)
+     has type = NIL, so testing .form before the kind check dereferenced NIL. *)
+  IF (varSym = Syms.NoSym) OR
+     ((varSym.kind # Syms.KVar) & (varSym.kind # Syms.KParam) &
+      (varSym.kind # Syms.KVarParam)) THEN
     PExpr.Error("INTEGER var expected"); RETURN
   END;
-  IF (varSym.kind # Syms.KVar) & (varSym.kind # Syms.KParam) & (varSym.kind # Syms.KVarParam) THEN
+  IF (varSym.type = Syms.NoType) OR (varSym.type.form # Syms.TFInteger) THEN
     PExpr.Error("INTEGER var expected"); RETURN
   END;
   PExpr.Expect(Scan.TAssign);
@@ -361,6 +371,12 @@ TYPE
     next:  ArmSlotNode
   END;
 
+  (* Claimed-slot map for the jump-table path.  Heap-allocated by ParseCase:
+     a 1 KB local array + a ~2 KB Scanner mark per nested CASE level was a
+     real SP-wrap hazard on 8086 (ParseCaseTable recurses through nested
+     CASE statements via ParseStatementSequence). *)
+  ClaimArr = POINTER TO ARRAY MaxTableSlots OF BOOLEAN;
+
 PROCEDURE ArmSlotPush(VAR head, tail: ArmSlotNode; idx: INTEGER);
   VAR r: ArmSlotNode;
 BEGIN
@@ -382,13 +398,13 @@ BEGIN
   head := NIL
 END ArmSlotFree;
 
-PROCEDURE ParseCaseTable(retType: Syms.TypeDesc; lo, hi: INTEGER);
+PROCEDURE ParseCaseTable(retType: Syms.TypeDesc; lo, hi: INTEGER;
+                         claimed: ClaimArr);
   VAR endList: BpNode; n: BpNode; more: BOOLEAN;
       tableOfs, bodyStart, defaultOfs: LONGINT;
       nSlots, i, v: INTEGER;
       defaultBp, defaultJmp: Cgen.Backpatch;
       armHead, armTail, an, anx: ArmSlotNode; k: INTEGER;
-      claimed: ARRAY MaxTableSlots OF BOOLEAN;
 BEGIN
   endList := NIL;
   (* Caller (ParseCase) only takes this path when LONGINT(hi)-LONGINT(lo)+1
@@ -485,7 +501,9 @@ PROCEDURE ParseCase(retType: Syms.TypeDesc);
       bodyList: BpNode; skipArm, skipLo: Cgen.Backpatch;
       lo, hi: INTEGER; n: BpNode; more: BOOLEAN;
       preCount, preLo, preHi: INTEGER;
-      mark: Scan.Scanner; markPos: LONGINT; useTable: BOOLEAN;
+      markP: POINTER TO Scan.Scanner;
+      markPos: LONGINT; useTable: BOOLEAN;
+      claim: ClaimArr;
 BEGIN
   Scan.Next(PExpr.sc);
   endList := NIL;
@@ -501,16 +519,30 @@ BEGIN
 
   (* G7: pre-scan for a dense, single-value label set BEFORE emitting any
      dispatch code.  Mark/Restore brackets the pre-scan so it has zero effect
-     on the token stream position/state for the real parse that follows. *)
-  Scan.Mark(PExpr.sc, mark, markPos);
-  useTable := PreScanCase(preCount, preLo, preHi) & (preCount >= 6) &
-              (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(2 * preCount)) &
-              (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(MaxTableSlots));
-  Scan.Restore(PExpr.sc, mark, markPos);
+     on the token stream position/state for the real parse that follows.
+     The Scanner mark (~2 KB) and the claimed-slot map (1 KB) are HEAP
+     allocated: nested CASEs recurse through here, and stack frames that big
+     wrap SP on 8086.  If either allocation fails we simply fall back to the
+     always-correct linear-chain path — no error needed. *)
+  useTable := FALSE;
+  NEW(markP);
+  IF markP # NIL THEN
+    Scan.Mark(PExpr.sc, markP^, markPos);
+    useTable := PreScanCase(preCount, preLo, preHi) & (preCount >= 6) &
+                (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(2 * preCount)) &
+                (LONGINT(preHi) - LONGINT(preLo) + LONGINT(1) <= LONGINT(MaxTableSlots));
+    Scan.Restore(PExpr.sc, markP^, markPos);
+    DISPOSE(markP)
+  END;
+  IF useTable THEN
+    NEW(claim);
+    IF claim = NIL THEN useTable := FALSE END
+  END;
 
   IF useTable THEN
     ReloadCase(caseLoad, caseSym);
-    ParseCaseTable(retType, preLo, preHi);
+    ParseCaseTable(retType, preLo, preHi, claim);
+    DISPOSE(claim);
     RETURN
   END;
 
@@ -877,6 +909,35 @@ BEGIN
   RETURN item.type.isInline
 END ItemInline;
 
+(* Integer family: this dialect allows implicit narrowing/widening between
+   all integer forms in assignments (BYTE := INTEGER was always accepted;
+   INTEGER := LONGINT truncates to AX by codegen design).  CHAR is included
+   because CHAR/BYTE interchange is pervasive in existing code. *)
+PROCEDURE IsIntFamily(f: INTEGER): BOOLEAN;
+BEGIN
+  RETURN (f = Syms.TFInteger) OR (f = Syms.TFByte) OR (f = Syms.TFWord) OR
+         (f = Syms.TFLongint) OR (f = Syms.TFChar)
+END IsIntFamily;
+
+(* Assignment compatibility for scalar destinations.  Blanket-allows the
+   integer family both ways (the codegen has always truncated/widened),
+   ADDRESS <-> integer (raw address arithmetic is pervasive SYSTEM-level
+   code), and REAL <-> LONGREAL (both live in ST(0); the store rounds).
+   Everything else defers to Syms.TypeAssignCompat (pointers, SET, BOOLEAN,
+   proc values) — so `bool := 5`, `set := ptr`, or an unrelated pointer
+   assignment is a compile error instead of silently emitted garbage. *)
+PROCEDURE AssignCompat(dst, src: Syms.TypeDesc): BOOLEAN;
+BEGIN
+  IF IsIntFamily(dst.form) & IsIntFamily(src.form) THEN RETURN TRUE END;
+  IF (dst.form = Syms.TFAddress) & IsIntFamily(src.form) THEN RETURN TRUE END;
+  IF IsIntFamily(dst.form) & (src.form = Syms.TFAddress) THEN RETURN TRUE END;
+  IF ((dst.form = Syms.TFReal) OR (dst.form = Syms.TFLongreal)) &
+     ((src.form = Syms.TFReal) OR (src.form = Syms.TFLongreal)) THEN
+    RETURN TRUE
+  END;
+  RETURN Syms.TypeAssignCompat(dst, src)
+END AssignCompat;
+
 PROCEDURE ParseStatement(retType: Syms.TypeDesc);
   VAR sym: Syms.Symbol; item, rhs: Cgen.Item;
       pt: Syms.TypeDesc; varAdr: LONGINT; varGlobal, varRef: BOOLEAN;
@@ -915,6 +976,15 @@ BEGIN
     END;
     IF PExpr.sc.sym = Scan.TAssign THEN
       Scan.Next(PExpr.sc);
+      (* The destination must be a variable (an l-value).  Without this,
+         `myConst := x` / `MyProc := x` parsed, evaluated the RHS, and were
+         then silently DISCARDED (CgStoreItem has no branch for MConst/MProc
+         modes and falls through doing nothing). *)
+      IF ~((((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal)) &
+            (item.rootSym # Syms.NoSym)) OR
+           ((item.mode = Cgen.MReg) & item.isRef)) THEN
+        PExpr.Error("assignment target must be a variable")
+      END;
       (* VAR-param assignment counts as use — VAR is an out-parameter.
          Also: `s^.f := x` / `a[i] := x` reads the root (the deref/index
          requires loading its value), so item.isRef means root was read. *)
@@ -958,6 +1028,19 @@ BEGIN
              (iform = Syms.TFByte) OR (iform = Syms.TFWord) OR
              (iform = Syms.TFChar))) THEN
           PExpr.Error("type mismatch in assignment: int/float require explicit cast (REAL(x), LONGREAL(x), FLOOR(x), ENTIER(x))")
+        END
+      END;
+      (* General scalar assignment compatibility.  ARRAY/RECORD operands are
+         excluded here: their assignment legality is enforced by the shape of
+         the dedicated copy paths below (and string-literal-to-array etc.
+         have their own rules).  Everything scalar goes through AssignCompat,
+         so `bool := 5`, `set := ptr`, or assigning an unrelated pointer type
+         is now a compile error instead of silently emitted garbage. *)
+      IF (item.type # Syms.NoType) & (rhs.type # Syms.NoType) &
+         (iform # Syms.TFArray) & (iform # Syms.TFRecord) &
+         (rform # Syms.TFArray) & (rform # Syms.TFRecord) THEN
+        IF ~AssignCompat(item.type, rhs.type) THEN
+          PExpr.Error("type mismatch in assignment")
         END
       END;
       (* array-to-array, both plain near vars (no isRef): fast REP MOVSB *)
@@ -1203,21 +1286,10 @@ BEGIN
       varRef := (item.mode = Cgen.MReg) & item.isRef;
       pt := item.type;
       IF varRef THEN
-        Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES *)
+        Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
-        Cgen.Emit2(089H, 0E3H);
-        IF pt.argSize > 0 THEN
-          IF pt.argSize <= 127 THEN
-            Cgen.Emit2(083H, 0C3H); Cgen.Emit1(BYTE(INTEGER(pt.argSize) MOD 256))
-          ELSE
-            Cgen.Emit2(081H, 0C3H); Cgen.EmitW(INTEGER(SYSTEM.AND(pt.argSize, LONGINT(0FFFFH))))
-          END
-        END;
-        (* SS: MOV CX,[BX] / SS: MOV BX,[BX+2] / MOV ES,CX *)
-        Cgen.EmitCodeStr("36,8B,0F,36,8B,5F,02,8E,C1");
-        Cgen.CgCallProcVarEsbx();
-        Cgen.EmitCodeStr("83,C4,04")  (* ADD SP,4 *)
+        Cgen.CgCallProcVarRefTail(pt.argSize)
       ELSE
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
@@ -1263,5 +1335,12 @@ END ParseStatementSequence;
 
 BEGIN
   retPatchList := NIL; curProloguePatch := 0; curProcDepth := 0;
-  NEW(bpOomNode); bpOomNode^.next := NIL
+  NEW(bpOomNode);
+  IF bpOomNode = NIL THEN
+    (* The OOM fallback node itself failed at startup: latch so the first
+       compile dies cleanly instead of handing out a NIL fallback later. *)
+    LogErr.Error("out of memory (statement-parser init)")
+  ELSE
+    bpOomNode^.next := NIL
+  END
 END PStmt.

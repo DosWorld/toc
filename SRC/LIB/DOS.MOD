@@ -234,17 +234,24 @@ VAR
     di     : INTEGER;
     ch     : CHAR;
     match  : BOOLEAN;
-    pw     : POINTER TO WORDD;
+    pw     : POINTER TO WORD;   (* word peek: env segment at PSP:2CH *)
+    pc     : POINTER TO CHAR;   (* byte scan over the environment block *)
 BEGIN
+    (* The old code declared ONE pointer as POINTER TO WORDD — a typo for
+       WORD that was never declared anywhere, so the pointer silently got a
+       never-resolved stub type and only worked by accident (the stub
+       happened to word-load on deref and INC stepped one byte).  Exposed
+       the moment assignment type checking landed (2026-07-17): split into
+       a properly-typed WORD peek + CHAR scan. *)
     dst[0] := 0X;
     pw := SYSTEM.PTR(GetPsp(), 2CH);
     envseg := pw^;
     IF envseg = 0 THEN RETURN END;
-    pw := SYSTEM.PTR(envseg, 0);
-    WHILE pw^ # 0X DO
+    pc := SYSTEM.PTR(envseg, 0);
+    WHILE pc^ # 0X DO
         ei := 0;
         match := TRUE;
-        ch := pw^;
+        ch := pc^;
         WHILE (ch # '=') & (ch # 0X) DO
             IF (ei < LEN(envvar) - 1) & match THEN
                 match := SYSTEM.UCASE(ch) = SYSTEM.UCASE(envvar[ei]);
@@ -252,25 +259,25 @@ BEGIN
             ELSE
                 match := FALSE
             END;
-            INC(pw);
-            ch := pw^
+            INC(pc);
+            ch := pc^
         END;
         IF match & (envvar[ei] = 0X) & (ch = '=') THEN
-            INC(pw);
+            INC(pc);
             di := 0;
-            ch := pw^;
+            ch := pc^;
             WHILE ch # 0X DO
                 IF di < LEN(dst) - 1 THEN
                     dst[di] := ch; INC(di)
                 END;
-                INC(pw);
-                ch := pw^
+                INC(pc);
+                ch := pc^
             END;
             dst[di] := 0X;
             RETURN
         END;
-        WHILE pw^ # 0X DO INC(pw) END;
-        INC(pw)
+        WHILE pc^ # 0X DO INC(pc) END;
+        INC(pc)
     END
 END GetEnv;
 

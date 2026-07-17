@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Def;
 (*
   Port of def.c/def.h to Oberon-07.
@@ -216,7 +216,13 @@ BEGIN
   sym := scope^.symbols;
   WHILE sym # Syms.NoSym DO
     IF sym.exported & ~HasDotId(sym.nameId) & (sym.kind = Syms.KConst) THEN
+      (* Typed CONST line: `CONST name <TYPE> value`.  The old value-only form
+         forced DefRead to re-derive the type from the value's range, so a
+         WORD/INTEGER constant in 32768..65535 (e.g. Rdoff.SegLimit) imported
+         as LONGINT — a different type on the two sides of the module
+         boundary.  DefRead still accepts the legacy value-only form. *)
       Files.Write(f, "CONST "); WQualName(f, modName, sym.nameId);
+      Files.WriteByte(f, ORD(' ')); WriteType(f, sym.type);
       Files.WriteByte(f, ORD(' ')); WInt(f, sym.val); Files.WriteLn(f)
     END;
     sym := sym.next
@@ -423,7 +429,10 @@ BEGIN
   END;
   s := Syms.SymFind(tname);
   IF (s # Syms.NoSym) & (s.kind = Syms.KType) THEN RETURN s.type END;
-  LogErr.Warn2("unknown type in .def: ", tname);
+  (* HARD error, not a warning: an unresolvable type name means a stale or
+     mismatched archive, and the old INTEGER (2-byte) fallback silently
+     truncated every load/store through the symbol — a miscompile. *)
+  LogErr.Error2("unknown type in .def: ", tname);
   RETURN Syms.TypeInteger
 END ResolveTypeName;
 
@@ -554,8 +563,13 @@ BEGIN
       END
     ELSIF Strings.Equal(kw, "BASE") & (curRec # Syms.NoType) THEN
       ReadToken(line, i, tok);
-      NEW(bp); MakeShort(tok, bp^.baseShort);
-      bp^.derived := curRec; bp^.next := patches; patches := bp
+      NEW(bp);
+      IF bp = NIL THEN
+        LogErr.Error("out of memory (.def BASE patch)")
+      ELSE
+        MakeShort(tok, bp^.baseShort);
+        bp^.derived := curRec; bp^.next := patches; patches := bp
+      END
     ELSIF Strings.Equal(kw, "FIELD") & (curRec # Syms.NoType) THEN
       ReadToken(line, i, pname);
       ft := ParseDefType(line, i);
@@ -593,10 +607,22 @@ BEGIN
       BuildQName(alias, shortname, qname);
 
       IF Strings.Equal(kw, "CONST") THEN
+        (* Two formats:
+             legacy: CONST name value          (type re-derived by range)
+             new:    CONST name TYPE value     (declared type carried)
+           Detect by peeking: digit or '-' next means legacy. *)
+        SkipWS(line, i);
+        IF (line[i] = '-') OR ((line[i] >= "0") & (line[i] <= "9")) THEN
+          t := Syms.NoType
+        ELSE
+          t := ParseDefType(line, i)
+        END;
         v := ReadLong(line, i);
         s := Syms.SymNew(qname, Syms.KConst);
         s.val := v;
-        IF (v < LONGINT(-32768)) OR (v > LONGINT(32767)) THEN
+        IF t # Syms.NoType THEN
+          s.type := t
+        ELSIF (v < LONGINT(-32768)) OR (v > LONGINT(32767)) THEN
           s.type := Syms.TypeLongint
         ELSE
           s.type := Syms.TypeInteger

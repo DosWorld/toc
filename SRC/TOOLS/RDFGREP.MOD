@@ -1,3 +1,4 @@
+(*$M 32000, 262144, 650000*)
 MODULE rdfgrep;
 (* rdfgrep — RDOFF/.om introspection CLI.
    Replaces the python heredocs formerly in tests/test_src.sh.
@@ -19,6 +20,7 @@ MODULE rdfgrep;
      rdfgrep code-starts       FILE.RDF HEX     — code segment starts with HEX
      rdfgrep code-contains     FILE.RDF HEX     — code segment contains HEX
      rdfgrep no-code-contains  FILE.RDF HEX     — code segment does NOT contain HEX
+     rdfgrep data-contains     FILE.RDF HEX     — data segment contains HEX
      rdfgrep code-count        FILE.RDF HH MIN  — count of byte HH in code >= MIN
      rdfgrep code-byte-at      FILE.RDF OFS HH  — code[OFS] == HH
      rdfgrep init-imports      FILE.RDF         — print imports ending '__init'
@@ -81,6 +83,7 @@ BEGIN
   Out.String("  code-starts       FILE.RDF HEX        code segment starts with HEX"); Out.Ln;
   Out.String("  code-contains     FILE.RDF HEX        code segment contains HEX"); Out.Ln;
   Out.String("  no-code-contains  FILE.RDF HEX        code segment does NOT contain HEX"); Out.Ln;
+  Out.String("  data-contains     FILE.RDF HEX        data segment contains HEX"); Out.Ln;
   Out.String("  code-count        FILE.RDF HH MIN     count of byte HH in code >= MIN"); Out.Ln;
   Out.String("  code-byte-at      FILE.RDF OFS HH     code[OFS] == HH"); Out.Ln;
   Out.String("  init-imports      FILE.RDF            print imports ending '__init'"); Out.Ln;
@@ -218,6 +221,28 @@ BEGIN
   END;
   RETURN FALSE
 END codeContains;
+
+(* dataContains: codeContains's twin over the data segment (§J.5 --
+   bin2obj mode's /BIN=data happy-path test needs this; the no-python
+   rule keeps binary inspection in rdfgrep, never a python heredoc). *)
+PROCEDURE dataContains(obj: Rdoff.ObjFile; VAR pat: ARRAY OF BYTE;
+                       npat: INTEGER): BOOLEAN;
+  VAR i, j: LONGINT; match: BOOLEAN;
+BEGIN
+  IF npat = 0 THEN RETURN TRUE END;
+  IF LONGINT(npat) > LONGINT(obj^.dataLen) THEN RETURN FALSE END;
+  i := LONGINT(0);
+  WHILE i <= LONGINT(obj^.dataLen) - LONGINT(npat) DO
+    match := TRUE; j := LONGINT(0);
+    WHILE match & (j < LONGINT(npat)) DO
+      IF Rdoff.PeekDataByte(obj, i + j) # pat[INTEGER(j)] THEN match := FALSE END;
+      INC(j)
+    END;
+    IF match THEN RETURN TRUE END;
+    INC(i)
+  END;
+  RETURN FALSE
+END dataContains;
 
 PROCEDURE codeCount(obj: Rdoff.ObjFile; needle: BYTE): INTEGER;
   VAR i: LONGINT; n: INTEGER;
@@ -599,6 +624,13 @@ BEGIN
     IF npat < 0 THEN Usage END;
     loadRdf(obj, file);
     IF ~codeContains(obj, buf, npat) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "data-contains") THEN
+    IF ~getArg(3, a1) THEN Usage END;
+    npat := parseHex(a1, buf);
+    IF npat < 0 THEN Usage END;
+    loadRdf(obj, file);
+    IF dataContains(obj, buf, npat) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
 
   ELSIF Strings.Equal(cmd, "code-count") THEN
     IF ~getArg(3, a1) THEN Usage END;

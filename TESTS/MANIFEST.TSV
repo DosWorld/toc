@@ -302,3 +302,8 @@ arrcmp/general-case-rejected	ARRCMP1.MOD	fails	compile-fails
 arrcmp/empty-string-still-ok	ARRCMP2.MOD		has-global	Arrcmp2__init
 constimp/big-const-not-truncated	USEBIG.MOD+CSTBIG.OM	/ENTRY=Run	errorlevel	0
 ptr/var-param-array-across-modules	PTRUSE.MOD+PTRLIB.MOD	/ENTRY=Run	errorlevel	0
+assign/const-target-rejected	ASGCONST.MOD	fails	compile-fails
+assign/bool-from-int-rejected	ASGBOOL.MOD	fails	compile-fails
+relop/ptr-ordered-rejected	PTRLESS.MOD	fails	compile-fails
+scan/ident-too-long-rejected	IDLONG.MOD	fails	compile-fails
+sysshift/ror-lsl-cl-runtime	RORCL.MOD	/ENTRY=Run	errorlevel	0

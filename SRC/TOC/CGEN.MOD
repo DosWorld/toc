@@ -1,4 +1,4 @@
-(*D+*)
+(*D-*)
 MODULE Cgen;
 (*
   Oberon compiler code generator.
@@ -117,6 +117,9 @@ END CgStoreDerefFarSized;
 PROCEDURE CgInit*;
 BEGIN
   NEW(CgObj);
+  IF CgObj = NIL THEN
+    LogErr.Error("out of memory (codegen object)"); RETURN
+  END;
   Rdoff.RdfInit(CgObj)   (* errors latch in LogErr; caller checks LogErr.HaveErr() *)
 END CgInit;
 
@@ -191,7 +194,7 @@ PROCEDURE EmitCodeStr*(s: ARRAY OF CHAR);
 BEGIN
   bufPos := 0;
   i := 0;
-  WHILE s[i] # 0X DO
+  WHILE (s[i] # 0X) & (bufPos < WORD(256)) DO
     v := 0;
     c := s[i];
     IF SYSTEM.ISDIGIT(c) THEN d := ORD(c) - ORD("0")
@@ -210,6 +213,12 @@ BEGIN
     buf[bufPos] := v;
     INC(bufPos);
     IF s[i] = "," THEN INC(i) END
+  END;
+  (* Bounds guard: a >256-byte hex string used to run buf[] off the end of
+     the stack frame.  All current literals are far shorter, so hitting this
+     is an internal emitter bug, not a user error. *)
+  IF s[i] # 0X THEN
+    LogErr.Error("internal: EmitCodeStr pattern longer than 256 bytes")
   END;
   Rdoff.EmitBlock(CgObj, Rdoff.SegCode, buf, bufPos)
 END EmitCodeStr;
@@ -307,6 +316,33 @@ PROCEDURE CgCallProcVarEsbx*();
 BEGIN
   Emit3(026H, 0FFH, 01FH)
 END CgCallProcVarEsbx;
+
+(* CgCallProcVarRefTail — the shared tail of an indirect call through a
+   proc-var whose SLOT ADDRESS was in ES:BX before the argument list was
+   parsed (MReg/isRef designator: record field, array element, pointer
+   deref).  Protocol, shared by PExpr (call-in-expression) and PStmt
+   (call-statement) so the two sites cannot drift:
+     caller emits PUSH BX; PUSH ES  (save slot addr)   -- "53,06"
+     caller parses/pushes the actual arguments (argSize bytes)
+     this tail: MOV BX,SP; ADD BX,argSize   ; BX -> saved slot addr
+                SS: MOV CX,[BX]; SS: MOV BX,[BX+2]; MOV ES,CX
+                CALL FAR [ES:BX]            ; through the proc-var slot
+                ADD SP,4                    ; pop saved BX/ES *)
+PROCEDURE CgCallProcVarRefTail*(argSize: LONGINT);
+BEGIN
+  Emit2(089H, 0E3H);                       (* MOV BX, SP *)
+  IF argSize > 0 THEN
+    IF argSize <= 127 THEN
+      Emit2(083H, 0C3H); Emit1(BYTE(INTEGER(argSize) MOD 256))
+    ELSE
+      Emit2(081H, 0C3H); EmitW(INTEGER(SYSTEM.AND(argSize, LONGINT(0FFFFH))))
+    END
+  END;
+  (* SS: MOV CX,[BX] / SS: MOV BX,[BX+2] / MOV ES,CX *)
+  EmitCodeStr("36,8B,0F,36,8B,5F,02,8E,C1");
+  CgCallProcVarEsbx();
+  EmitCodeStr("83,C4,04")                  (* ADD SP,4 *)
+END CgCallProcVarRefTail;
 
 PROCEDURE CgCallFar*(importId: INTEGER);
   VAR ofsAt, segAt: LONGINT;
@@ -639,7 +675,10 @@ BEGIN
        lives at [BP+srcAdr]; LEN is at +4. *)
     CgLoadBp(srcAdr + 4);
     Emit1(03DH); EmitW(INTEGER(dstSize));  (* CMP AX, dstSize *)
-    CgCondShort(OpJle, ok);                (* JLE keep (AX <= dstSize) *)
+    (* UNSIGNED compare: dstSize may legally be up to 64000 — a signed JLE
+       treats a >= 32 KB size as negative and picks the wrong count for the
+       REP MOVSB below (silent corruption). *)
+    CgCondShort(OpJbe, ok);                (* JBE keep (AX <= dstSize, unsigned) *)
     CgLoadImm(INTEGER(dstSize));           (* MOV AX, dstSize *)
     CgPatchShort(ok);
     Emit2(08BH, 0C8H)                      (* MOV CX, AX *)
@@ -728,7 +767,10 @@ END CgStorePtrMem;
 PROCEDURE CgAddBxImm*(imm: INTEGER);
 BEGIN
   IF imm = 0 THEN RETURN END;
-  IF imm <= 127 THEN
+  (* imm8 form sign-extends: valid ONLY for -128..127.  A missing lower bound
+     let a negative imm (e.g. a field offset >= 32768 arriving as a negative
+     INTEGER) be emitted as one sign-extended byte — a different constant. *)
+  IF (imm >= -128) & (imm <= 127) THEN
     Emit3(083H, 0C3H, BYTE(imm))
   ELSE
     Emit2(081H, 0C3H); EmitW(imm)
@@ -829,29 +871,50 @@ BEGIN
   EmitCodeStr("33,C3,33,D1")
 END CgXor32;
 
+(* AssertEmitLen — guard for emitters whose hard-coded rel8 jump distances
+   depend on the exact byte length of the emitted fragment: any edit that
+   changes a neighbouring byte silently breaks control flow, so each such
+   emitter asserts its own total length at compile time (of the USER's
+   program — zero cost in the generated code). *)
+PROCEDURE AssertEmitLen(startPc: LONGINT; expect: INTEGER); NEAR;
+BEGIN
+  IF CgPc() - startPc # LONGINT(expect) THEN
+    LogErr.Error("internal: emitter length drift (hard-coded jump offsets)")
+  END
+END AssertEmitLen;
+
 (* .false: XOR AX,AX / JMP +3 / .true: MOV AX,1 — boolean materialize tail *)
 PROCEDURE CgFalseTrue; NEAR;
+  VAR pc0: LONGINT;
 BEGIN
+  pc0 := CgPc();
   EmitCodeStr("33,C0,EB,03,B8,01,00");
+  AssertEmitLen(pc0, 7)
 END CgFalseTrue;
 
 PROCEDURE CgCmp32Bool*(hiTrue, hiFalse, loTrue: INTEGER);
+  VAR pc0: LONGINT;
 BEGIN
   (* layout: lo-word compare then hi-word combine *)
+  pc0 := CgPc();
   Emit2(03BH, 0CAH);                   (* CMP CX, DX *)
   Emit2(BYTE(hiTrue),  BYTE(10));      (* Jhi_true → .true *)
   Emit2(BYTE(hiFalse), BYTE(4));       (* Jhi_false → .false *)
   Emit2(03BH, 0D8H);                   (* CMP BX, AX *)
   Emit2(BYTE(loTrue),  BYTE(4));       (* Jlo_true → .true *)
-  CgFalseTrue
+  CgFalseTrue;
+  AssertEmitLen(pc0, 17)
 END CgCmp32Bool;
 
 (* ---- setcc ---- *)
 
 PROCEDURE CgSetcc*(jcc: INTEGER);
+  VAR pc0: LONGINT;
 BEGIN
+  pc0 := CgPc();
   Emit2(BYTE(jcc), BYTE(4));           (* Jcc +4 *)
-  CgFalseTrue
+  CgFalseTrue;
+  AssertEmitLen(pc0, 9)
 END CgSetcc;
 
 PROCEDURE CgCmp32Eq*();
@@ -1072,13 +1135,16 @@ END CgLoadImmCx;
 (* ---- IS type tag scan ---- *)
 
 PROCEDURE CgIsTagScan(tagId: INTEGER);
+  VAR pc0: LONGINT;
 BEGIN
+  pc0 := CgPc();
   (* PUSH SI; MOV SI,AX; loop: MOV AX,[SI]; TEST AX,AX; JZ +10 -> false *)
   EmitCodeStr("56,89,C6,8B,04,85,C0,74,0A");
   Emit1(03DH); EmitW(tagId);        (* CMP AX, tagId *)
   (* JE +9 -> true; ADD SI,2; JMP -16 -> loop; false: XOR AX,AX; JMP +3 -> POP SI *)
   EmitCodeStr("74,09,83,C6,02,EB,F0,33,C0,EB,03");
   EmitCodeStr("B8,01,00,5E");       (* true: MOV AX,1 / POP SI *)
+  AssertEmitLen(pc0, 27)
 END CgIsTagScan;
 
 PROCEDURE CgIsTagCheck*(VAR item: Item; tagId: INTEGER);
@@ -1264,37 +1330,41 @@ BEGIN
   END
 END CgRor32Imm;
 
+(* The four variable-count 32-bit shifts are JCXZ/LOOP-free (project strong
+   rule — both are slow on real 8086 hardware): AND CX,1F already sets ZF, so
+   the zero-count guard is a plain JZ, and the loop tail is DEC CX / JNZ. *)
+
 PROCEDURE CgLsl32Cl*();
 BEGIN
-  (* AND CX,1Fh; JCXZ +6; SHL AX,1; RCL DX,1; LOOP -6 *)
-  EmitCodeStr("83,E1,1F,E3,06,D1,E0,D1,D2,E2,FA")
+  (* AND CX,1Fh; JZ done; loop: SHL AX,1; RCL DX,1; DEC CX; JNZ loop; done: *)
+  EmitCodeStr("83,E1,1F,74,07,D1,E0,D1,D2,49,75,F9")
 END CgLsl32Cl;
 
 PROCEDURE CgLsr32Cl*();
 BEGIN
-  (* AND CX,1Fh; JCXZ +6; SHR DX,1; RCR AX,1; LOOP -6 *)
-  EmitCodeStr("83,E1,1F,E3,06,D1,EA,D1,D8,E2,FA")
+  (* AND CX,1Fh; JZ done; loop: SHR DX,1; RCR AX,1; DEC CX; JNZ loop; done: *)
+  EmitCodeStr("83,E1,1F,74,07,D1,EA,D1,D8,49,75,F9")
 END CgLsr32Cl;
 
 PROCEDURE CgAsr32Cl*();
 BEGIN
-  (* AND CX,1Fh; JCXZ +6; SAR DX,1; RCR AX,1; LOOP -6 *)
-  EmitCodeStr("83,E1,1F,E3,06,D1,FA,D1,D8,E2,FA")
+  (* AND CX,1Fh; JZ done; loop: SAR DX,1; RCR AX,1; DEC CX; JNZ loop; done: *)
+  EmitCodeStr("83,E1,1F,74,07,D1,FA,D1,D8,49,75,F9")
 END CgAsr32Cl;
 
 PROCEDURE CgRor32Cl*();
 BEGIN
-  EmitCodeStr("83,E1,1F");    (* AND CX, 1Fh *)
-  Emit2(0E3H, 13H);                   (* JCXZ +19 (decimal 19) *)
-  Emit1(BYTE(OpPushBx));               (* PUSH BX (1) *)
-  Emit2(089H, 0C3H);                  (* MOV BX, AX (2) *)
-  EmitCodeStr("83,E3,01");    (* AND BX, 1 (3) *)
-  Emit2(0D1H, 0EAH);                  (* SHR DX, 1 (2) *)
-  Emit2(0D1H, 0D8H);                  (* RCR AX, 1 (2) *)
-  Emit2(074H, 003H);                  (* JZ +3 (2) *)
-  EmitCodeStr("81,CA,00,80"); (* OR DX, 8000h (4) *)
-  Emit1(BYTE(OpPopBx));                (* POP BX (1) *)
-  Emit2(0E2H, BYTE(-19 MOD 256))      (* LOOP -19 (2) *)
+  (* Rewritten JCXZ/LOOP-free — and the old sequence was WRONG twice over:
+     its JZ tested ZF from `SHR DX,1` (not the saved bit-0 of AX: rotates
+     don't touch ZF, but SHR does), and its `JZ +3` skipped only 3 of the
+     4-byte `OR DX,8000h`, landing mid-instruction.  Correct rotate step:
+     SHR DX,1 moves DX bit0 into CF; RCR AX,1 pulls it into AX bit15 and
+     leaves OLD AX bit0 in CF; JNC skips the wrap; else OR DX,8000h sets the
+     bit that wrapped around.
+       AND CX,1Fh; JZ done;
+       loop: SHR DX,1; RCR AX,1; JNC noset; OR DX,8000h;
+       noset: DEC CX; JNZ loop; done: *)
+  EmitCodeStr("83,E1,1F,74,0D,D1,EA,D1,D8,73,04,81,CA,00,80,49,75,F3")
 END CgRor32Cl;
 
 (* ---- FPU helpers ---- *)
