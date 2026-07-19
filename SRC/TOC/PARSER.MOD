@@ -280,9 +280,9 @@ END ParseExportedIdentList;
 PROCEDURE EmitTypeDescriptor(VAR rec: Syms.TypeDesc);
   VAR t: Syms.TypeDesc;
 BEGIN
-  rec.descOfs := Cgen.CgDpc();
+  rec.lenOrDescOrArg := Cgen.CgDpc();
   t := rec;
-  WHILE t # Syms.NoType DO Cgen.EmitDataWord(INTEGER(t.tagId)); t := t.base END;
+  WHILE t # Syms.NoType DO Cgen.EmitDataWord(INTEGER(t.tagIdOrNParams)); t := t.base END;
   Cgen.EmitDataWord(0)
 END EmitTypeDescriptor;
 
@@ -476,7 +476,7 @@ BEGIN
     IF PExpr.sc.sym = Scan.TColon THEN
       Scan.Next(PExpr.sc); rtmp := Syms.TypeInteger; ParseType(rtmp);
       CheckResultType(rtmp);
-      out.retType := rtmp
+      out.elemOrRet := rtmp
     END;
     Syms.TypeCalcArgSize(out)
   ELSE
@@ -636,7 +636,7 @@ BEGIN
     PExpr.Expect(Scan.TSemi);
     sym := existing; pt := existing.type; exported := existing.exported;
     Syms.SymOpenScope();
-    p := pt.params;
+    p := pt.symList;
     WHILE p # Syms.NoSym DO
       s := Syms.SymNewId(p.nameId, p.kind);
       s.type := p.type; s.adr := p.adr; s.typeless := p.typeless;
@@ -657,7 +657,7 @@ BEGIN
     IF PExpr.sc.sym = Scan.TColon THEN Scan.Next(PExpr.sc);
       rtmp := Syms.TypeInteger; ParseType(rtmp);
       CheckResultType(rtmp);
-      pt.retType := rtmp END;
+      pt.elemOrRet := rtmp END;
     IF exported THEN pt.isFar := TRUE END;
     PExpr.Expect(Scan.TSemi);
 
@@ -686,7 +686,7 @@ BEGIN
         Syms.TypeCalcArgSize(pt);
         Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname);
         sym.rdoffId := Rdoff.RdfAddImport(Cgen.CgObj, gname);
-        sym.codeOfs := 0;
+        sym.adr := 0;
         Syms.SymCloseScope(); RETURN
       ELSIF Strings.Equal(wordA, "INLINE") THEN
         Scan.Next(PExpr.sc); PExpr.Expect(Scan.TLparen);
@@ -697,7 +697,7 @@ BEGIN
             INC(nInl); Scan.Next(PExpr.sc)
           ELSIF PExpr.sc.sym = Scan.TIdent THEN
             wid := StrTab.Find(PExpr.sc.id);   (* 0 (unknown) matches no param *)
-            idx := 0; fp := pt.params; found := FALSE;
+            idx := 0; fp := pt.symList; found := FALSE;
             WHILE fp # Syms.NoSym DO
               IF fp.nameId = wid THEN found := TRUE; fp := Syms.NoSym
               ELSE INC(idx); fp := fp.next END
@@ -719,18 +719,18 @@ BEGIN
 
   (* emit body *)
   Syms.TypeCalcArgSize(pt);
-  (* copy BP offsets from pt^.params into scope symbols *)
-  p := pt.params;
+  (* copy BP offsets from pt^.symList into scope symbols *)
+  p := pt.symList;
   WHILE p # Syms.NoSym DO
     s := Syms.SymFindLocalId(p.nameId);
     IF s # Syms.NoSym THEN s.adr := p.adr END;
     p := p.next
   END;
 
-  sym.codeOfs := Cgen.CgPc();
+  sym.adr := Cgen.CgPc();
   IF exported THEN
     Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname);
-    Rdoff.RdfAddGlobal(Cgen.CgObj, gname, Rdoff.SegCode, sym.codeOfs)
+    Rdoff.RdfAddGlobal(Cgen.CgObj, gname, Rdoff.SegCode, sym.adr)
   END;
 
   (* save outer context *)
@@ -755,7 +755,7 @@ BEGIN
   PStmt.PatchFrameSize;
 
   IF PExpr.sc.sym = Scan.TBegin THEN
-    Scan.Next(PExpr.sc); ParseStatSeq(pt.retType)
+    Scan.Next(PExpr.sc); ParseStatSeq(pt.elemOrRet)
   END;
   PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
@@ -764,8 +764,8 @@ BEGIN
   END;
 
   PStmt.BpPatchFree(PStmt.retPatchList);
-  IF pt.isFar THEN Cgen.CgEpilogueFar(INTEGER(pt.argSize))
-  ELSE Cgen.CgEpilogue(INTEGER(pt.argSize)) END;
+  IF pt.isFar THEN Cgen.CgEpilogueFar(INTEGER(pt.lenOrDescOrArg))
+  ELSE Cgen.CgEpilogue(INTEGER(pt.lenOrDescOrArg)) END;
   WarnUnusedInScope;
   (* debug info: this procedure's params + locals (class AUTO), then close
      its scope with the proc's own code length.  Emitted here (into the same
@@ -780,7 +780,7 @@ BEGIN
       END;
       s := s.next
     END;
-    TDbg.EndScope(WORD(Cgen.CgPc() - sym.codeOfs))
+    TDbg.EndScope(WORD(Cgen.CgPc() - sym.adr))
   END;
   Syms.SymCloseScope();
 
@@ -789,7 +789,7 @@ BEGIN
   PStmt.curProcDepth := savedProcDepth;
 
   IF sym.fwdDecl THEN
-    PExpr.FwdPatchCalls(sym, sym.codeOfs);
+    PExpr.FwdPatchCalls(sym, sym.adr);
     sym.fwdDecl := FALSE
   END;
   PExpr.Expect(Scan.TSemi)
@@ -874,7 +874,7 @@ BEGIN
   WHILE s # Syms.NoSym DO
     StrTab.Get(s.nameId, nbuf);
     IF ~s.exported & (nbuf[0] # "$") &
-       (s.readCount = WORD(0)) &
+       ~s.wasRead &
        (s.kind # Syms.KImport) & (s.kind # Syms.KConst) &
        (s.kind # Syms.KType) & (s.kind # Syms.KField) &
        (s.kind # Syms.KSysProc) &

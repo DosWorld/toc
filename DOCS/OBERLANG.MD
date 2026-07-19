@@ -1362,6 +1362,22 @@ SP_TOWORD=31   /* WORD(x) type cast — compiler built-in */
 - `n` is any INTEGER expression; always interpreted as **byte count**
 - Also works when `p` is `SYSTEM.ADDRESS` (TF_ADDRESS)
 - Codegen: evaluate n into AX, `PUSH AX`, `cg_call_far(Alloc_id)`
+- **Pitfall (deliberate dialect deviation from standard Oberon-07):** in
+  standard Oberon-07, `NEW(p, n)` where `p: POINTER TO ARRAY OF T` means
+  "allocate `n` ELEMENTS" (the compiler multiplies by `SIZE(T)`). In THIS
+  dialect `n` is ALWAYS a raw byte count, with no implicit multiply by the
+  element size — the caller must write `NEW(p, n * SIZE(T))` explicitly for
+  an open-array pointer whose element size isn't 1. Writing `NEW(p, n)`
+  with `n` meant as an element count silently under-allocates whenever
+  `SIZE(T) > 1`, and the program then heap-corrupts the moment it indexes
+  past the (too-small) block — this looks exactly like a compiler bug
+  (e.g. `SYSTEM.MemAvail()` collapsing after some specific call count) but
+  is a call-site error under this dialect's rules. Confirmed not a
+  compiler bug by inspecting every existing `NEW(p, n)` call site in the
+  codebase (`SRC/LIB/SCREEN.MOD`, `SRC/TOOLS/TDINFO.MOD`): all of them use
+  `CHAR`/`BYTE`-element open arrays, where byte-count and element-count
+  are numerically identical, which is why this pitfall had never
+  surfaced before.
 
 **DISPOSE(p)** where `p: POINTER TO T` or `SYSTEM.ADDRESS`:
 - Calls `SYSTEM_Free(p)` FAR — Pascal, cleans 4 bytes. Does NOT set p to NIL.

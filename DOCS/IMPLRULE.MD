@@ -849,6 +849,44 @@ Applies across the **whole compiler AND linker**. Implemented chunk sizes:
 this is not rare). When chunking a record, grep for **all** readers of its fields
 (including `SRC/TOOLS/RDFGREP.MOD`) and convert them in the same change.
 
+**Allocator granularity — 4 KB rounding (maintainer-confirmed, 2026-07-19):**
+`SYSTEM_Alloc` grants heap memory in **4 KB (4096-byte) granules** — any
+`NEW` request, regardless of its exact requested size, actually consumes
+`ceil((requestedSize + 16-byte header) / 4096) * 4096` bytes of real heap.
+A request of 4090 bytes and a request of 4096 bytes both cost exactly one
+4 KB block; a request of 4097 bytes costs **two** 4 KB blocks (8 KB) even
+though it only needed one byte more. This means any chunk-sized allocation
+whose payload+header sits even slightly over a 4096-byte boundary wastes
+an entire extra 4 KB block, not just the small overage — the effective
+granularity for capacity planning is 4 KB, not 1 byte.
+
+**Chunk-size rule for future arenas:** size every new/resized chunk
+(records-per-node × record byte size) so the **chunk node's total
+allocation (payload + 16-byte header) stays at or just under one 4 KB
+granule** — pick N so `N * sizeof(record) + 16 <= 4096`. Do not round N to
+a power of 2 if that would cross the boundary into a second granule (e.g.
+a 42-byte record's nearest power-of-2 count, 128, costs 5,392 bytes = two
+4 KB granules — pure waste of an entire extra 4 KB per chunk); use exact
+DIV/MOD indexing instead of the LSR/AND bit-shift trick when the record
+size doesn't divide evenly into a power-of-2 chunk count (see `SYMS.MOD`'s
+`SymSlotPtr`/`TypeSlotPtr`/`AllocSym`/`AllocType`, `SymPer=110`/
+`TypePer=97`, for the reference implementation — this is not a hot path,
+one DIV/MOD per `SymPer`/`TypePer` allocations, not per access, so the
+division cost is negligible). Likewise, when picking how many chunks an
+arena's directory array should hold to reach some overall record-count
+target (e.g. an 8192-record cap), derive the chunk count via integer
+division of the target by the per-chunk count and let it land wherever it
+falls (usually just under the target) rather than rounding up to
+"cover" the target with an arbitrary chunk count — rounding up only
+buys a few extra records at the cost of a whole additional block per
+chunk if it pushes any single chunk over its own 4 KB granule.
+This keeps arena growth aligned to the underlying allocator's natural
+4 KB granule and avoids the "last chunk half-empty" tail waste discussed
+in `SIZE-REPORT.MD` §3.3 from compounding across many differently-sized
+chunk kinds. Applies to `SYMS.MOD`'s `SymChunk`/`TypeChunk` arenas and any
+future chunk-size tuning — not a retroactive requirement to re-tune
+existing chunk kinds unless they are being resized anyway.
+
 ### Symbol table: RAM pointer-record arena  ← current design (final form, 2026-07-05)
 
 `Symbol` and `TypeDesc` are `POINTER TO` records (`SymbolRec`, `TypeDescRec`)

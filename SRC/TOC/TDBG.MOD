@@ -276,11 +276,11 @@ BEGIN
   MapAdd(t, idx);            (* reserve before recursing (self-reference) *)
   nm[0] := 0X;
   IF t.form = Syms.TFArray THEN
-    elemIdx := TypeIndex(t.elem);
+    elemIdx := TypeIndex(t.elemOrRet);
     TypeSetAt(idx, BYTE(IdArray), WORD(t.size), BYTE(ClassPlain), elemIdx, nm)
   ELSIF t.form = Syms.TFRecord THEN
     firstMemb := 0; membIdx := 0;
-    fld := t.fields;
+    fld := t.symList;
     WHILE fld # Syms.NoSym DO
       StrTab.Get(fld.nameId, nm);
       info := BYTE(0);

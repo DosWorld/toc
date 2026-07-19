@@ -84,7 +84,7 @@ BEGIN
     ELSE
       Files.Write(f, "ARRAY OF ")
     END;
-    WriteType(f, t.elem);
+    WriteType(f, t.elemOrRet);
     RETURN
   END;
   IF t.form = Syms.TFPointer THEN
@@ -149,11 +149,11 @@ BEGIN
         Files.Write(f, "  BASE "); Files.Write(f, modName); Files.WriteByte(f, ORD('_')); Files.Write(f, bnm); Files.WriteLn(f)
       END
     END;
-    fld := td.fields;
+    fld := td.symList;
     WHILE fld # Syms.NoSym DO
       IF fld.exported THEN
         Files.Write(f, "  FIELD "); WName(f, fld.nameId); Files.WriteByte(f, ORD(' '));
-        WriteType(f, fld.type); Files.WriteByte(f, ORD(' ')); WInt(f, fld.offset); Files.WriteLn(f)
+        WriteType(f, fld.type); Files.WriteByte(f, ORD(' ')); WInt(f, fld.adr); Files.WriteLn(f)
       END;
       fld := fld.next
     END;
@@ -280,8 +280,8 @@ BEGIN
       pt := sym.type;
       IF (pt # Syms.NoType) & pt.isInline THEN
         Files.Write(f, "INLINE "); WQualName(f, modName, sym.nameId);
-        Files.WriteByte(f, ORD(' ')); WriteType(f, pt.retType); Files.WriteLn(f);
-        WriteParams(f, pt.params);
+        Files.WriteByte(f, ORD(' ')); WriteType(f, pt.elemOrRet); Files.WriteLn(f);
+        WriteParams(f, pt.symList);
         Files.Write(f, "  BYTES");
         nd := pt.inlineList;
         WHILE nd # NIL DO
@@ -300,8 +300,8 @@ BEGIN
         Files.Write(f, "PROC "); WQualName(f, modName, sym.nameId);
         Files.WriteByte(f, ORD(' '));
         IF (pt # Syms.NoType) & pt.isFar THEN Files.Write(f, "FAR") ELSE Files.Write(f, "NEAR") END;
-        Files.WriteByte(f, ORD(' ')); WriteType(f, pt.retType); Files.WriteLn(f);
-        IF pt # Syms.NoType THEN WriteParams(f, pt.params) END;
+        Files.WriteByte(f, ORD(' ')); WriteType(f, pt.elemOrRet); Files.WriteLn(f);
+        IF pt # Syms.NoType THEN WriteParams(f, pt.symList) END;
         Files.Write(f, "END"); Files.WriteLn(f)
       END
     END;
@@ -575,7 +575,7 @@ BEGIN
       ft := ParseDefType(line, i);
       ofs := ReadLong(line, i);
       fs := Syms.TypeAddField(curRec, pname, ft);
-      fs.offset := ofs
+      fs.adr := ofs
     ELSIF Strings.Equal(kw, "PARAM") & ((curProc # Syms.NoType) OR (curInline # Syms.NoType)) THEN
       IF curProc # Syms.NoType THEN pt := curProc ELSE pt := curInline END;
       SkipWS(line, i);
@@ -728,7 +728,7 @@ BEGIN
         pt := Syms.TypeNewProc(ret);
         pt.isInline := TRUE; pt.isFar := FALSE;
         s := Syms.SymNew(qname, Syms.KProc);
-        s.codeOfs := 0; s.rdoffId := -1;
+        s.adr := 0; s.rdoffId := -1;
         s.type := pt; s.exported := TRUE;
         s.modId := StrTab.Intern(fullname);
         curInline := pt
@@ -739,7 +739,7 @@ BEGIN
           pt  := Syms.TypeNewProc(ret);
           pt.isFar := Strings.Equal(tok, "FAR");
           s := Syms.SymNew(qname, Syms.KProc);
-          s.codeOfs := 0; s.rdoffId := -1;
+          s.adr := 0; s.rdoffId := -1;
           s.type := pt; s.exported := TRUE;
           s.modId := StrTab.Intern(fullname);
           curProc := pt
@@ -748,7 +748,7 @@ BEGIN
           seg := INTEGER(ReadLong(line, i));
           ofs := ReadLong(line, i);
           s := Syms.SymNew(qname, Syms.KProc);
-          s.codeOfs := ofs; s.rdoffId := -1;
+          s.adr := ofs; s.rdoffId := -1;
           s.type := Syms.TypeNewProc(Syms.TypeNotype);
           s.exported := TRUE; s.modId := StrTab.Intern(fullname)
         END

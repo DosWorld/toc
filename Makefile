@@ -35,6 +35,7 @@ test:
 	$(MAKE) clean
 	$(MAKE) all
 	make -f TESTS/Makefile.man test
+	bash TESTS/test_tasm.sh
 
 testall: tools
 	cp BIN/TOC.EXE TOC.EXE

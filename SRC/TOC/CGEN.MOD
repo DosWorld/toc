@@ -84,6 +84,21 @@ TYPE
 VAR
   CgObj*: Rdoff.ObjFile;
 
+  (* ---- condition-fusion single-frame relay ----
+     Armed immediately before one top-level ParseExpression call that is
+     known to be a boolean condition (IF/WHILE/&/OR/~ operand); consumed by
+     the NEXT CgSetcc call, which then emits a direct branch to condBp
+     instead of materializing 0/1 in AX.  MUST be disarmed (condArmed:=FALSE)
+     by CgSetcc on every use (hit or not) so a nested ParseExpression call for
+     an unrelated parenthesized arithmetic subexpression never sees a stale
+     armed flag — the flag is single-shot, not saved/restored across
+     recursion, so any recursive re-entry before the outer CgSetcc fires
+     naturally finds it already consumed. *)
+  condArmed*:    BOOLEAN;
+  condWantTrue*: BOOLEAN;   (* branch to condBp when the condition is NOT this value *)
+  condBp*:       Backpatch;
+  condHit*:      BOOLEAN;   (* set by CgSetcc when it actually consumed condArmed *)
+
 PROCEDURE CgLoadItem*(VAR item: Item); FORWARD;
 PROCEDURE CgLoadImm*(val: INTEGER); FORWARD;
 PROCEDURE CgDerefFar(); FORWARD;
@@ -120,6 +135,14 @@ BEGIN
   IF CgObj = NIL THEN
     LogErr.Error("out of memory (codegen object)"); RETURN
   END;
+  (* condArmed/condWantTrue/condHit are module globals, never zero-initialized
+     by this runtime (see DOCS/IMPLRULE.MD) — condArmed left uninitialized
+     decoded as nonzero (TRUE) in at least one build, silently leaving
+     condition-fusion "armed" for the entire rest of the compile after the
+     very first ParseCondExpr call, corrupting unrelated parsing/codegen
+     throughout the program (a real, caught-by-testing bug — see
+     SIZE-REPORT.MD 2.1 "full &/OR/~ fusion"). *)
+  condArmed := FALSE; condWantTrue := FALSE; condHit := FALSE;
   Rdoff.RdfInit(CgObj)   (* errors latch in LogErr; caller checks LogErr.HaveErr() *)
 END CgInit;
 
@@ -835,6 +858,11 @@ BEGIN
   EmitCodeStr("5B,59")  (* POP BX; POP CX *)
 END CgPopCxbx;
 
+PROCEDURE CgPopAxdx*();
+BEGIN
+  EmitCodeStr("58,5A")  (* POP AX; POP DX *)
+END CgPopAxdx;
+
 PROCEDURE CgAdd32*();
 BEGIN
   (* ADD AX,BX / ADC DX,CX *)
@@ -909,12 +937,28 @@ END CgCmp32Bool;
 (* ---- setcc ---- *)
 
 PROCEDURE CgSetcc*(jcc: INTEGER);
-  VAR pc0: LONGINT;
+  VAR pc0: LONGINT; branchJcc: INTEGER;
 BEGIN
-  pc0 := CgPc();
-  Emit2(BYTE(jcc), BYTE(4));           (* Jcc +4 *)
-  CgFalseTrue;
-  AssertEmitLen(pc0, 9)
+  IF condArmed THEN
+    condArmed := FALSE; condHit := TRUE;
+    (* Flags are fresh here (every CgSetcc caller emits exactly one
+       flag-setting instruction immediately before calling CgSetcc — see
+       bigopt.md 2.1).  Branch straight on those flags instead of
+       materializing 0/1 then re-testing. *)
+    (* CgCondNear(Y, bp) branches to bp when Y is TRUE (falls through when Y
+       false — see CgCondNear: it skips the near JMP via InvertJcc(Y), so
+       the JMP itself executes exactly when Y holds).  We want: branch to
+       condBp when the condition is NOT condWantTrue.
+       - condWantTrue=TRUE:  branch to bp when jcc false -> CgCondNear(InvertJcc(jcc), bp)
+       - condWantTrue=FALSE: branch to bp when jcc true  -> CgCondNear(jcc, bp) *)
+    IF condWantTrue THEN branchJcc := InvertJcc(jcc) ELSE branchJcc := jcc END;
+    CgCondNear(branchJcc, condBp)
+  ELSE
+    pc0 := CgPc();
+    Emit2(BYTE(jcc), BYTE(4));           (* Jcc +4 *)
+    CgFalseTrue;
+    AssertEmitLen(pc0, 9)
+  END
 END CgSetcc;
 
 PROCEDURE CgCmp32Eq*();

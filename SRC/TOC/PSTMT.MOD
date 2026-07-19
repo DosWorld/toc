@@ -72,7 +72,7 @@ BEGIN
     val := INTEGER(it.val)
   ELSIF (it.mode = Cgen.MGlobal) & (tt # Syms.NoType) &
         (tt.form = Syms.TFArray) & (tt.len = 2) &
-        (tt.elem # Syms.NoType) & (tt.elem.form = Syms.TFChar) THEN
+        (tt.elemOrRet # Syms.NoType) & (tt.elemOrRet.form = Syms.TFChar) THEN
     val := INTEGER(Rdoff.PeekDataByte(Cgen.CgObj, it.adr))
   ELSE
     PExpr.Error("constant expected in CASE label"); val := 0
@@ -83,18 +83,17 @@ END ParseConstLabel;
 (* ---- IF ---- *)
 
 PROCEDURE ParseIf(retType: Syms.TypeDesc);
-  VAR cond: Cgen.Item; jf: Cgen.Backpatch; endList: BpNode; more: BOOLEAN;
+  VAR cond: Cgen.Item; jf: PExpr.CondBpNode; endList: BpNode; more: BOOLEAN;
 BEGIN
   Scan.Next(PExpr.sc);  (* consume IF *)
   endList := NIL; more := TRUE;
   WHILE more DO
-    PExpr.ParseExpression(cond); Cgen.CgLoadItem(cond);
-    Cgen.CgTestAx();
-    Cgen.CgCondNear(Cgen.OpJz, jf);
+    jf := NIL;
+    PExpr.ParseCondExpr(cond, TRUE, jf);
     PExpr.Expect(Scan.TThen);
     ParseStatementSequence(retType);
     endList := BpPush(endList); Cgen.CgJmpNear(endList^.bp);
-    Cgen.CgPatchNear(jf);
+    PExpr.CondBpPatchFree(jf);
     IF PExpr.sc.sym = Scan.TElsif THEN Scan.Next(PExpr.sc)
     ELSE more := FALSE
     END
@@ -109,18 +108,17 @@ END ParseIf;
 (* ---- WHILE ---- *)
 
 PROCEDURE ParseWhile(retType: Syms.TypeDesc);
-  VAR cond: Cgen.Item; jf: Cgen.Backpatch; loopTop: LONGINT; more: BOOLEAN;
+  VAR cond: Cgen.Item; jf: PExpr.CondBpNode; loopTop: LONGINT; more: BOOLEAN;
 BEGIN
   Scan.Next(PExpr.sc);
   loopTop := Cgen.CgPc(); more := TRUE;
   WHILE more DO
-    PExpr.ParseExpression(cond); Cgen.CgLoadItem(cond);
-    Cgen.CgTestAx();
-    Cgen.CgCondNear(Cgen.OpJz, jf);
+    jf := NIL;
+    PExpr.ParseCondExpr(cond, TRUE, jf);
     PExpr.Expect(Scan.TDo);
     ParseStatementSequence(retType);
     Cgen.CgJmpBack(loopTop);
-    Cgen.CgPatchNear(jf);
+    PExpr.CondBpPatchFree(jf);
     IF PExpr.sc.sym = Scan.TElsif THEN Scan.Next(PExpr.sc)
     ELSE more := FALSE
     END
@@ -642,7 +640,7 @@ BEGIN
         Cgen.Emit2(085H, 0D2H);                 (* TEST DX, DX *)
         Cgen.CgCondShort(074H, bpNil);          (* JZ .skip *)
         Cgen.CgDxaxToEsbx();
-        Cgen.CgStoreWordEsbxImm(INTEGER(ptt.base.descOfs));
+        Cgen.CgStoreWordEsbxImm(INTEGER(ptt.base.lenOrDescOrArg));
         Cgen.Emit2(040H, 040H);                 (* INC AX / INC AX *)
         Cgen.CgPatchShort(bpNil)
       END;
@@ -989,13 +987,10 @@ BEGIN
          Also: `s^.f := x` / `a[i] := x` reads the root (the deref/index
          requires loading its value), so item.isRef means root was read. *)
       IF item.rootSym # Syms.NoSym THEN
-        IF (item.rootSym.kind = Syms.KVarParam) &
-           (item.rootSym.readCount < WORD(0FFFFH)) THEN
-          INC(item.rootSym.readCount)
+        IF item.rootSym.kind = Syms.KVarParam THEN
+          item.rootSym.wasRead := TRUE
         END;
-        IF item.isRef & (item.rootSym.readCount < WORD(0FFFFH)) THEN
-          INC(item.rootSym.readCount)
-        END
+        IF item.isRef THEN item.rootSym.wasRead := TRUE END
       END;
       IF (item.mode = Cgen.MReg) & item.isRef THEN
         Cgen.EmitCodeStr("06,53")  (* PUSH ES; PUSH BX *)
@@ -1287,11 +1282,11 @@ BEGIN
       pt := item.type;
       IF varRef THEN
         Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
-        IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
+        IF (PExpr.sc.sym = Scan.TLparen) OR (pt.tagIdOrNParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
-        Cgen.CgCallProcVarRefTail(pt.argSize)
+        Cgen.CgCallProcVarRefTail(pt.lenOrDescOrArg)
       ELSE
-        IF (PExpr.sc.sym = Scan.TLparen) OR (pt.nParams > 0) THEN
+        IF (PExpr.sc.sym = Scan.TLparen) OR (pt.tagIdOrNParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
         (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
         IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
@@ -1299,7 +1294,7 @@ BEGIN
       END
     ELSIF (item.mode = Cgen.MProc) & (item.type # Syms.NoType) & ItemInline(item) THEN
       PExpr.MarkRead(item);
-      IF (PExpr.sc.sym = Scan.TLparen) OR (item.type.nParams > 0) THEN
+      IF (PExpr.sc.sym = Scan.TLparen) OR (item.type.tagIdOrNParams > 0) THEN
         PExpr.EmitInlineCall(item.type) END
     ELSIF (item.mode = Cgen.MProc) OR (item.mode = Cgen.MImport) THEN
       PExpr.MarkRead(item);
@@ -1307,7 +1302,7 @@ BEGIN
       isImp := (item.mode = Cgen.MImport); isFr := item.isFar;
       pt2 := item.type;
       IF pt2 = Syms.NoType THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
-      IF (PExpr.sc.sym = Scan.TLparen) OR (pt2.nParams > 0) THEN
+      IF (PExpr.sc.sym = Scan.TLparen) OR (pt2.tagIdOrNParams > 0) THEN
         PExpr.ParseActualParameters(pt2) END;
       IF isImp & isFr THEN Cgen.CgCallFar(rdId)
       ELSIF isImp THEN Cgen.CgCallNear(rdId)

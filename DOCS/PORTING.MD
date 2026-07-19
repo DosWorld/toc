@@ -387,6 +387,11 @@ DISPOSE(p);      (* free; does NOT set p to NIL *)
 - `NIL` = 0000:0000 (both segment and offset are zero).
 - `p = NIL` compares both words; testing `p # NIL` before deref is always correct.
 - `NEW(p, n)` allocates `n` bytes (for `SYSTEM.ADDRESS` or sized allocation).
+  This holds even when `p: POINTER TO ARRAY OF T` with `SIZE(T) > 1` — `n`
+  is NOT an element count here (a deliberate deviation from standard
+  Oberon-07's `NEW(p, n)` semantics for open-array pointers). Write
+  `NEW(p, n * SIZE(T))` explicitly when you mean "n elements"; see
+  `DOCS/OBERLANG.MD` §"NEW and DISPOSE" for the full pitfall writeup.
 - Heap is managed by the runtime (`SYSTEM_Alloc` / `SYSTEM_Free`); there is no GC.
 
 **All pointers are FAR (4 bytes).**  On 8086 real mode, every heap object lives in its own memory segment; the pointer carries both segment and offset.

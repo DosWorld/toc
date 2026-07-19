@@ -1,13 +1,13 @@
-(*D-*)
+(*D-,A-*)
 MODULE Syms;
 (*
   Symbol table: types, symbols, scopes, predeclared universe.
 
   Storage model (RAM, pointer-based — opt.md §12 final form): Symbol and
   TypeDesc are POINTERS to records that live inside chunked RAM arenas
-  (ChunkPer records per chunk, bump-allocated, never moved).  There is no
-  handle indirection and no Get/Set copy API: callers read and write record
-  fields directly through the pointer (auto-deref: s.kind == s^.kind).
+  (SymPer/TypePer records per chunk, bump-allocated, never moved).  There is
+  no handle indirection and no Get/Set copy API: callers read and write
+  record fields directly through the pointer (auto-deref: s.kind == s^.kind).
 
   The arena keeps zero-leak trivial: SymsFree DISPOSEs whole chunks — no
   per-record heap headers, no record walking.  NewSymRec/NewTypeDesc fully
@@ -101,13 +101,25 @@ CONST
   MaxLevel* = 8;
   NameLen*  = 40;
 
-  (* Arena geometry: 256 records per chunk; 32 chunks each → up to 8192
-     symbols / 8192 types (matches StrTab's cap).  Peak self-host need
-     measured 2026-07-04: 1,673 syms / 817 types. *)
-  ChunkBits = 8;
-  ChunkPer  = 256;
-  MaxSymChunks  = 32;
-  MaxTypeChunks = 32;
+  (* Arena geometry (maintainer directive 2026-07-19: size each chunk's
+     total node allocation, payload + 16-byte heap header, to just under a
+     4 KB boundary — see DOCS/IMPLRULE.MD "Chunk-size rule for future
+     arenas").  SymbolRec (37 B) and TypeDescRec (42 B) don't divide evenly
+     into a power-of-2 count near 4 KB, so SymPer/TypePer use plain
+     DIV/MOD indexing (SymIdxChunk/SymIdxSlot etc. below) instead of the
+     former LSR/AND bit-shift trick, which required a power-of-2 ChunkPer
+     shared by both arenas. This is not a hot path (one chunk-boundary
+     check per SymPer/TypePer allocations, not per access), so the
+     division cost is negligible.
+     SymPer=110 (110*37+16=4086 B), TypePer=97 (97*42+16=4090 B).
+     MaxSymChunks/MaxTypeChunks sized to preserve the historical 8192-
+     record cap (matches StrTab's MaxEnt*EntPer cap) with the new,
+     smaller per-chunk counts.  Peak self-host need measured 2026-07-04:
+     1,673 syms / 817 types. *)
+  SymPer  = 110;
+  TypePer = 97;
+  MaxSymChunks  = 74;   (* 74*110 = 8140, just under the 8192 cap *)
+  MaxTypeChunks = 84;   (* 84*97  = 8148, just under the 8192 cap *)
 
   (* small-record chunking: elements per chunk node (amortizes the 16-byte
      heap-block header over many entries instead of one) *)
@@ -149,20 +161,28 @@ TYPE
     form*:       INTEGER;
     size*:       LONGINT;
     align*:      INTEGER;
+    (* TFArray: element count (-1 = open array). TFArray-only; TFRecord and
+       TFProc do not use this field (they use lenOrDescOrArg below). *)
     len*:        LONGINT;
-    elem*:       TypeDesc;
-    fields*:     Symbol;
-    fieldsTail*: Symbol;
-    base*:       TypeDesc;
-    tagOfs*:     INTEGER;
-    nFields*:    INTEGER;
-    tagId*:      INTEGER;
-    descOfs*:    LONGINT;
-    params*:     Symbol;
-    paramsTail*: Symbol;
-    retType*:    TypeDesc;
-    nParams*:    INTEGER;
-    argSize*:    LONGINT;
+    (* TFArray: element type. TFProc: return type.
+       Mutually exclusive by `form`. *)
+    elemOrRet*:  TypeDesc;
+    (* TFRecord: field-chain head. TFProc: param-chain head.
+       Mutually exclusive by `form`. *)
+    symList*:     Symbol;
+    (* TFRecord: field-chain tail. TFProc: param-chain tail.
+       Mutually exclusive by `form`. *)
+    symListTail*: Symbol;
+    base*:       TypeDesc;  (* TFRecord: extension base type. TFPointer: pointee type. *)
+    (* TFRecord: this record's unique runtime type tag id.
+       TFProc: parameter count.
+       Mutually exclusive by `form`. *)
+    tagIdOrNParams*: INTEGER;
+    (* TFRecord: byte offset of the runtime type-tag word / descriptor.
+       TFProc: total argument-block size in bytes.
+       TFArray does not use this field (it uses `len` above).
+       Mutually exclusive by `form`. *)
+    lenOrDescOrArg*: LONGINT;
     isFar*:      BOOLEAN;
     isInline*:   BOOLEAN;
     inlineList*: InlineNode;
@@ -177,17 +197,21 @@ TYPE
     type*:       TypeDesc;
     level*:      INTEGER;
     val*:        LONGINT;
+    (* KVar/KParam/KVarParam: variable's runtime address/frame offset.
+       KConst: for consts whose initializer is Cgen.MGlobal-mode, the aliased
+       global address (secondary to `val`).
+       KProc: procedure's code offset (former `codeOfs`).
+       KField: field's byte offset within its record (former `offset`).
+       All uses mutually exclusive by `kind` — shares one physical slot. *)
     adr*:        LONGINT;
-    codeOfs*:    LONGINT;
     rdoffId*:    INTEGER;
     fwdDecl*:    BOOLEAN;
     fwdPatches*: FwdNode;
     typeless*:   BOOLEAN;
-    offset*:     LONGINT;
     modId*:      WORD;    (* StrTab id: import's real module name / imported
                              proc's full link name; 0 = none *)
-    sysId*:      INTEGER;
-    readCount*:  WORD;
+    sysId*:      BYTE;    (* SysProc id: max value 32 (SpSize), fits BYTE *)
+    wasRead*:    BOOLEAN;
     declLine*:   INTEGER;
     next*:       Symbol
   END;
@@ -206,12 +230,12 @@ TYPE
      the record pointers handed out stay valid until SymsFree. *)
   SymChunk = POINTER TO SymChunkDesc;
   SymChunkDesc = RECORD
-    s: ARRAY ChunkPer OF SymbolRec
+    s: ARRAY SymPer OF SymbolRec
   END;
 
   TypeChunk = POINTER TO TypeChunkDesc;
   TypeChunkDesc = RECORD
-    t: ARRAY ChunkPer OF TypeDescRec
+    t: ARRAY TypePer OF TypeDescRec
   END;
 
 VAR
@@ -317,22 +341,22 @@ END FwdAppend;
 PROCEDURE SymSlotPtr(idx: WORD): Symbol;
   VAR p: Symbol;
 BEGIN
-  p := SYSTEM.ADR(symDir[SYSTEM.LSR(idx, ChunkBits)]^.s[SYSTEM.AND(idx, ChunkPer - 1)]);
+  p := SYSTEM.ADR(symDir[idx DIV WORD(SymPer)]^.s[idx MOD WORD(SymPer)]);
   RETURN p
 END SymSlotPtr;
 
 PROCEDURE TypeSlotPtr(idx: WORD): TypeDesc;
   VAR p: TypeDesc;
 BEGIN
-  p := SYSTEM.ADR(typeDir[SYSTEM.LSR(idx, ChunkBits)]^.t[SYSTEM.AND(idx, ChunkPer - 1)]);
+  p := SYSTEM.ADR(typeDir[idx DIV WORD(TypePer)]^.t[idx MOD WORD(TypePer)]);
   RETURN p
 END TypeSlotPtr;
 
 PROCEDURE AllocSym(): Symbol;
   VAR c: WORD;
 BEGIN
-  IF SYSTEM.AND(symCount, ChunkPer - 1) = 0 THEN   (* next slot opens a chunk *)
-    c := SYSTEM.LSR(symCount, ChunkBits);
+  IF symCount MOD WORD(SymPer) = 0 THEN   (* next slot opens a chunk *)
+    c := symCount DIV WORD(SymPer);
     IF c >= WORD(MaxSymChunks) THEN
       LogErr.Error("too many symbols");
       IF symCount = 0 THEN RETURN symOom END;
@@ -354,8 +378,8 @@ END AllocSym;
 PROCEDURE AllocType(): TypeDesc;
   VAR c: WORD;
 BEGIN
-  IF SYSTEM.AND(typeCount, ChunkPer - 1) = 0 THEN
-    c := SYSTEM.LSR(typeCount, ChunkBits);
+  IF typeCount MOD WORD(TypePer) = 0 THEN
+    c := typeCount DIV WORD(TypePer);
     IF c >= WORD(MaxTypeChunks) THEN
       LogErr.Error("too many types");
       IF typeCount = 0 THEN RETURN typeOom END;
@@ -405,19 +429,12 @@ BEGIN
   ELSE t.align := 0
   END;
   t.len         := 0;
-  t.elem        := NIL;
-  t.fields      := NIL;
-  t.fieldsTail  := NIL;
+  t.elemOrRet   := NIL;
+  t.symList     := NIL;
+  t.symListTail := NIL;
   t.base        := NIL;
-  t.tagOfs      := -1;
-  t.nFields     := 0;
-  t.tagId       := 0;
-  t.descOfs     := 0;
-  t.params      := NIL;
-  t.paramsTail  := NIL;
-  t.retType     := NIL;
-  t.nParams     := 0;
-  t.argSize     := 0;
+  t.tagIdOrNParams := 0;
+  t.lenOrDescOrArg := 0;
   t.isFar       := FALSE;
   t.isInline    := FALSE;
   t.inlineList  := NIL;
@@ -436,15 +453,13 @@ BEGIN
   s.level       := 0;
   s.val         := 0;
   s.adr         := 0;
-  s.codeOfs     := -1;
   s.rdoffId     := -1;
   s.fwdDecl     := FALSE;
   s.fwdPatches  := NIL;
   s.typeless    := FALSE;
-  s.offset      := 0;
   s.modId       := 0;
-  s.sysId       := 0;
-  s.readCount   := 0;
+  s.sysId       := BYTE(0);
+  s.wasRead     := FALSE;
   s.declLine    := 0;
   s.next        := NIL;
   RETURN s
@@ -461,7 +476,7 @@ PROCEDURE TypeNewArray*(elem: TypeDesc; len: LONGINT): TypeDesc;
   VAR t: TypeDesc;
 BEGIN
   t := NewTypeDesc(TFArray, 0);
-  t.elem := elem;
+  t.elemOrRet := elem;
   t.len  := len;
   IF len >= 0 THEN t.size := len * elem.size
   ELSE t.size := SzPointer
@@ -474,7 +489,7 @@ PROCEDURE TypeNewRecord*(base: TypeDesc): TypeDesc;
 BEGIN
   t := NewTypeDesc(TFRecord, 0);
   t.base  := base;
-  t.tagId := NextTagId;
+  t.tagIdOrNParams := NextTagId;
   INC(NextTagId);
   IF base # NIL THEN t.size := base.size END;
   RETURN t
@@ -490,13 +505,12 @@ BEGIN
   END;
   off := rec.size;
   IF (align > 1) & (off MOD align # 0) THEN off := off + align - (off MOD align) END;
-  f.offset := off;
+  f.adr := off;
   rec.size := off + ftype.size;
-  INC(rec.nFields);
-  IF rec.fieldsTail # NIL THEN rec.fieldsTail.next := f
-  ELSE rec.fields := f
+  IF rec.symListTail # NIL THEN rec.symListTail.next := f
+  ELSE rec.symList := f
   END;
-  rec.fieldsTail := f;
+  rec.symListTail := f;
   RETURN f
 END TypeAddField;
 
@@ -518,7 +532,7 @@ PROCEDURE TypeNewProc*(ret: TypeDesc): TypeDesc;
   VAR t: TypeDesc;
 BEGIN
   t := NewTypeDesc(TFProc, SzPointer);
-  IF ret # NIL THEN t.retType := ret ELSE t.retType := TypeNotype END;
+  IF ret # NIL THEN t.elemOrRet := ret ELSE t.elemOrRet := TypeNotype END;
   RETURN t
 END TypeNewProc;
 
@@ -529,11 +543,11 @@ BEGIN
   p := NewSymRec(StrTab.Intern(name), 0);
   IF isVar THEN p.kind := KVarParam ELSE p.kind := KParam END;
   p.type := ptype;
-  INC(pt.nParams);
-  IF pt.paramsTail # NIL THEN pt.paramsTail.next := p
-  ELSE pt.params := p
+  INC(pt.tagIdOrNParams);
+  IF pt.symListTail # NIL THEN pt.symListTail.next := p
+  ELSE pt.symList := p
   END;
-  pt.paramsTail := p;
+  pt.symListTail := p;
   RETURN p
 END TypeAddParam;
 
@@ -560,16 +574,16 @@ PROCEDURE TypeCalcArgSize*(pt: TypeDesc);
   VAR p: Symbol; total, ofs: LONGINT;
 BEGIN
   total := 0;
-  p := pt.params;
+  p := pt.symList;
   WHILE p # NIL DO
     total := total + ParamSlotSize(p);
     p := p.next
   END;
-  pt.argSize := total;
+  pt.lenOrDescOrArg := total;
   IF pt.isFar THEN ofs := LONGINT(6) + total
   ELSE ofs := LONGINT(4) + total
   END;
-  p := pt.params;
+  p := pt.symList;
   WHILE p # NIL DO
     ofs := ofs - ParamSlotSize(p);
     p.adr := ofs;
@@ -639,10 +653,10 @@ BEGIN
   IF a = b THEN RETURN TRUE END;
   IF a.form # b.form THEN RETURN FALSE END;
   IF a.form = TFArray THEN
-    RETURN (a.len = b.len) & TypeStructEq(a.elem, b.elem)
+    RETURN (a.len = b.len) & TypeStructEq(a.elemOrRet, b.elemOrRet)
   END;
   IF a.form = TFRecord THEN
-    IF (a.fields = b.fields) & (a.size = b.size) THEN RETURN TRUE END;
+    IF (a.symList = b.symList) & (a.size = b.size) THEN RETURN TRUE END;
     RETURN TypeIsExtension(b, a) OR TypeIsExtension(a, b)
   END;
   IF a.form = TFPointer THEN
@@ -661,19 +675,19 @@ BEGIN
      identity spuriously rejected it for value params while the VAR path
      already used TypeStructEq. *)
   IF (formal.form = TFArray) & (formal.len < 0) & (actual.form = TFArray) THEN
-    RETURN TypeStructEq(formal.elem, actual.elem)
+    RETURN TypeStructEq(formal.elemOrRet, actual.elemOrRet)
   END;
   IF (formal.form = TFArray) & (actual.form = TFArray) &
      (formal.len >= 0) & (formal.len = actual.len) &
-     TypeStructEq(formal.elem, actual.elem) THEN RETURN TRUE END;
+     TypeStructEq(formal.elemOrRet, actual.elemOrRet) THEN RETURN TRUE END;
   IF isVar THEN
     IF (formal.form = TFArray) & (actual.form = TFArray) &
        (formal.len >= 0) & (formal.len = actual.len) &
-       TypeStructEq(formal.elem, actual.elem) THEN
+       TypeStructEq(formal.elemOrRet, actual.elemOrRet) THEN
       RETURN TRUE
     END;
     IF (formal.form = TFRecord) & (actual.form = TFRecord) THEN
-      IF (formal.fields = actual.fields) & (formal.size = actual.size) THEN
+      IF (formal.symList = actual.symList) & (formal.size = actual.size) THEN
         RETURN TRUE
       END;
       RETURN TypeIsExtension(actual, formal)
@@ -682,7 +696,7 @@ BEGIN
       IF formal.base = actual.base THEN RETURN TRUE END;
       IF (formal.base # NIL) & (actual.base # NIL) &
          (formal.base.form = TFRecord) & (actual.base.form = TFRecord) THEN
-        IF (formal.base.fields = actual.base.fields) &
+        IF (formal.base.symList = actual.base.symList) &
            (formal.base.size = actual.base.size) THEN
           RETURN TRUE
         END;
@@ -691,7 +705,7 @@ BEGIN
       IF (formal.base # NIL) & (actual.base # NIL) &
          (formal.base.form = TFArray) & (actual.base.form = TFArray) &
          (formal.base.len = actual.base.len) &
-         TypeStructEq(formal.base.elem, actual.base.elem) THEN
+         TypeStructEq(formal.base.elemOrRet, actual.base.elemOrRet) THEN
         RETURN TRUE
       END;
       RETURN FALSE
@@ -829,7 +843,7 @@ PROCEDURE SymFindFieldId*(rec: TypeDesc; id: WORD): Symbol;
 BEGIN
   IF id = 0 THEN RETURN NIL END;
   WHILE rec # NIL DO
-    f := rec.fields;
+    f := rec.symList;
     WHILE f # NIL DO
       IF f.nameId = id THEN RETURN f END;
       f := f.next
@@ -889,7 +903,7 @@ PROCEDURE PredefSysProc(name: ARRAY OF CHAR; id: INTEGER);
   VAR s: Symbol;
 BEGIN
   s := SymNew(name, KSysProc);
-  s.sysId := id
+  s.sysId := BYTE(id)
 END PredefSysProc;
 
 (* Reset the arenas for a fresh compile. *)

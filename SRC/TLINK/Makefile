@@ -13,7 +13,7 @@
 #   make install  — copy TLINK.exe to BIN/TLINK.EXE
 #   make clean    — remove .om files, TLINK.exe, and local setup files
 
-BOOT_OC = ../../BOOT/TOC.EXE
+BIN_OC = ../../BIN/TOC.EXE
 BIN_OM  = ../../BIN/OBERON.OM
 XT      = xt
 
@@ -21,24 +21,24 @@ XT      = xt
 # rationale as SRC/TASM/Makefile — the stdlib OBERON.OM lives outside this
 # dir, so it's copied locally rather than reached via a DOS path.
 XTRUN  = $(XT) run --max=300000000
-OCBOOT = TOC_BOOT.EXE
+OC = TOC.EXE
 
 all: TLINK.exe
 
-$(OCBOOT): $(BOOT_OC)
-	cp $(BOOT_OC) $(OCBOOT)
+$(OC): $(BIN_OC)
+	cp $(BIN_OC) $(OC)
 
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
-TLINK.exe: TLINK.MOD $(OCBOOT) OBERON.OM
-	$(XTRUN) $(OCBOOT) /LOG=debug /ENTRY=Run TLINK.MOD /M
+TLINK.exe: TLINK.MOD $(OC) OBERON.OM
+	$(XTRUN) $(OC) /LOG=debug /ENTRY=Run TLINK.MOD /M
 
 install: TLINK.exe
 	mkdir -p ../../BIN
 	cp TLINK.exe ../../BIN/TLINK.EXE
 
 clean:
-	rm -f *.om *.OM *.rdf *.RDF *.def *.DEF *.TMP TLINK.exe TLINK.EXE $(OCBOOT) OBERON.OM
+	rm -f *.om *.OM *.rdf *.RDF *.def *.DEF *.TMP TLINK.exe TLINK.EXE $(OC) OBERON.OM
 
 .PHONY: all install clean

@@ -2,11 +2,41 @@
 MODULE PExpr;
 IMPORT Scan, Syms, Cgen, Rdoff, Strings, LogErr, StrTab;
 
+(* ---- CondBpNode linked list for &/OR chain backpatches ----
+   Mirrors PSTMT.MOD's BpNode exactly (same reason: a &/OR chain of N links
+   emits N separate conditional-jump instructions that must all eventually
+   be patched to the SAME final target — a single shared Cgen.Backpatch
+   variable can only describe one pending jump, so every link but the last
+   silently loses its own patch (a real bug found and fixed in "full
+   &/OR/~ fusion", see SIZE-REPORT.MD 2.1: the abandoned jump's rel16
+   stayed 0, a self-referencing no-op, since only the LAST CgCondNear call's
+   Backpatch survived in the shared variable).  Can't reuse PSTMT.BpNode
+   directly: PSTMT imports PExpr, not the other way around. *)
+TYPE
+  CondBpNode* = POINTER TO CondBpNodeDesc;
+  CondBpNodeDesc* = RECORD
+    bp*:   Cgen.Backpatch;
+    next*: CondBpNode
+  END;
+
 VAR
   sc*:         Scan.Scanner;
   modUsesFpu*: BOOLEAN;
   boundsChk*:  BOOLEAN;
   modName*:    ARRAY 33 OF CHAR;
+  condBpOomNode: CondBpNode;  (* OOM fallback, mirrors PSTMT.bpOomNode *)
+  (* condBpList: the CURRENT condition's pending-jump list, threaded through
+     ParseAndTail/ParseOrTail (called from ParseTerm/ParseSimpleExpression's
+     fixed, single call sites with no room in their signature for an extra
+     VAR parameter without touching the surrounding arithmetic dispatch —
+     see SIZE-REPORT.MD 2.1 "full &/OR/~ fusion" for why ParseTerm/
+     ParseSimpleExpression's own signatures were deliberately left alone).
+     Set by ParseCondExpr immediately before parsing, read back immediately
+     after — never held live across any OTHER top-level condition's parse,
+     so no save/restore discipline is needed here (unlike Cgen.condArmed,
+     which DOES need save/restore because it is read from many unrelated
+     recursive descents, not just this one fixed relay point). *)
+  condBpList: CondBpNode;
 
 (* ---- error helpers ----
    All diagnostics carry the source position via LogErr.ErrorInFile
@@ -52,14 +82,51 @@ END GetSystemImport;
 
 PROCEDURE MarkRead*(VAR item: Cgen.Item);
 BEGIN
-  IF item.rootSym # Syms.NoSym THEN
-    IF item.rootSym.readCount < WORD(0FFFFH) THEN INC(item.rootSym.readCount) END
-  END
+  IF item.rootSym # Syms.NoSym THEN item.rootSym.wasRead := TRUE END
 END MarkRead;
+
+(* ---- CondBpNode push/patch (mirrors PSTMT.BpPush/BpPatchFree) ---- *)
+
+PROCEDURE CondBpPush*(head: CondBpNode): CondBpNode;
+  VAR n: CondBpNode;
+BEGIN
+  NEW(n);
+  IF n = NIL THEN
+    LogErr.Error("out of memory (backpatch node)");
+    RETURN condBpOomNode
+  END;
+  n^.next := head; RETURN n
+END CondBpPush;
+
+(* Patches every pending jump in the list to the CURRENT code position
+   (Cgen.CgPatchNear resolves relative to Cgen.CgPc() at the moment it is
+   called) — call this exactly where the single `CgPatchNear(jf)` used to
+   be called, i.e. once the IF/WHILE body has been fully parsed and we're
+   sitting at the "skip body" / "loop exit" address. *)
+PROCEDURE CondBpPatchFree*(VAR head: CondBpNode);
+  VAR n, nx: CondBpNode;
+BEGIN
+  n := head;
+  WHILE n # NIL DO nx := n^.next; Cgen.CgPatchNear(n^.bp); DISPOSE(n); n := nx END;
+  head := NIL
+END CondBpPatchFree;
 
 (* ---- forward declarations ---- *)
 PROCEDURE ParseExpression*(VAR item: Cgen.Item); FORWARD;
 PROCEDURE ParseDesignator*(VAR item: Cgen.Item); FORWARD;
+(* ParseCondExpr/ParseCondFactor: branch-mode condition parsing (2.1 "full
+   &/OR/~ fusion", see SIZE-REPORT.MD).  Forward-declared here because
+   ParseAndTail/ParseOrTail (which appear earlier in this file) call
+   ParseCondFactor for a &/OR operand when Cgen.condArmed is set.
+   `bpList` accumulates every pending jump that must end up at the SAME
+   final target (the IF/WHILE "skip body"/"loop exit" address) — a &/OR
+   chain of N links emits N separate conditional jumps, and a single
+   Cgen.Backpatch can only describe ONE of them, so every link pushes its
+   own node onto this list; the caller (ultimately ParseIf/ParseWhile in
+   PSTMT.MOD) patches+frees the whole list once, in place of the single
+   Cgen.CgPatchNear(jf) call this replaces. *)
+PROCEDURE ParseCondExpr*(VAR item: Cgen.Item; wantTrue: BOOLEAN; VAR bpList: CondBpNode); FORWARD;
+PROCEDURE ParseCondFactor(VAR item: Cgen.Item; wantTrue: BOOLEAN; VAR bpList: CondBpNode); FORWARD;
 
 (* ---- type helpers ---- *)
 
@@ -391,19 +458,19 @@ BEGIN
   IF (formal.type = Syms.NoType) OR (arg.type = Syms.NoType) THEN RETURN END;
   IF formal.typeless THEN RETURN END;
   ft := formal.type; at := arg.type;
-  (* .elem is NIL (= Syms.NoType) for every non-ARRAY type: it may only be
+  (* .elemOrRet is NIL (= Syms.NoType) for every non-ARRAY type: it may only be
      dereferenced AFTER the form/NIL guards below.  (An earlier version read
      both elem forms up front "once" — a NIL far read through 0000:0000 on
      virtually every checked call.) *)
   (* Single-char string -> CHAR / BYTE *)
-  IF (at.form = Syms.TFArray) & (at.len = 2) & (at.elem # Syms.NoType) &
-     (at.elem.form = Syms.TFChar) &
+  IF (at.form = Syms.TFArray) & (at.len = 2) & (at.elemOrRet # Syms.NoType) &
+     (at.elemOrRet.form = Syms.TFChar) &
      ((ft.form = Syms.TFChar) OR (ft.form = Syms.TFByte)) THEN RETURN END;
   (* String -> ARRAY OF CHAR / BYTE *)
-  IF (at.form = Syms.TFArray) & (at.elem # Syms.NoType) &
-     (at.elem.form = Syms.TFChar) &
-     (ft.form = Syms.TFArray) & (ft.elem # Syms.NoType) &
-     ((ft.elem.form = Syms.TFChar) OR (ft.elem.form = Syms.TFByte)) THEN
+  IF (at.form = Syms.TFArray) & (at.elemOrRet # Syms.NoType) &
+     (at.elemOrRet.form = Syms.TFChar) &
+     (ft.form = Syms.TFArray) & (ft.elemOrRet # Syms.NoType) &
+     ((ft.elemOrRet.form = Syms.TFChar) OR (ft.elemOrRet.form = Syms.TFByte)) THEN
     RETURN
   END;
   (* INTEGER/BYTE/WORD -> LONGINT widening *)
@@ -448,7 +515,7 @@ PROCEDURE ParseActualParameters*(pt: Syms.TypeDesc);
       pty: Syms.TypeDesc;
 BEGIN
   Expect(Scan.TLparen);
-  p := pt.params; bad := FALSE;
+  p := pt.symList; bad := FALSE;
   WHILE ~bad & (sc.sym # Scan.TRparen) & (sc.sym # Scan.TEof) DO
     IF p = Syms.NoSym THEN Error("too many parameters"); ParseExpression(arg)
     ELSE
@@ -673,7 +740,7 @@ BEGIN
     n := n^.next
   END;
   IF hasParam THEN
-    nArgs := 0; f := pt.params;
+    nArgs := 0; f := pt.symList;
     Expect(Scan.TLparen);
     WHILE (sc.sym # Scan.TRparen) & (sc.sym # Scan.TEof) DO
       ParseDesignator(arg);
@@ -709,7 +776,7 @@ BEGIN
       n := n^.next
     END
   ELSE
-    IF (pt.nParams > 0) OR (sc.sym = Scan.TLparen) THEN ParseActualParameters(pt) END;
+    IF (pt.tagIdOrNParams > 0) OR (sc.sym = Scan.TLparen) THEN ParseActualParameters(pt) END;
     n := pt.inlineList;
     WHILE n # NIL DO
       k := 0; WHILE k < n^.count DO Cgen.Emit1(n^.rawByte[k]); INC(k) END;
@@ -762,7 +829,7 @@ BEGIN
       IF nConst THEN
         nVal := nVal MOD 32;
         IF isLong = 1 THEN
-          Cgen.EmitCodeStr("58,5A");  (* POP AX; POP DX *)
+          Cgen.CgPopAxdx();  (* POP AX; POP DX *)
           CASE id OF
             Syms.SpLsl: Cgen.CgLsl32Imm(nVal)
           | Syms.SpLsr: Cgen.CgLsr32Imm(nVal)
@@ -790,7 +857,7 @@ BEGIN
       ELSE
         Cgen.Emit2(08AH, 0C8H);  (* MOV CL, AL *)
         IF isLong = 1 THEN
-          Cgen.EmitCodeStr("58,5A");  (* POP AX; POP DX *)
+          Cgen.CgPopAxdx();  (* POP AX; POP DX *)
           CASE id OF
             Syms.SpLsl: Cgen.CgLsl32Cl()
           | Syms.SpLsr: Cgen.CgLsr32Cl()
@@ -888,7 +955,7 @@ BEGIN
       item.mode := Cgen.MLocal; item.adr := sym.adr; item.isRef := TRUE;
       item.typeless := sym.typeless
   | Syms.KProc:
-      item.mode := Cgen.MProc; item.adr := sym.codeOfs;
+      item.mode := Cgen.MProc; item.adr := sym.adr;
       item.isFar := (sym.type # Syms.NoType) & sym.type.isFar;
       IF sym.rdoffId # -1 THEN item.mode := Cgen.MImport END;
       IF sym.fwdDecl THEN item.fwdSym := sym END
@@ -1015,11 +1082,11 @@ BEGIN
           ELSIF item.mode = Cgen.MGlobal THEN Cgen.CgLesBxMem(WORD(item.adr))
           (* else MReg: ES:BX already set *)
           END;
-          Cgen.CgAddBxImm(INTEGER(fld.offset));
+          Cgen.CgAddBxImm(INTEGER(fld.adr));
           item.mode := Cgen.MReg
           (* isRef stays TRUE *)
         ELSE
-          INC(item.adr, fld.offset)
+          INC(item.adr, fld.adr)
         END
       END;
       Scan.Next(sc)
@@ -1064,7 +1131,7 @@ BEGIN
              write, regardless of whether the index is a compile-time constant.
              Compile-time bounds check still fires on constant indices, but it
              does NOT replace the runtime codegen path. *)
-          elem := item.type.elem;
+          elem := item.type.elemOrRet;
           IF (item.mode = Cgen.MReg) & item.isRef THEN
             (* ES:BX points to array base (through far pointer).
                PUSH ES to preserve array segment across index expression. *)
@@ -1459,21 +1526,21 @@ BEGIN
         IF varRef THEN
           Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
           ParseActualParameters(pt);
-          Cgen.CgCallProcVarRefTail(pt.argSize)
+          Cgen.CgCallProcVarRefTail(pt.lenOrDescOrArg)
         ELSE
           ParseActualParameters(pt);
           (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
           IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
           ELSE Cgen.CgCallProcVarBp(varAdr) END
         END;
-        item.type := pt.retType; item.isRef := FALSE;
-        IF (pt.retType # Syms.NoType) & ((pt.retType.form = Syms.TFReal) OR (pt.retType.form = Syms.TFLongreal)) THEN
+        item.type := pt.elemOrRet; item.isRef := FALSE;
+        IF (pt.elemOrRet # Syms.NoType) & ((pt.elemOrRet.form = Syms.TFReal) OR (pt.elemOrRet.form = Syms.TFLongreal)) THEN
           item.mode := Cgen.MFreg
         ELSE item.mode := Cgen.MReg END
       ELSIF (item.mode = Cgen.MProc) & (item.type # Syms.NoType) & item.type.isInline & (sc.sym = Scan.TLparen) THEN
         pt2 := item.type;
         EmitInlineCall(pt2);
-        item.type := pt2.retType;
+        item.type := pt2.elemOrRet;
         IF item.type = Syms.NoType THEN item.type := Syms.TypeInteger END;
         (* Result lives in ST(0) when ret type is REAL/LONGREAL, AX otherwise. *)
         IF (item.type # Syms.NoType) & ((item.type.form = Syms.TFReal) OR (item.type.form = Syms.TFLongreal)) THEN
@@ -1493,8 +1560,8 @@ BEGIN
         ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)
         ELSE Cgen.CgCallLocal(codeOfs)
         END;
-        item.type := pt2.retType;
-        IF (pt2.retType # Syms.NoType) & ((pt2.retType.form = Syms.TFReal) OR (pt2.retType.form = Syms.TFLongreal)) THEN
+        item.type := pt2.elemOrRet;
+        IF (pt2.elemOrRet # Syms.NoType) & ((pt2.elemOrRet.form = Syms.TFReal) OR (pt2.elemOrRet.form = Syms.TFLongreal)) THEN
           item.mode := Cgen.MFreg
         ELSE item.mode := Cgen.MReg END
       END
@@ -1505,43 +1572,163 @@ END ParseFactor;
 
 (* ---- term ---- *)
 
+(* ParseCondAndChain: branch-mode "rest of a &-chain", given the first
+   operand already parsed in `item` (the caller — ParseAndTail below, or
+   ParseCondTerm further down for a from-scratch parse — is responsible for
+   that first operand and for making sure sc.sym = TAnd when this is
+   called).  Consumes every consecutive `& factor` itself (not just one),
+   since the fused path never leaves a reloadable value in `item` between
+   links — see the "chain consumption" note in the history below.
+   Two directions, because `&`'s short-circuit ("one false operand kills
+   the whole chain") only lets each link branch straight to the SAME final
+   target when that target IS the "chain is false" target:
+   - wantTrue=TRUE (branch to bp when the chain is false — the common
+     IF/WHILE/top-level case): each link can branch straight to bp the
+     moment it's false; no accumulator needed.
+   - wantTrue=FALSE (branch to bp when the chain is TRUE — e.g. this `&`
+     sits inside an enclosing `~` or `OR`): a single true operand does NOT
+     prove the chain true (a later operand could still be false), so
+     branching straight to bp on any one operand being true would be
+     wrong.  Instead evaluate the whole chain against a LOCAL "some operand
+     false" target (chainFalse) using the TRUE-direction rule above, and
+     only once every operand has fallen through (all true) branch to bp. *)
+PROCEDURE ParseCondAndChain(VAR item: Cgen.Item; wantTrue: BOOLEAN; VAR bpList: CondBpNode);
+  VAR rhs: Cgen.Item; chainFalseList: CondBpNode; n: CondBpNode;
+BEGIN
+  (* chainFalseList is only used as CondBpPush's initial `head` in the
+     ~wantTrue branch below; this runtime does NOT zero-init locals (see
+     DOCS/IMPLRULE.MD "no zero-init"), so leaving it unset means
+     CondBpPush's `n^.next := head` captures garbage, and the later
+     CondBpPatchFree(chainFalseList) walk dereferences that garbage as a
+     CondBpNode — corrupting an unrelated code address with a bogus patch
+     (this was bug 8: a stray patch landing at code offset 0, clobbering an
+     earlier procedure's prologue). *)
+  chainFalseList := NIL;
+  Cgen.CgLoadItem(item); Cgen.CgTestAx();
+  IF wantTrue THEN
+    n := CondBpPush(bpList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); bpList := n;
+    ParseCondFactor(rhs, TRUE, bpList);
+    WHILE sc.sym = Scan.TAnd DO
+      Scan.Next(sc);
+      ParseCondFactor(rhs, TRUE, bpList)
+    END
+  ELSE
+    n := CondBpPush(chainFalseList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); chainFalseList := n;
+    ParseCondFactor(rhs, TRUE, chainFalseList);
+    WHILE sc.sym = Scan.TAnd DO
+      Scan.Next(sc);
+      ParseCondFactor(rhs, TRUE, chainFalseList)
+    END;
+    (* every operand true (fell through) -> chain is TRUE -> branch to bpList's target *)
+    n := CondBpPush(bpList); Cgen.CgJmpNear(n^.bp); bpList := n;
+    CondBpPatchFree(chainFalseList)
+  END;
+  item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+END ParseCondAndChain;
+
+(* ParseCondTerm: branch-mode "term" — parses ITS OWN first factor, then
+   delegates to ParseCondAndChain if a `&` follows.  Used where a full term
+   (not just one factor) is needed in branch mode: ParseOrTail's RHS below,
+   since `OR`'s operand is a term per the grammar
+   (SimpleExpr = term {addOp term}) and so may itself be a `&`-chain, e.g.
+   `(a>b) OR (c<d) & (e<f)`.
+   The first factor is parsed via plain ParseFactor (disarmed), NOT
+   ParseCondFactor: we don't yet know whether `&` follows (single-token
+   lookahead, same reasoning as ParseTerm's own first-factor handling — see
+   its comment), so it must always materialize normally first; if no `&`
+   follows we then branch on that materialized value ourselves (mirroring
+   ParseCondFactor's own bare-boolean fallback exactly); if `&` DOES
+   follow, ParseCondAndChain re-tests that same materialized value as its
+   first operand, exactly as it expects. *)
+PROCEDURE ParseCondTerm(VAR item: Cgen.Item; wantTrue: BOOLEAN; VAR bpList: CondBpNode);
+  VAR savedArmed: BOOLEAN; n: CondBpNode;
+BEGIN
+  savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+  ParseFactor(item);
+  Cgen.condArmed := savedArmed;
+  IF sc.sym = Scan.TAnd THEN
+    Scan.Next(sc);
+    ParseCondAndChain(item, wantTrue, bpList)
+  ELSE
+    Cgen.CgLoadItem(item); Cgen.CgTestAx();
+    n := CondBpPush(bpList);
+    IF wantTrue THEN Cgen.CgCondNear(Cgen.OpJz, n^.bp) ELSE Cgen.CgCondNear(Cgen.OpJnz, n^.bp) END;
+    bpList := n;
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  END
+END ParseCondTerm;
+
 (* Short-circuit AND: `p & q` == `IF p THEN q ELSE FALSE` (Oberon-07 §9.1).
    Only the LHS is unconditionally evaluated; the RHS's parse+emit happens
    only on the path where it's reachable, so a side-effecting or unsafe RHS
    (function call, a divisor guarded by `(n#0) & (x DIV n>0)`) is never
-   evaluated when the LHS is already FALSE.  Result is materialized 0/1 in AX
-   exactly as the bitwise-AND path did, so every caller (IF/WHILE/REPEAT
-   conditions, nested boolean exprs) sees the same Item shape as before. *)
+   evaluated when the LHS is already FALSE.
+   Two codegen modes:
+   - Cgen.condArmed=FALSE (ordinary value context — assignment, actual
+     parameter, nested boolean expr, ...): result materializes 0/1 in AX
+     exactly as the bitwise-AND path did — UNCHANGED from before 2.1.
+   - Cgen.condArmed=TRUE (this whole condition is an IF/WHILE test, reached
+     via PExpr.ParseCondExpr): delegates to ParseCondAndChain, which
+     branches straight to Cgen.condBp instead of materializing, so a chain
+     `p & q & r` compiles to a flat run of "if false, jump to the same
+     final target" tests with no intermediate 0/1 anywhere — see
+     SIZE-REPORT.MD 2.1 "full &/OR/~ fusion". *)
 PROCEDURE ParseAndTail(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; falseBp, joinBp: Cgen.Backpatch;
 BEGIN
-  Cgen.CgLoadItem(item);
-  Cgen.CgTestAx();
-  (* MUST be a near jump: it spans the whole RHS emit (ParseFactor may emit
-     an arbitrarily long expression — a >127-byte span in a short Jcc wraps
-     the rel8 and jumps backward into mid-instruction; this exact overflow
-     broke self-hosting, see opt.md §8). *)
-  Cgen.CgCondNear(Cgen.OpJz, falseBp);    (* LHS false -> skip RHS, result FALSE *)
-  ParseFactor(rhs); Cgen.CgLoadItem(rhs); (* BOOLEAN is always a clean 0/1 -> AX *)
-  Cgen.CgJmpNear(joinBp);
-  Cgen.CgPatchNear(falseBp);
-  Cgen.Emit2(033H, 0C0H);                 (* XOR AX,AX *)
-  Cgen.CgPatchNear(joinBp);
-  item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  IF Cgen.condArmed THEN
+    (* condBpList (module-level, see its declaration) accumulates every
+       pending jump for the CURRENT condition being parsed by the outermost
+       ParseCondExpr call; ParseCondAndChain pushes onto it directly. *)
+    ParseCondAndChain(item, Cgen.condWantTrue, condBpList);
+    Cgen.condHit := TRUE
+  ELSE
+    Cgen.CgLoadItem(item);
+    Cgen.CgTestAx();
+    (* MUST be a near jump: it spans the whole RHS emit (ParseFactor may emit
+       an arbitrarily long expression — a >127-byte span in a short Jcc wraps
+       the rel8 and jumps backward into mid-instruction; this exact overflow
+       broke self-hosting, see opt.md §8). *)
+    Cgen.CgCondNear(Cgen.OpJz, falseBp);    (* LHS false -> skip RHS, result FALSE *)
+    ParseFactor(rhs); Cgen.CgLoadItem(rhs); (* BOOLEAN is always a clean 0/1 -> AX *)
+    Cgen.CgJmpNear(joinBp);
+    Cgen.CgPatchNear(falseBp);
+    Cgen.Emit2(033H, 0C0H);                 (* XOR AX,AX *)
+    Cgen.CgPatchNear(joinBp);
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  END
 END ParseAndTail;
 
 PROCEDURE ParseTerm(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; op: INTEGER; isLong, isFpu, isWord: BOOLEAN;
-      rhsLoaded: BOOLEAN;
+      rhsLoaded: BOOLEAN; savedArmed: BOOLEAN;
 BEGIN
+  (* The FIRST factor must be disarmed too, exactly like every other operand
+     parsed via plain ParseFactor in this procedure: at this point we don't
+     yet know whether `&` follows (single-token lookahead — the WHILE test
+     below hasn't run yet), so if `item` turns out to be a paren'd relop
+     and condArmed were left live, ParseFactor's TLparen case would fuse it
+     standalone (branch away) via the ordinary CgSetcc relay BEFORE we can
+     tell whether a `&` chain continues — leaving `item` in a "already
+     branched" state that ParseAndTail's CgLoadItem/CgTestAx would then
+     wrongly re-test on stale AX (this was a real, caught-by-testing bug:
+     `(a<b) & (c>d)` miscompiled to unconditionally-true).  Disarming here
+     means the first operand always materializes normally; if no `&`
+     follows, ParseCondExpr's own fallback (CgLoadItem+CgTestAx+CgCondNear)
+     handles the "bare boolean" case correctly, exactly as it already did
+     for 2.1; if `&` DOES follow, ParseAndTail's armed branch re-tests that
+     freshly materialized value, which is exactly what it expects. *)
+  savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
   ParseFactor(item);
+  Cgen.condArmed := savedArmed;
   WHILE (sc.sym = Scan.TStar) OR (sc.sym = Scan.TDiv) OR
         (sc.sym = Scan.TMod)  OR (sc.sym = Scan.TAnd) OR (sc.sym = Scan.TSlash) DO
     op := sc.sym; Scan.Next(sc);
     IF op = Scan.TAnd THEN
       ParseAndTail(item); rhsLoaded := FALSE
     ELSIF IsIntConst(item) & ((op = Scan.TStar) OR (op = Scan.TDiv) OR (op = Scan.TMod)) THEN
-      ParseFactor(rhs);
+      savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+      ParseFactor(rhs); Cgen.condArmed := savedArmed;
       IF IsIntConst(rhs) THEN ConstFoldInt(item, op, rhs); rhsLoaded := FALSE
       ELSE
         isLong := (item.type # Syms.NoType) & (item.type.form = Syms.TFLongint);
@@ -1580,7 +1767,9 @@ BEGIN
       isWord := ~isLong & ~isFpu & (item.type # Syms.NoType) & (item.type.form = Syms.TFWord);
       IF (item.type # Syms.NoType) & (item.type.form = Syms.TFSet) THEN
         Cgen.Emit1(BYTE(Cgen.OpPushAx));
-        ParseFactor(rhs); Cgen.CgLoadItem(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseFactor(rhs); Cgen.condArmed := savedArmed;
+        Cgen.CgLoadItem(rhs);
         Cgen.Emit1(BYTE(Cgen.OpPopCx));
         IF      op = Scan.TStar  THEN Cgen.CgAnd()
         ELSIF   op = Scan.TSlash THEN Cgen.CgXor()
@@ -1589,7 +1778,9 @@ BEGIN
         rhsLoaded := FALSE
       ELSIF isFpu THEN
         Cgen.CgFpush();
-        ParseFactor(rhs); Cgen.CgLoadItem(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseFactor(rhs); Cgen.condArmed := savedArmed;
+        Cgen.CgLoadItem(rhs);
         IF IsIntType(rhs) THEN
           IF (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFLongint) THEN CoerceDxaxToFpu() ELSE CoerceAxToFpu() END
         END;
@@ -1609,12 +1800,13 @@ BEGIN
            IMUL/IDIV (costs one redundant PUSH/POP but saves a 70-cycle multiply
            or divide).  Otherwise load rhs and fall through to the dispatch. *)
         IF isLong THEN Cgen.CgPushDxax() ELSE Cgen.Emit1(BYTE(Cgen.OpPushAx)) END;
-        ParseFactor(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseFactor(rhs); Cgen.condArmed := savedArmed;
         IF ~isLong & (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord) THEN isWord := TRUE END;
         IF IsIntConst(rhs) &
            ((op = Scan.TStar) OR (op = Scan.TDiv) OR (op = Scan.TMod)) &
            StrengthReducible(op, rhs.val, isLong) THEN
-          IF isLong THEN Cgen.EmitCodeStr("58,5A")   (* POP AX; POP DX *)
+          IF isLong THEN Cgen.CgPopAxdx()   (* POP AX; POP DX *)
           ELSE Cgen.Emit1(BYTE(Cgen.OpPopAx)) END;
           IF StrengthReduce(op, rhs.val, isLong, isWord) THEN
             IF isLong THEN item.type := Syms.TypeLongint
@@ -1632,7 +1824,7 @@ BEGIN
     IF rhsLoaded THEN
       IF IsFpuType(rhs) THEN
         IF isLong THEN
-          Cgen.EmitCodeStr("58,5A"); CoerceDxaxToFpu()  (* POP AX; POP DX *)
+          Cgen.CgPopAxdx(); CoerceDxaxToFpu()  (* POP AX; POP DX *)
         ELSE Cgen.Emit1(058H); CoerceAxToFpu() END;
         CASE op OF
           Scan.TStar:  Cgen.CgFmul()
@@ -1689,23 +1881,90 @@ END ParseTerm;
    already makes the result TRUE. *)
 PROCEDURE ParseOrTail(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; trueBp, joinBp: Cgen.Backpatch;
+      chainTrueList: CondBpNode; n: CondBpNode;
 BEGIN
-  Cgen.CgLoadItem(item);
-  Cgen.CgTestAx();
-  (* MUST be a near jump: spans the whole RHS emit — see ParseAndTail. *)
-  Cgen.CgCondNear(Cgen.OpJnz, trueBp);    (* LHS true -> skip RHS, result TRUE *)
-  ParseTerm(rhs); Cgen.CgLoadItem(rhs);   (* BOOLEAN is always a clean 0/1 -> AX *)
-  Cgen.CgJmpNear(joinBp);
-  Cgen.CgPatchNear(trueBp);
-  Cgen.CgLoadImm(1);
-  Cgen.CgPatchNear(joinBp);
-  item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  (* chainTrueList must start NIL for the same reason as ParseCondAndChain's
+     chainFalseList (see its comment) — an uninitialized local here fed
+     garbage into CondBpPush/CondBpPatchFree and was bug 8's root cause. *)
+  chainTrueList := NIL;
+  IF Cgen.condArmed THEN
+    (* Mirrors ParseAndTail's armed branch with OR's opposite short-circuit
+       polarity ("one true operand makes the whole chain true"), and
+       likewise consumes the WHOLE `OR`-chain here (not just the one link
+       that made ParseSimpleExpression's loop call us) for the same reason:
+       the fused path never leaves a reloadable value in `item` between
+       links.  Each operand's jump goes onto a CondBpNode list (module-level
+       condBpList, same relay ParseAndTail uses) rather than a single
+       Backpatch — see ParseCondAndChain's history note for why a shared
+       single Backpatch loses every link but the last.
+       - condWantTrue=FALSE (branch to condBpList when the chain is TRUE):
+         each link can branch straight there the moment it's true — no
+         accumulator needed, this is OR's natural short-circuit direction.
+       - condWantTrue=TRUE (branch to condBpList when the chain is FALSE,
+         i.e. only once EVERY operand is false): a single false operand
+         does NOT prove the chain false (a later operand could still be
+         true), so each link is evaluated against a LOCAL "some operand
+         true" list instead, and only once every operand has fallen
+         through (all false) do we branch to condBpList. *)
+    Cgen.CgLoadItem(item); Cgen.CgTestAx();
+    IF ~Cgen.condWantTrue THEN
+      n := CondBpPush(condBpList); Cgen.CgCondNear(Cgen.OpJnz, n^.bp); condBpList := n;
+      ParseCondTerm(rhs, FALSE, condBpList);
+      WHILE sc.sym = Scan.TOr DO
+        Scan.Next(sc);
+        ParseCondTerm(rhs, FALSE, condBpList)
+      END
+    ELSE
+      n := CondBpPush(chainTrueList); Cgen.CgCondNear(Cgen.OpJnz, n^.bp); chainTrueList := n;
+      ParseCondTerm(rhs, FALSE, chainTrueList);
+      WHILE sc.sym = Scan.TOr DO
+        Scan.Next(sc);
+        ParseCondTerm(rhs, FALSE, chainTrueList)
+      END;
+      (* every operand false (fell through) -> chain is FALSE -> branch to condBpList *)
+      n := CondBpPush(condBpList); Cgen.CgJmpNear(n^.bp); condBpList := n;
+      CondBpPatchFree(chainTrueList)
+    END;
+    Cgen.condHit := TRUE;
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  ELSE
+    Cgen.CgLoadItem(item);
+    Cgen.CgTestAx();
+    (* MUST be a near jump: spans the whole RHS emit — see ParseAndTail. *)
+    Cgen.CgCondNear(Cgen.OpJnz, trueBp);    (* LHS true -> skip RHS, result TRUE *)
+    ParseTerm(rhs); Cgen.CgLoadItem(rhs);   (* BOOLEAN is always a clean 0/1 -> AX *)
+    Cgen.CgJmpNear(joinBp);
+    Cgen.CgPatchNear(trueBp);
+    Cgen.CgLoadImm(1);
+    Cgen.CgPatchNear(joinBp);
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  END
 END ParseOrTail;
 
 PROCEDURE ParseSimpleExpression(VAR item: Cgen.Item);
   VAR rhs: Cgen.Item; op: INTEGER; negate, isFpu, isLong, isWord, isAddr: BOOLEAN;
-      rhsLoaded: BOOLEAN;
+      rhsLoaded: BOOLEAN; savedArmed: BOOLEAN;
 BEGIN
+  (* condArmed (see PExpr.ParseCondExpr / CGEN.MOD "condition-fusion
+     single-frame relay") is deliberately left LIVE across the call to
+     ParseTerm(item) below: `item` here is either the whole condition's
+     SimpleExpr (when this is ParseExpression's LHS call with no relop
+     following) or the LHS of a relop (never boolean, so any `&`/`OR` seen
+     inside ParseTerm can only belong to the FIRST case) — so ParseTerm's
+     own `&` dispatch (ParseAndTail) and this procedure's `OR` dispatch
+     (ParseOrTail) below correctly see condArmed exactly when they are the
+     condition's own top-level chain link, with no explicit re-arming
+     needed.  A unary `-`/`+` prefix never precedes a boolean SimpleExpr in
+     valid Oberon (negation isn't defined on BOOLEAN), so `negate` and
+     condArmed are mutually exclusive in practice; disarming isn't needed
+     for the negate path either.  Every OTHER recursive descent from this
+     procedure — the arithmetic RHS operand of `+`/`-` below — is
+     explicitly disarmed at its own call site instead (never a boolean
+     chain operand), narrower and more precise than the previous blanket
+     disarm-for-the-whole-body (see SIZE-REPORT.MD 2.1 "full &/OR/~
+     fusion" for the history: the blanket disarm was correct for single-
+     comparison fusion but starved the chain fusion of the armed state it
+     needs to reach ParseAndTail/ParseOrTail). *)
   negate := FALSE;
   IF    sc.sym = Scan.TMinus THEN negate := TRUE; Scan.Next(sc)
   ELSIF sc.sym = Scan.TPlus  THEN Scan.Next(sc)
@@ -1737,7 +1996,11 @@ BEGIN
     IF op = Scan.TOr THEN
       ParseOrTail(item); rhsLoaded := FALSE
     ELSIF IsIntConst(item) & ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
+      (* arithmetic RHS: never a boolean chain operand — disarm so a nested
+         paren'd condition inside rhs can't steal the outer branch target. *)
+      savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
       ParseTerm(rhs);
+      Cgen.condArmed := savedArmed;
       IF IsIntConst(rhs) THEN ConstFoldInt(item, op, rhs); rhsLoaded := FALSE
       ELSE
         isLong := (item.type # Syms.NoType) & (item.type.form = Syms.TFLongint);
@@ -1785,21 +2048,27 @@ BEGIN
            saved seg.  Result keeps the ADDRESS type (DX:AX). *)
         Cgen.Emit1(BYTE(Cgen.OpPushDx));
         Cgen.Emit1(BYTE(Cgen.OpPushAx));
-        ParseTerm(rhs); Cgen.CgLoadItem(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseTerm(rhs); Cgen.condArmed := savedArmed;
+        Cgen.CgLoadItem(rhs);
         Cgen.Emit1(BYTE(Cgen.OpPopCx));        (* CX = old ofs *)
         IF op = Scan.TPlus THEN Cgen.CgAdd() ELSE Cgen.CgSub() END;
         Cgen.Emit1(BYTE(Cgen.OpPopDx));        (* DX = saved seg *)
         item.type := Syms.TypeAddress; item.mode := Cgen.MReg; rhsLoaded := FALSE
       ELSIF (item.type # Syms.NoType) & (item.type.form = Syms.TFSet) THEN
         Cgen.Emit1(BYTE(Cgen.OpPushAx));
-        ParseTerm(rhs); Cgen.CgLoadItem(rhs); Cgen.Emit1(BYTE(Cgen.OpPopCx));
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseTerm(rhs); Cgen.condArmed := savedArmed;
+        Cgen.CgLoadItem(rhs); Cgen.Emit1(BYTE(Cgen.OpPopCx));
         IF op = Scan.TPlus THEN Cgen.CgOr()
         ELSIF op = Scan.TMinus THEN Cgen.Emit2(0F7H, 0D0H); Cgen.CgAnd()
         ELSE Error("operator not supported for SET in expr") END;
         item.type := Syms.TypeSet; item.mode := Cgen.MReg; rhsLoaded := FALSE
       ELSIF isFpu THEN
         Cgen.CgFpush();
-        ParseTerm(rhs); Cgen.CgLoadItem(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseTerm(rhs); Cgen.condArmed := savedArmed;
+        Cgen.CgLoadItem(rhs);
         IF IsIntType(rhs) THEN
           IF (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFLongint) THEN CoerceDxaxToFpu() ELSE CoerceAxToFpu() END
         END;
@@ -1808,12 +2077,13 @@ BEGIN
         item.mode := Cgen.MFreg; rhsLoaded := FALSE
       ELSE
         IF isLong THEN Cgen.CgPushDxax() ELSE Cgen.Emit1(BYTE(Cgen.OpPushAx)) END;
-        ParseTerm(rhs);
+        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+        ParseTerm(rhs); Cgen.condArmed := savedArmed;
         IF ~isLong & (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord) THEN isWord := TRUE END;
         (* x + 0 / x - 0 = x : pop the variable back and emit nothing. *)
         IF IsIntConst(rhs) & (rhs.val = LONGINT(0)) &
            ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
-          IF isLong THEN Cgen.EmitCodeStr("58,5A")   (* POP AX; POP DX *)
+          IF isLong THEN Cgen.CgPopAxdx()   (* POP AX; POP DX *)
           ELSE Cgen.Emit1(BYTE(Cgen.OpPopAx)) END;
           IF isLong THEN item.type := Syms.TypeLongint
           ELSIF isWord THEN item.type := Syms.TypeWord
@@ -1828,7 +2098,7 @@ BEGIN
     IF rhsLoaded THEN
       IF IsFpuType(rhs) THEN
         IF isLong THEN
-          Cgen.EmitCodeStr("58,5A"); CoerceDxaxToFpu()  (* POP AX; POP DX *)
+          Cgen.CgPopAxdx(); CoerceDxaxToFpu()  (* POP AX; POP DX *)
         ELSE Cgen.Emit1(058H); CoerceAxToFpu() END;
         IF op = Scan.TPlus THEN Cgen.CgFadd() ELSE Cgen.Emit2(0DEH, 0E1H) END;
         IF (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFLongreal) THEN item.type := Syms.TypeLongreal
@@ -1910,7 +2180,113 @@ BEGIN
   END
 END RelopJccU;
 
-(* ---- expression ---- *)
+(* ParseCondFactor: branch-mode counterpart of ParseFactor, used ONLY as the
+   RHS operand of a `&`/`OR` link when Cgen.condArmed is set (called from
+   ParseAndTail/ParseOrTail below).  A `factor` never directly contains a
+   relop (relops exist only at the `expr` level, reachable from a factor
+   solely via `"(" expr ")"` — see DOCS/OBERON07.EBN), so the only two
+   recursable boolean shapes at this level are `~x` and `(expr)`; anything
+   else (bare BOOLEAN variable/call) has nothing further to fuse and falls
+   back to plain ParseFactor + materialize + branch — identical codegen to
+   the pre-2.1 path for that shape. *)
+PROCEDURE ParseCondFactor;
+  VAR n: CondBpNode; savedArmed: BOOLEAN;
+BEGIN
+  IF sc.sym = Scan.TNot THEN
+    Scan.Next(sc);
+    ParseCondFactor(item, ~wantTrue, bpList);
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  ELSIF sc.sym = Scan.TLparen THEN
+    Scan.Next(sc);
+    ParseCondExpr(item, wantTrue, bpList);
+    Expect(Scan.TRparen)
+  ELSE
+    (* Bare boolean (variable/call): may itself contain nested parenthesized
+       sub-expressions (e.g. an index or actual-parameter expression reached
+       through ParseFactor->ParseDesignator/ParseActualParameters) that pass
+       back through ParseFactor's own TLparen branch.  condArmed must be
+       disarmed here exactly like ParseTerm's first-factor call, else such a
+       nested paren'd relop would wrongly self-fuse as if IT were the
+       condition, corrupting this call's own bpList/AX bookkeeping (same bug
+       class as bug 2 / bug 7). *)
+    savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+    ParseFactor(item);
+    Cgen.condArmed := savedArmed;
+    Cgen.CgLoadItem(item); Cgen.CgTestAx();
+    n := CondBpPush(bpList);
+    IF wantTrue THEN Cgen.CgCondNear(Cgen.OpJz, n^.bp) ELSE Cgen.CgCondNear(Cgen.OpJnz, n^.bp) END;
+    bpList := n;
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+  END
+END ParseCondFactor;
+
+(* ---- condition-fused expression entry (2.1 condition-context fusion) ----
+   Used only by IF/WHILE conditions: parses a full boolean expression,
+   branching straight to `bp` when the condition is not `wantTrue`, WITHOUT
+   materializing an intermediate 0/1 in AX, for both shapes a condition can
+   take:
+     - a single relational/IN/IS comparison (e.g. `a<b`) funnels through
+       Cgen.CgSetcc's single-frame relay (the original 2.1 slice);
+     - a `&`/`OR`/`~` chain (e.g. `(a<b) & ~c`) is walked by ParseAndTail/
+       ParseOrTail themselves, which check Cgen.condArmed and branch each
+       link straight to Cgen.condBp instead of materializing, when armed
+       (see "full &/OR/~ fusion" below) — reached via ParseExpression's
+       normal call into ParseSimpleExpression/ParseTerm, no separate
+       grammar-layer parser needed.
+   Only a bare BOOLEAN variable/call (nothing left to fuse) still
+   materializes-then-tests, exactly as before 2.1. *)
+PROCEDURE ParseCondExpr;
+  VAR savedArmed, savedWantTrue: BOOLEAN; savedCondBp: Cgen.Backpatch;
+      savedBpList, result: CondBpNode; n: CondBpNode; hit: BOOLEAN;
+BEGIN
+  (* condBpList (module-level relay, see its declaration) is how
+     ParseAndTail/ParseOrTail reach back to THIS call's `bpList` without
+     ParseTerm/ParseSimpleExpression needing an extra parameter — save/
+     restore it exactly like Cgen.condArmed, since a NESTED ParseCondExpr
+     call (ParseCondFactor's TLparen case) reuses the same module storage
+     for its own, unrelated chain. *)
+  savedArmed := Cgen.condArmed; savedWantTrue := Cgen.condWantTrue;
+  savedCondBp := Cgen.condBp; savedBpList := condBpList;
+  Cgen.condArmed := TRUE; Cgen.condWantTrue := wantTrue; Cgen.condHit := FALSE;
+  condBpList := NIL;
+  ParseExpression(item);
+  Cgen.condArmed := FALSE;   (* disarm unconditionally: catches the case where the
+                                 expression never reached a CgSetcc/chain-branch
+                                 (bare BOOLEAN variable/call) *)
+  hit := Cgen.condHit;
+  IF hit THEN
+    IF condBpList # NIL THEN
+      result := condBpList   (* &/OR chain: ParseAndTail/ParseOrTail already built this list *)
+    ELSE
+      (* single relop/IN/IS: CgSetcc wrote exactly one Backpatch into
+         Cgen.condBp (it doesn't know about lists) — wrap it as a
+         one-node list so the caller's patch-the-whole-list step still
+         works uniformly regardless of which shape this condition took. *)
+      n := CondBpPush(NIL); n^.bp := Cgen.condBp; result := n
+    END
+  ELSE
+    Cgen.CgLoadItem(item); Cgen.CgTestAx();
+    n := CondBpPush(NIL);
+    (* CgCondNear(Y,bp) branches when Y true.  Branch to bp when condition #
+       wantTrue: wantTrue=TRUE -> branch on AX=0 (OpJz); wantTrue=FALSE ->
+       branch on AX#0 (OpJnz).  Matches the original ParseIf/ParseWhile
+       CgCondNear(Cgen.OpJz, jf) call this replaces. *)
+    IF wantTrue THEN Cgen.CgCondNear(Cgen.OpJz, n^.bp)
+    ELSE Cgen.CgCondNear(Cgen.OpJnz, n^.bp)
+    END;
+    result := n
+  END;
+  Cgen.condArmed := savedArmed; Cgen.condWantTrue := savedWantTrue;
+  Cgen.condBp := savedCondBp; condBpList := savedBpList;
+  (* append `result` (this call's node(s)) onto the CALLER's list, which may
+     already hold earlier links (e.g. ParseCondAndChain's chainFalseList
+     recursion) — splice by walking to result's tail, since CondBpPush only
+     prepends. `result` is always non-NIL (every branch above sets it). *)
+  n := result;
+  WHILE n^.next # NIL DO n := n^.next END;
+  n^.next := bpList; bpList := result
+END ParseCondExpr;
+
 
 PROCEDURE ParseExpression;
   VAR rhs: Cgen.Item; op: INTEGER; tsym: Syms.Symbol;
@@ -1977,9 +2353,9 @@ BEGIN
       ParseSimpleExpression(rhs);
       (* ARRAY OF CHAR vs "" (empty, size=1): mask LHS low byte, load RHS as byte. *)
       IF (item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
-         (item.type.elem # NIL) & (item.type.elem.form = Syms.TFChar) &
+         (item.type.elemOrRet # NIL) & (item.type.elemOrRet.form = Syms.TFChar) &
          (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFArray) &
-         (rhs.type.elem # NIL) & (rhs.type.elem.form = Syms.TFChar) &
+         (rhs.type.elemOrRet # NIL) & (rhs.type.elemOrRet.form = Syms.TFChar) &
          (rhs.type.size = 1) THEN
         (* POP AX; AND AX,00FFh; PUSH AX -- mask pushed LHS to low byte *)
         Cgen.Emit1(058H);
@@ -1994,11 +2370,11 @@ BEGIN
          is needed because one side isn't actually array-shaped at runtime. *)
       ELSIF ((item.type # Syms.NoType) & (item.type.form = Syms.TFChar) &
              (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFArray) &
-             (rhs.type.elem # NIL) & (rhs.type.elem.form = Syms.TFChar) &
+             (rhs.type.elemOrRet # NIL) & (rhs.type.elemOrRet.form = Syms.TFChar) &
              (rhs.type.size = 2)) OR
             ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFChar) &
              (item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
-             (item.type.elem # NIL) & (item.type.elem.form = Syms.TFChar) &
+             (item.type.elemOrRet # NIL) & (item.type.elemOrRet.form = Syms.TFChar) &
              (item.type.size = 2)) THEN
         (* fall through unchanged — same codegen as before this fix *)
       (* Any other ARRAY OF CHAR relop operand: this dialect has no
@@ -2008,9 +2384,9 @@ BEGIN
          at compile time rather than emit a codegen path that computes the
          wrong answer; use Strings.Equal or a manual char-by-char loop. *)
       ELSIF ((item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
-             (item.type.elem # NIL) & (item.type.elem.form = Syms.TFChar)) OR
+             (item.type.elemOrRet # NIL) & (item.type.elemOrRet.form = Syms.TFChar)) OR
             ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFArray) &
-             (rhs.type.elem # NIL) & (rhs.type.elem.form = Syms.TFChar)) THEN
+             (rhs.type.elemOrRet # NIL) & (rhs.type.elemOrRet.form = Syms.TFChar)) THEN
         Error("relational operators on ARRAY OF CHAR are not supported (except comparing to an empty string literal); use Strings.Equal")
       END;
       Cgen.CgLoadItem(rhs);
@@ -2072,7 +2448,7 @@ BEGIN
     ELSIF ~Syms.TypeIsExtension(rhsRec, lhsRec) THEN
       Cgen.CgLoadImm(0)
     ELSE
-      Cgen.CgIsTagCheck(item, rhsRec.tagId)
+      Cgen.CgIsTagCheck(item, rhsRec.tagIdOrNParams)
     END;
     item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
   END

@@ -14,7 +14,7 @@
 #   make install  — copy TASM.exe to BIN/TASM.EXE
 #   make clean    — remove .om files, TASM.exe, and local setup files
 
-BOOT_OC  = ../../BOOT/TOC.EXE
+BIN_OC  = ../../BIN/TOC.EXE
 BIN_OM   = ../../BIN/OBERON.OM
 XT       = xt
 
@@ -22,7 +22,7 @@ XT       = xt
 # SRC/TOC/Makefile's own rationale — the stdlib OBERON.OM lives outside
 # this dir, so it's copied locally rather than reached via a DOS path.
 XTRUN  = $(XT) run --max=300000000
-OCBOOT = TOC_BOOT.EXE
+OC = TOC.EXE
 
 # Every TASM source — dep-scan (TOC.MOD's FindSrc, CWD-only) resolves
 # these to each other automatically; Rdoff/LogErr/Strings/Files/etc. are
@@ -32,20 +32,20 @@ TASM_SRCS = SCAN.MOD SYM.MOD ENC.MOD DIR.MOD PARSE.MOD TASM.MOD
 
 all: TASM.exe
 
-$(OCBOOT): $(BOOT_OC)
-	cp $(BOOT_OC) $(OCBOOT)
+$(OC): $(BIN_OC)
+	cp $(BIN_OC) $(OC)
 
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
-TASM.exe: $(TASM_SRCS) $(OCBOOT) OBERON.OM
-	time $(XTRUN) $(OCBOOT) /ENTRY=Run TASM.MOD /M
+TASM.exe: $(TASM_SRCS) $(OC) OBERON.OM
+	time $(XTRUN) $(OC) /ENTRY=Run TASM.MOD /M
 
 install: TASM.exe
 	mkdir -p ../../BIN
 	cp TASM.exe ../../BIN/TASM.EXE
 
 clean:
-	rm -f *.om *.OM *.rdf *.RDF *.def *.DEF *.TMP TASM.exe TASM.EXE $(OCBOOT) OBERON.OM
+	rm -f *.om *.OM *.rdf *.RDF *.def *.DEF *.TMP TASM.exe TASM.EXE $(OC) OBERON.OM
 
 .PHONY: all install clean

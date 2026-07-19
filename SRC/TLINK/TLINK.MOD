@@ -1,6 +1,6 @@
 MODULE TLink;
 (*
-  Trubo Link (tlink.exe) — merged RDOFF2 linker for tiny-model .COM/.SYS
+  Trubo Link (tlink.exe) - RDOFF2 linker for tiny-model .COM/.SYS
   and small-model .EXE output.
   tiny model: .COM/.SYS, no relocation table and
   small model: .EXE with an MZ relocation table,
