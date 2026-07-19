@@ -85,7 +85,7 @@ That means:
   object files, so hand-written assembly modules assembled with NASM, YASM,
   or MSA2 (`-f rdf`) can be linked directly alongside Oberon-compiled
   `.rdf`/`.om` modules — no C shim required.
-- **Trubo Assembler (TASM).** `SRC/TASM/` is a self-hosted NASM-subset
+- **Trubo Assembler (TASM).** `SRC/TASM/` is a TOC-hosted NASM-subset
   8086 assembler (`.asm` → RDOFF2 `.rdf`), verified against real-NASM-built
   oracles for every hand-assembled `.ASM` file in the standard library
   (`SYSTEM.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
@@ -94,7 +94,7 @@ That means:
   of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
-  `SRC/TLINK/` is one Oberon tool (`tlink /T=com|sys|exe`) covering both
+  `SRC/TLINK/` is one TOC-tool (`tlink /T=com|sys|exe`) covering both
   tiny model (`.COM`/`.SYS`, no relocation table) and small model (`.EXE`
   with an MZ relocation table) — memory models `toc.exe`'s own embedded
   linker does not target — see `DOCS/BUILD.MD`'s "Using tlink" section.
