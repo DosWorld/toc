@@ -1,6 +1,6 @@
 BOOT_OC = ../../BOOT/TOC.EXE
 BOOT_TASM = ../../BOOT/TASM.EXE
-OC = toc.exe
+OC = TOC.EXE
 OCFLAGS = /LOG=debug
 XT      = xt
 
@@ -19,12 +19,12 @@ STDLIB_OMS = SYSTEM.OM OUT.OM OUT87.OM IN.OM STRINGS.OM FILES.OM \
 all: $(STDLIB_OMS)
 
 install: all
-	cp ../../BOOT/TOLIB.EXE tolib.exe
-	ls *.OM 2>/dev/null | grep -iv "oberon\|tolib\|toc\.exe" > oberon.lst
-	$(XTRUN) tolib.exe merge OBERON.OM @oberon.lst
+	cp ../../BOOT/TOLIB.EXE TOLIB.EXE
+	ls *.OM 2>/dev/null | grep -iv "OBERON\|TOLIB\|TOC\.EXE" > oberon.lst
+	$(XTRUN) TOLIB.EXE merge OBERON.OM @oberon.lst
 	mkdir -p ../../BIN
 	cp OBERON.OM ../../BIN/OBERON.OM
-	rm -f oberon.lst OBERON.OM tolib.exe toc.exe
+	rm -f oberon.lst
 
 $(OC): $(BOOT_OC)
 	cp $(BOOT_OC) $(OC)
@@ -52,14 +52,14 @@ SYSTEM.OM: SYSTEM.RDF SYSTEM.MOD $(OC)
 # up the regenerated .RDF and TESTS/test_tasm.sh to confirm TASM's own
 # output still agrees with itself.
 regen-asm:
-	cp $(BOOT_TASM) tasm.exe
-	$(XTRUN) tasm.exe $(OCFLAGS) SYSTEM.ASM
-	$(XTRUN) tasm.exe $(OCFLAGS) EMS.ASM
-	$(XTRUN) tasm.exe $(OCFLAGS) DETECT.ASM
-	$(XTRUN) tasm.exe $(OCFLAGS) WINCB.ASM
-	$(XTRUN) tasm.exe $(OCFLAGS) KMOUSE.ASM
-	$(XTRUN) tasm.exe $(OCFLAGS) SCREEN.ASM
-	rm -f tasm.exe
+	cp $(BOOT_TASM) TASM.EXE
+	$(XTRUN) TASM.EXE $(OCFLAGS) SYSTEM.ASM
+	$(XTRUN) TASM.EXE $(OCFLAGS) EMS.ASM
+	$(XTRUN) TASM.EXE $(OCFLAGS) DETECT.ASM
+	$(XTRUN) TASM.EXE $(OCFLAGS) WINCB.ASM
+	$(XTRUN) TASM.EXE $(OCFLAGS) KMOUSE.ASM
+	$(XTRUN) TASM.EXE $(OCFLAGS) SCREEN.ASM
+	rm -f TASM.EXE
 
 RDFLOAD.OM: RDFLOAD.MOD FILES.OM STRINGS.OM SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) RDFLOAD.MOD
@@ -153,6 +153,6 @@ SCREEN.OM: SCREEN.MOD SCREEN.RDF DETECT.OM KMOUSE.OM DOS.OM SYSTEM.OM $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) SCREEN.MOD
 
 clean:
-	rm -f $(STDLIB_OMS) ../../BIN/OBERON.OM
+	rm -f *.EXE *.OM OUTPUT.LOG
 
 .PHONY: all install clean regen-asm

@@ -52,5 +52,5 @@ del OBERON.OM
 ..\..\BIN\tolib.exe merge OBERON.OM @oberon.lst
 del oberon.lst
 
-copy OBERON.OM ..\BIN\
+copy OBERON.OM ..\..\BIN\
 

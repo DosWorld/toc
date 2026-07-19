@@ -78,16 +78,15 @@ PROCEDURE WriteType(VAR f: Files.File; t: Syms.TypeDesc);
 BEGIN
   IF t = Syms.NoType THEN Files.Write(f, "VOID"); RETURN END;
   IF primFormName[t.form][0] # 0X THEN Files.Write(f, primFormName[t.form]); RETURN END;
-  IF t.form = Syms.TFArray THEN
+ CASE t.form OF
+    Syms.TFArray:
     IF t.len >= LONGINT(0) THEN
       Files.Write(f, "ARRAY "); WInt(f, t.len); Files.Write(f, " OF ")
     ELSE
       Files.Write(f, "ARRAY OF ")
     END;
-    WriteType(f, t.elemOrRet);
-    RETURN
-  END;
-  IF t.form = Syms.TFPointer THEN
+    WriteType(f, t.elemOrRet)
+  | Syms.TFPointer:
     Files.Write(f, "POINTER ");
     IF t.base # Syms.NoType THEN
       FindTypeName(t.base, nm);
@@ -99,21 +98,20 @@ BEGIN
          "ARRAY ...", so this round-trips.  See PTR.MD. *)
       IF t.base.form = Syms.TFArray THEN WriteType(f, t.base); RETURN END
     END;
-    Files.Write(f, "VOID"); RETURN
-  END;
-  IF t.form = Syms.TFRecord THEN
+    Files.Write(f, "VOID")
+  | Syms.TFRecord:
     FindTypeName(t, nm);
     IF nm[0] # 0X THEN Files.Write(f, nm); RETURN END;
-    Files.Write(f, "VOID"); RETURN
-  END;
-  IF t.form = Syms.TFProc THEN
+    Files.Write(f, "VOID")
+  | Syms.TFProc:
     (* Emit "PROC" so the importer treats the slot as a 4-byte FAR proc value.
        Cross-module proc variables are always FAR (NEAR can't be exported),
        so no FAR/NEAR keyword is needed.  The signature itself is not
        serialised — at the call boundary only the slot size matters. *)
-    Files.Write(f, "PROC"); RETURN
-  END;
+    Files.Write(f, "PROC")
+  ELSE
   Files.Write(f, "INTEGER")
+  END;
 END WriteType;
 
 PROCEDURE HasDot(name: ARRAY OF CHAR): BOOLEAN;
@@ -136,12 +134,17 @@ PROCEDURE WriteOneType(VAR f: Files.File; modName: ARRAY OF CHAR; sym: Syms.Symb
       bnm: ARRAY NameLen OF CHAR;
 BEGIN
   td := sym.type;
-  IF (td # Syms.NoType) & (td.form = Syms.TFRecord) THEN
+  WTypeHdr(f, modName, sym.nameId);
+  IF (td = Syms.NoType) THEN
+    Files.WriteLn(f);
+    RETURN
+  END;
+ CASE td.form OF
+    Syms.TFRecord:
     (* Always emit the RECORD header with its size, even when no field is
        exported: importers need the size to lay out records that embed this one
        (e.g. Scan.Scanner has a private `file: Files.File`).  Only the FIELD lines
        are gated on `exported`. *)
-    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " RECORD "); WInt(f, td.size); Files.WriteLn(f);
     IF td.base # Syms.NoType THEN
       FindTypeName(td.base, bnm);
@@ -158,34 +161,25 @@ BEGIN
       fld := fld.next
     END;
     Files.Write(f, "END"); Files.WriteLn(f)
-  ELSIF (td # Syms.NoType) & (td.form = Syms.TFPointer) THEN
-    WTypeHdr(f, modName, sym.nameId);
+  | Syms.TFPointer:
     Files.Write(f, " POINTER "); WriteType(f, td.base); Files.WriteLn(f)
-  ELSIF (td # Syms.NoType) & (td.form = Syms.TFProc) THEN
-    WTypeHdr(f, modName, sym.nameId);
+  | Syms.TFProc:
     Files.Write(f, " PROC"); Files.WriteLn(f)
-  ELSIF (td # Syms.NoType) & (td.form = Syms.TFAddress) THEN
-    WTypeHdr(f, modName, sym.nameId);
+  | Syms.TFAddress:
     Files.Write(f, " ADDRESS"); Files.WriteLn(f)
-  ELSIF (td # Syms.NoType) & (td.form = Syms.TFArray) THEN
-    WTypeHdr(f, modName, sym.nameId);
+  | Syms.TFArray:
     Files.WriteByte(f, ORD(' ')); WriteType(f, td); Files.WriteLn(f)
-  ELSIF (td # Syms.NoType) &
-        ((td.form = Syms.TFInteger) OR (td.form = Syms.TFBoolean) OR
-         (td.form = Syms.TFChar) OR (td.form = Syms.TFByte) OR
-         (td.form = Syms.TFWord) OR (td.form = Syms.TFLongint) OR
-         (td.form = Syms.TFReal) OR (td.form = Syms.TFLongreal) OR
-         (td.form = Syms.TFSet)) THEN
+  | Syms.TFInteger, Syms.TFBoolean, Syms.TFChar, Syms.TFByte,
+         Syms.TFWord, Syms.TFLongint, Syms.TFReal, Syms.TFLongreal,
+         Syms.TFSet:
     (* A TYPE alias of a primitive built-in (e.g. TYPE X = LONGINT) must carry
        its underlying form across the .def boundary — an importer that
        cannot see the form defaults it to INTEGER (2 bytes), silently
        truncating any 4-byte (LONGINT) or other-width value stored through a
        VAR parameter/global of the alias type. *)
-    WTypeHdr(f, modName, sym.nameId);
     Files.Write(f, " PRIM "); WriteType(f, td); Files.WriteLn(f)
-  ELSE
-    WTypeHdr(f, modName, sym.nameId); Files.WriteLn(f)
-  END
+  END;
+
 END WriteOneType;
 
 (* Write the "  PARAM ..." lines for a parameter chain starting at p. *)

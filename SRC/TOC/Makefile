@@ -9,7 +9,7 @@
 #   make install  — copy TOC.exe to BIN/TOC.EXE
 #   make clean    — remove .om files, TOC.exe, and local setup files
 
-BOOT_OC  = ../../BOOT/TOC.EXE
+BOOT_TOC  = ../../BOOT/TOC.EXE
 BIN_OM   = ../../BIN/OBERON.OM
 XT       = xt
 
@@ -23,7 +23,7 @@ XT       = xt
 # 2026-07-16, see SRC/TASM/TASM.MD §K -- so an OBERON_LIB env var is never a
 # working option here regardless of quoting/slash convention.)
 XTRUN  = $(XT) run --max=40000000000
-OCBOOT = toc_boot.exe
+TOC = _TOC.EXE
 
 # Every compiler source — the single-process build scans, compiles and links the
 # whole image in ONE call, so TOC.exe depends on the sources directly (no
@@ -44,24 +44,24 @@ OC_SRCS = \
     SCAN.MOD STRTAB.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
     PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD TOC.MOD
 
-all: TOC.exe
+all: TOC.EXE
 
-$(OCBOOT): $(BOOT_OC)
-	cp $(BOOT_OC) $(OCBOOT)
+$(TOC): $(BOOT_TOC)
+	cp $(BOOT_TOC) $(TOC)
 
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
 # Single-command self-host: toc /ENTRY=Run TOC.MOD scans deps, compiles every
 # stale module and links TOC.exe in one process.
-TOC.exe: $(OC_SRCS) $(OCBOOT) OBERON.OM
-	time $(XTRUN) $(OCBOOT) /LOG=debug /ENTRY=Run TOC.MOD /M
+TOC.EXE: $(OC_SRCS) $(TOC) OBERON.OM
+	time $(XTRUN) $(TOC) /LOG=debug /ENTRY=Run TOC.MOD /M
 
-install: TOC.exe
+install: TOC.EXE
 	mkdir -p ../../BIN
-	cp TOC.exe ../../BIN/TOC.EXE
+	cp TOC.EXE ../../BIN/TOC.EXE
 
 clean:
-	rm -f *.om *.OM *.rdf *.RDF *.def *.DEF *.TMP TOC.exe TOC.EXE MAIN.RDF $(OCBOOT) OBERON.OM
+	rm -f *.OM *.EXE OUTPUT.LOG
 
 .PHONY: all install clean
