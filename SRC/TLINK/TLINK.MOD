@@ -1,8 +1,8 @@
 MODULE TLink;
 (*
-  Trubo Link (tlink.exe) - RDOFF2 linker for tiny-model .COM/.SYS
+  Trubo Link (tlink.exe) - RDOFF2 linker for tiny-model .COM/.SYS/.EXE
   and small-model .EXE output.
-  tiny model: .COM/.SYS, no relocation table and
+  tiny model: .COM/.SYS/.EXE (texe), no relocation table and
   small model: .EXE with an MZ relocation table,
   RDOFF2/RDLIB2/TAR format detection, smart-link marking.
 
@@ -10,6 +10,7 @@ MODULE TLink;
     tlink /t=com [@list] input... output.com          (default mode)
     tlink /t=sys /A:xxxx [/N:name] input... output.sys
     tlink /t=exe input... output.exe
+    tlink /t=texe input... output.exe                  (tiny model, MZ wrapper)
 
   Uses Rdoff.ScanHeader/ScanRelocs/ReadCode/ReadData (the same primitives
   SRC/TOC/LINK.MOD uses for toc.exe's own embedded linker) instead of
@@ -19,12 +20,13 @@ MODULE TLink;
   DWORD size, sequential, '.'-prefixed entries (e.g. ".sig") are metadata
   and skipped.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Strings, Tar, Out;
+IMPORT Dos, Files, LogErr, Rdoff, Strings, Tar, TExe, Out;
 
 CONST
   ModeCom = 0;
   ModeSys = 1;
   ModeExe = 2;
+  ModeTExe = 3;
 
   MaxPath = 128;
   MaxName = 64;
@@ -440,13 +442,17 @@ BEGIN
 END Align16;
 
 (* CalculateLayoutTiny: contiguous code+data+bss, header bytes reserved
-   up front (18 for .SYS device-driver header, 3 for a .COM JMP stub).
+   up front (18 for .SYS device-driver header, 3 for a .COM JMP stub,
+   0 for texe -- its MZ header IP points at start directly, no stub).
    Parameters: none.
    Result: none (fatal via LogErr if the tiny-model 64KB limit is exceeded). *)
 PROCEDURE CalculateLayoutTiny;
   VAR m: Module; codeBase, dataBase, bssBase: LONGINT;
 BEGIN
-  IF mode = ModeSys THEN headerSize := 18 ELSE headerSize := 3 END;
+  IF mode = ModeSys THEN headerSize := 18
+  ELSIF mode = ModeTExe THEN headerSize := 0
+  ELSE headerSize := 3
+  END;
   codeBase := LONGINT(headerSize);
   m := modHead;
   WHILE m # NIL DO
@@ -604,6 +610,14 @@ BEGIN
     IF rseg = Rdoff.SegCode THEN fixup := fixup - curMod.finalCodeOfs
     ELSE fixup := fixup - curMod.finalDataOfs
     END
+  ELSIF (mode = ModeCom) OR (mode = ModeTExe) THEN
+    (* absolute reference: code/data execute at CS:100h (a .COM's PSP
+       load convention, which texe's MZ header reproduces via IP+100H
+       and CS=SS=PSP -- see TExe.Write), so an absolute in-image offset
+       must be biased by 0x100 to become the real runtime address.
+       Relative fixups above don't need this: both sides of the
+       subtraction shift by the same 0x100, so it cancels out. *)
+    fixup := fixup + LONGINT(100H)
   END;
   PatchMem(rseg, patchAddr, fixup, rwidth)
 END OnReloc;
@@ -924,6 +938,7 @@ BEGIN
   Out.String(" /T=com      Tiny model .COM output (default)"); Out.Ln;
   Out.String(" /T=sys      Tiny model .SYS device driver output"); Out.Ln;
   Out.String(" /T=exe      Small model .EXE output"); Out.Ln;
+  Out.String(" /T=texe     Tiny model .EXE output (DS=CS=SS=PSP, no JMP stub)"); Out.Ln;
   Out.String(" /A=xxxx     Device attribute (hex) - implies /T=sys"); Out.Ln;
   Out.String(" /N=name     Device name (max 8 chars, /T=sys only)"); Out.Ln;
   Out.String(" /LOG=level  debug|info|warn|error"); Out.Ln;
@@ -975,6 +990,7 @@ BEGIN
       IF Strings.EqualICase(val, "com") THEN mode := ModeCom
       ELSIF Strings.EqualICase(val, "sys") THEN mode := ModeSys
       ELSIF Strings.EqualICase(val, "exe") THEN mode := ModeExe
+      ELSIF Strings.EqualICase(val, "texe") THEN mode := ModeTExe
       ELSE LogErr.Error2("tlink: unknown /T= mode: ", val); RETURN 1
       END
     ELSIF MatchSwitchVal(arg, "/A=", val) THEN
@@ -1003,7 +1019,10 @@ BEGIN
   IF LogErr.HaveErr() THEN RETURN 1 END;
   PerformLinking;
   IF LogErr.HaveErr() THEN RETURN 1 END;
-  IF mode = ModeExe THEN WriteOutputExe ELSE WriteOutputTiny END;
+  IF mode = ModeExe THEN WriteOutputExe
+  ELSIF mode = ModeTExe THEN TExe.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, entryIp, outFileName)
+  ELSE WriteOutputTiny
+  END;
   IF LogErr.HaveErr() THEN RETURN 1 END;
 
   RETURN 0

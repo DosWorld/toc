@@ -15,6 +15,7 @@
 
 BIN_TOC = ../../BIN/TOC.EXE
 BIN_OM  = ../../BIN/OBERON.OM
+BIN_TRUBO_OM = ../../BIN/TRUBO.OM
 XT      = xt
 
 # No -c: xt uses process CWD (SRC/TLINK/) as the C:\ mount root, same
@@ -25,14 +26,17 @@ TOC = TOC.EXE
 
 all: TLINK.EXE
 
+TRUBO.OM: $(BIN_TRUBO_OM)
+	cp $(BIN_TRUBO_OM) TRUBO.OM
+
 $(TOC): $(BIN_TOC)
 	cp $(BIN_TOC) $(TOC)
 
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
-TLINK.EXE: TLINK.MOD $(TOC) OBERON.OM
-	$(XTRUN) $(TOC) /LOG=debug /ENTRY=Run TLINK.MOD /M
+TLINK.EXE: TLINK.MOD TEXE.MOD $(TOC) OBERON.OM TRUBO.OM
+	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TLINK.MOD /M
 
 install: TLINK.EXE
 	mkdir -p ../../BIN

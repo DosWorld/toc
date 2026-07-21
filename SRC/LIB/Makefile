@@ -14,7 +14,7 @@ XTRUN = $(XT) run
 
 STDLIB_OMS = SYSTEM.OM OUT.OM OUT87.OM IN.OM STRINGS.OM FILES.OM \
              CRT.OM DOS.OM IO.OM RDFLOAD.OM MATH.OM TEST.OM EMS.OM TIME.OM \
-             LOGERR.OM RDOFF.OM TAR.OM DETECT.OM WINCB.OM KMOUSE.OM SCREEN.OM BASE64.OM
+             DETECT.OM WINCB.OM KMOUSE.OM SCREEN.OM BASE64.OM
 
 all: $(STDLIB_OMS)
 
@@ -106,20 +106,6 @@ TIME.OM: TIME.MOD SYSTEM.OM $(OC)
 
 MATH.OM: MATH.MOD $(OC)
 	$(XTRUN) $(OC) $(OCFLAGS) MATH.MOD
-
-# Err/Rdoff/Tar were moved here from SRC/TOC (2026-07-11) -- previously
-# compiler-internal, now merged into OBERON.OM like every other stdlib
-# module so toc.exe and any tool (RDFGREP, TOLIB, TOSTRIP, TASM, ...) can
-# `IMPORT LogErr`/`IMPORT Rdoff`/`IMPORT Tar` with no OBERON_LIB entry
-# needed.  Err was renamed to LogErr (ERR.MOD -> LOGERR.MOD) in the same move.
-LOGERR.OM: LOGERR.MOD IO.OM FILES.OM STRINGS.OM SYSTEM.OM $(OC)
-	$(XTRUN) $(OC) $(OCFLAGS) LOGERR.MOD
-
-RDOFF.OM: RDOFF.MOD FILES.OM LOGERR.OM STRINGS.OM SYSTEM.OM $(OC)
-	$(XTRUN) $(OC) $(OCFLAGS) RDOFF.MOD
-
-TAR.OM: TAR.MOD FILES.OM LOGERR.OM STRINGS.OM SYSTEM.OM $(OC)
-	$(XTRUN) $(OC) $(OCFLAGS) TAR.MOD
 
 # (*$L DETECT.RDF*) inside DETECT.MOD is resolved from the CWD (this dir)
 # -- same pattern as SYSTEM.OM + SYSTEM.RDF.  DETECT.RDF is a checked-in

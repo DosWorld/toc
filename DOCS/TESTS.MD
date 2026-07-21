@@ -442,6 +442,44 @@ bash TESTS/test_selfhost.sh
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
+## TLINK linker regression test
+
+`TESTS/test_tlink.sh` verifies `SRC/TLINK/` (the RDOFF2 linker, all four
+`/T=` output modes: `com`, `sys`, `exe`, `texe`).
+
+1. Builds `TASM.exe` and `TLINK.exe` via `BOOT/TOC.EXE` (single-process
+   `/ENTRY=Run`).
+2. Assembles `TESTS/FIX/TLINKHI.ASM` (a `start` global that prints a
+   greeting via `INT 21h AH=9` and exits via `AH=4Ch`) and
+   `TESTS/FIX/TLINKDRV.ASM` (bare `strategy`/`interrupt` globals for
+   `/T=sys`).
+3. Links `TLINKHI.RDF` with `/T=com` and `/T=texe`, runs each `.com`/`.exe`
+   under `xt`, and checks stdout matches the greeting **exactly**
+   (byte-for-byte, not a substring) — this catches both wrong data and
+   runaway/looping output, which is exactly the failure mode of the bug
+   this test was written to guard: `TLINK.MOD`'s `OnReloc` was missing the
+   PSP (`CS:100h`) address bias that both `/T=com` and `/T=texe` require
+   for absolute in-image references (`mov dx, msg`-style), so an absolute
+   reference resolved to the wrong byte offset (see `TExe.MOD`'s header
+   comment and `TLINK.MOD`'s `OnReloc`).
+4. Links `TLINKDRV.RDF` with `/T=sys` and checks the device-driver header's
+   first bytes (`next=-1`, `attr=0`).
+
+`/T=exe` (small model) is not exercised by this test: a bare hand-assembled
+fixture has no small-model startup stub (`mov ax,ss / mov ds,ax`) to set DS
+correctly at runtime — that stub is normally emitted by the compiler for
+real small-model programs, not something a raw `.ASM` fixture should
+hand-roll for a linker test.
+
+Run as part of `make test`, or standalone:
+
+```bash
+bash TESTS/test_tlink.sh
+# Results: 3 passed, 0 failed
+```
+
+Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
+
 > **Host-filesystem caveat:** the gen-1 compiler is staged as `SELFTOC.EXE`, **not**
 > `toc.exe`.  On a case-insensitive host filesystem (macOS) `toc.exe` and the
 > compiler's own `TOC.exe` output collide on the same path, so a self-compile would

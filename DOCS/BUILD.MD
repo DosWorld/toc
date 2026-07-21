@@ -460,18 +460,22 @@ before the new one is written.
 ## Using tlink — Trubo Link (RDOFF2 linker)
 
 ```
-tlink [/T=com|sys|exe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
+tlink [/T=com|sys|exe|texe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
 ```
 
 A merged linker for RDOFF2 object files, distinct from `toc.exe`'s own
-embedded smart linker: `tlink` targets **tiny model** (`.COM`/`.SYS`, a
-single contiguous code+data+bss segment, no relocation table) and **small
+embedded smart linker: `tlink` targets **tiny model** (`.COM`/`.SYS`/`texe`,
+a single contiguous code+data+bss segment, no relocation table) and **small
 model** (`.EXE`, paragraph-aligned code/data/bss regions plus an MZ
 relocation table for `SEGRELOC` fixups) — the two memory models
 `toc.exe`'s own linker does not target. Built from `SRC/TLINK/TLINK.MOD`,
 which keeps the shared logic (module/symbol scanning, RDOFF2/RDLIB2/TAR
 format auto-detection, smart-link marking from an entry symbol) once,
-branching only at layout/output time on the target mode.
+branching only at layout/output time on the target mode. `/T=com` and
+`/T=texe` share the same tiny-model layout and address resolution —
+including the PSP (`CS:100h`) bias `TLINK.MOD`'s `OnReloc` applies to
+absolute in-image references for both modes — differing only in the final
+output writer.
 
 - **`/T=com`** (default): produce a `.COM` image — a 3-byte `JMP start`
   stub followed by the linked code+data.
@@ -481,6 +485,17 @@ branching only at layout/output time on the target mode.
   (implies `/T=sys` if `/A:` is given without an explicit `/T=`).
 - **`/T=exe`**: produce a small-model MZ `.EXE` with an entry symbol named
   `start`.
+- **`/T=texe`**: produce a "tiny .EXE" — the same tiny-model layout as
+  `/T=com` (no relocation table, `DS=CS=SS=PSP` at runtime) but wrapped in
+  a minimal MZ header instead of relying on DOS's `.COM`-loader convention:
+  header `CS=SS=-1` paragraph (so `CS`/`SS` resolve to the PSP segment,
+  one paragraph behind the load segment), `IP` set directly to the entry
+  point (`+0x100` for the PSP-vs-load-segment bias — no on-disk `JMP`
+  stub needed, unlike `/T=com`), `SP=0xFFFE`, no relocation table, and
+  `MinAlloc=MaxAlloc` sized to reserve the rest of the 64K PSP segment
+  after the image (matching a `.COM`'s implicit "own the whole segment").
+  Implemented in `SRC/TLINK/TEXE.MOD` (module `TExe`), called from
+  `TLINK.MOD`'s output-dispatch step.
 - **`/A:xxxx`**: device attribute word (hex, no prefix, e.g. `/A:8000`) —
   implies `/T=sys`.
 - **`/N:name`**: device name, space-padded to 8 characters (`/T=sys` only).

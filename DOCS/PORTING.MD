@@ -19,7 +19,7 @@ library modules, and the command-line toolchain.
 | `BIN/TOC.EXE` | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `.om` archive manager (list / extract / create / merge); supports `@listfile` |
 | `BIN/TASM.EXE` | Self-hosted MS-DOS assembler, built via `SRC/TASM/Makefile` from `BOOT/TASM.EXE` |
-| `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
+| `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS`/`texe` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
 | `BIN/RDFGREP.EXE` | RDOFF/.om/.exe introspection tool (used in tests) |
 | `xt` | DOS emulator; runs MS-DOS `.exe` files on Linux/Mac |
 
@@ -147,12 +147,6 @@ has content; BSS is contentless by definition). Inspect the result with
 `rdfgrep has-global`/`code-contains`/`data-contains` (see
 `DOCS/TESTS.MD`).
 
-Real consumer: `SRC/CC/CBCVM.MAK` (a hand-written 8086 byte-code
-interpreter) uses `/BIN=code /NAME=cbc FOO.CBC` to link a compiled `.cbc`
-program directly into its own `.EXE` instead of loading it from disk at
-runtime — see `SRC/CC/PLAN.MD`'s "CBCVM.MAK — linked-in `.cbc`" section
-and `SRC/CC/Makefile`'s `%.exe: %.CBC` pattern rule.
-
 Covers a practical 8086 subset: the general-purpose/segment/string instructions
 (including `LDS`/`LES`), shift/rotate (by 1 or `CL` only, matching real 8086),
 `MUL`/`DIV`/`IMUL`/`IDIV`, `Jcc`, `LOCK`/`REP` prefixes, `BITS`/`CPU`/
@@ -217,17 +211,30 @@ regression test" for the full breakdown.
 ### 1.8 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
 
 ```
-tlink [/T=com|sys|exe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
+tlink [/T=com|sys|exe|texe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
 ```
 
-`BIN/TLINK.EXE` links RDOFF2 objects into a tiny-model `.COM`/`.SYS` image
-(`/T=com`, the default, or `/T=sys` with `/A:`/`/N:` for a device driver —
-a 3-byte `JMP start` stub or an 18-byte device header, single contiguous
-code+data+bss segment, no relocation table) or a small-model `.EXE`
-(`/T=exe` — paragraph-aligned code/data/bss regions plus an MZ relocation
-table). These are memory models `toc.exe`'s own embedded linker does not
-target (it always produces a full/large-model-style single-segment image
-sized to the compiler's own conventions).
+`BIN/TLINK.EXE` links RDOFF2 objects into a tiny-model `.COM`/`.SYS`/`texe`
+image (`/T=com`, the default; `/T=sys` with `/A:`/`/N:` for a device
+driver; `/T=texe` for a tiny-model MZ `.EXE` — a 3-byte `JMP start` stub,
+an 18-byte device header, or no on-disk stub at all, respectively, all
+sharing one contiguous code+data+bss segment with no relocation table) or
+a small-model `.EXE` (`/T=exe` — paragraph-aligned code/data/bss regions
+plus an MZ relocation table). These are memory models `toc.exe`'s own
+embedded linker does not target (it always produces a full/large-model-style
+single-segment image sized to the compiler's own conventions).
+
+`/T=texe` wraps the same tiny-model layout as `/T=com` in a minimal MZ
+header instead of relying on DOS's `.COM` loader convention: header
+`CS=SS=-1` paragraph (resolving to the PSP segment, one paragraph behind
+the load segment, so `DS=CS=SS=PSP` at runtime exactly like a `.COM`), `IP`
+set directly to the entry point plus `0x100` (the PSP-vs-load-segment
+bias, standing in for the `JMP` stub `/T=com` needs on disk), `SP=0xFFFE`,
+no relocation table, and `MinAlloc=MaxAlloc` sized to reserve the rest of
+the 64K PSP segment after the image. Implemented in `SRC/TLINK/TEXE.MOD`
+(module `TExe`), called from `TLINK.MOD`'s output-dispatch step. `/T=com`
+and `/T=texe` share `TLINK.MOD`'s `OnReloc` PSP (`CS:100h`) address bias
+for absolute in-image references — `/T=sys` does not apply it (no PSP).
 
 Keeps the logic shared between tiny and small model (module/symbol
 scanning, RDOFF2/RDLIB2/TAR auto-detection by content signature,
@@ -237,9 +244,10 @@ layout/output time on the target mode. AR (`.a`) archive support was
 intentionally not implemented — not needed by anything in this repo.
 `/LOG=` works exactly like `toc.exe`'s/`tasm.exe`'s (`LogErr.SetLevel`).
 
-Source: `SRC/TLINK/TLINK.MOD`. Build: `cd SRC/TLINK && make && make
-install`. See [BUILD.MD](BUILD.MD) §"Using tlink" for the full CLI
-reference.
+Source: `SRC/TLINK/TLINK.MOD`, `SRC/TLINK/TEXE.MOD`. Build: `cd SRC/TLINK
+&& make && make install`. See [BUILD.MD](BUILD.MD) §"Using tlink" for the
+full CLI reference. Regression test: `TESTS/test_tlink.sh` (see
+[TESTS.MD](TESTS.MD) §"TLINK linker regression test").
 
 ---
 

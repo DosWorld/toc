@@ -11,12 +11,11 @@ MODULE Link;
   - All data combined into one DataBuf <= 64KB.
   - All MZ relocs collected as a linked list before writing.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Tar, Strings;
+IMPORT Dos, Files, LogErr, Rdoff, Tar, Strings, StrTab;
 
 CONST
   SymHash*   = 256;      (* symbol hash table size, power of 2 *)
   MaxPath*   = 128;
-  MaxName*   = 34;      (* link symbol = module(<=8) + "_" + ident(<=24) + 0X *)
   (* Default stack size when the entry module has no `$M` directive.  Raising
      this blanket default was tried on 2026-07-10 (to paper over TOC.MOD's
      `$M` directive not reaching the linker) and reverted: every program
@@ -79,9 +78,25 @@ TYPE
      WORD is the fast unsigned type; NoSym (0FFFFH) is the null handle.  SymRec.owner
      stays a Module POINTER (modules are not chunked); next/hNext are index handles. *)
   Symbol* = WORD;
+  (* name is a StrTab-interned id, not raw text (was ARRAY MaxName OF CHAR +
+     a separately-cached Strings.HashCode) — StrTab already de-duplicates
+     and hashes every name once; comparing two symbols is now a WORD
+     compare (nameId equality) instead of Strings.Equal on 34-byte arrays,
+     and each SymRec drops from name(34)+hashCode(2)=36 B to nameId(2) B.
+     SAFETY INVARIANT: every nameId stored here is Intern'd/Find'd within
+     the SAME LinkAll() call that reads it back — Syms.OpenStores (one per
+     Phase-2 module compile) resets StrTab per-compile, but Phase 2 always
+     fully finishes before Phase 3 (LinkAll) starts, and TOC.MOD calls
+     StrTab.Reset again right after LinkAll returns (see TOC.MOD's
+     RunBody) — so no nameId here is ever read after a Reset that
+     postdates its Intern. Do NOT cache a nameId across a StrTab.Reset
+     boundary; if you need a value that outlives one, resolve it to
+     something StrTab-independent first (MarkModule's MarkNode list does
+     this: it stores resolved Module POINTERs from SymOwner, never the
+     nameId or raw name text, specifically so its deferred recursion
+     can't be invalidated by an intervening reset). *)
   SymRec = RECORD
-    name:     ARRAY MaxName OF CHAR;
-    hashCode: WORD;    (* Strings.HashCode(name), cached to speed FindSymbol *)
+    nameId:   WORD;
     owner:    Module;
     segId:    INTEGER; (* 0=code, 1=data, 2=bss *)
     offset:   LONGINT;
@@ -206,7 +221,15 @@ TYPE
     mzRelocCnt:   WORD;
     groupHead:    GroupNode;
     groupTail:    GroupNode;
-    dataBuf:      Rdoff.SegBuf;
+    dataFile:     Files.File;   (* combined data segment, file-backed instead of
+                                   a resident 65000-byte RAM buffer (LINKBUF-
+                                   REPORT.MD §4.1) — CalculateLayout already
+                                   fixes every module's dataFinalOfs before any
+                                   byte is read or patched, so a Files.Seek-
+                                   capable temp file gives the same random-
+                                   access guarantee a RAM buffer did. Written
+                                   then rewound + read; content is destroyed on
+                                   close, so it is never reopened by name. *)
     codeBuf:      Rdoff.SegBuf;  (* one reusable per-group code buffer, reserved
                                     up front so the fixed 65000-byte block is
                                     grabbed while the arena is still contiguous *)
@@ -324,34 +347,31 @@ BEGIN RETURN ls^.symDir[SYSTEM.LSR(i, SymShift)]^.s[SYSTEM.AND(i, SymMask)].offs
 
 PROCEDURE AddSymbol(ls: State; name: ARRAY OF CHAR; owner: Module;
                     segId: INTEGER; ofs: LONGINT);
-  VAR sym: Symbol; slot, hc: WORD; node: SymNode;
+  VAR sym: Symbol; slot, nid: WORD; node: SymNode;
 BEGIN
   sym := SymAlloc(ls);
   IF sym = NoSym THEN RETURN END;
-  hc := Strings.HashCode(name);
+  nid := StrTab.Intern(name);
   node := SymNodeOf(ls, sym); slot := SYSTEM.AND(sym, SymMask);
-  Strings.Copy(name, node^.s[slot].name);
+  node^.s[slot].nameId   := nid;
   node^.s[slot].owner    := owner;
   node^.s[slot].segId    := segId;
   node^.s[slot].offset   := ofs;
-  node^.s[slot].hashCode := hc;
   node^.s[slot].next     := ls^.symHead; ls^.symHead := sym;
-  slot := SYSTEM.AND(hc, SymHash - 1);   (* reuse `slot` as the hash bucket *)
+  slot := SYSTEM.AND(nid, SymHash - 1);   (* reuse `slot` as the hash bucket *)
   node^.s[SYSTEM.AND(sym, SymMask)].hNext := ls^.symHash[slot];
   ls^.symHash[slot] := sym
 END AddSymbol;
 
 PROCEDURE FindSymbol*(ls: State; name: ARRAY OF CHAR): Symbol;
-  VAR sym: Symbol; hc: WORD; node: SymNode; slot: WORD;
+  VAR sym: Symbol; nid: WORD; node: SymNode; slot: WORD;
 BEGIN
-  hc := Strings.HashCode(name);
-  sym := ls^.symHash[SYSTEM.AND(hc, SymHash - 1)];
+  nid := StrTab.Find(name);
+  IF nid = 0 THEN RETURN NoSym END;   (* never interned => can't be any symbol's name *)
+  sym := ls^.symHash[SYSTEM.AND(nid, SymHash - 1)];
   WHILE sym # NoSym DO
     node := SymNodeOf(ls, sym); slot := SYSTEM.AND(sym, SymMask);
-    (* compare the cheap WORD hash first; only do the full Strings.Equal on a hash hit *)
-    IF (node^.s[slot].hashCode = hc) & Strings.Equal(node^.s[slot].name, name) THEN
-      RETURN sym
-    END;
+    IF node^.s[slot].nameId = nid THEN RETURN sym END;
     sym := node^.s[slot].hNext
   END;
   RETURN NoSym
@@ -429,7 +449,6 @@ BEGIN
   ls^.relocHead  := NIL; ls^.relocTail  := NIL;
   ls^.mzRelocCnt := 0;
   ls^.groupHead  := NIL; ls^.groupTail  := NIL;
-  ls^.dataBuf    := NIL;
   ls^.codeBuf    := NIL;
   ls^.totalCodeLen := LONGINT(0);
   ls^.totalDataLen := LONGINT(0);
@@ -442,18 +461,19 @@ BEGIN
   ResetDebugState(ls)
 END InitState;
 
-(* Reserve the two large link buffers (data + one reusable per-group code
-   buffer) BEFORE any module is scanned.  SegBuf is a fixed 65000-byte block; the
-   symbol/module scan (each .rdf opened through an 8 KB Files buffer) fragments
-   the arena so that no 65000-byte hole survives by link time.  Grabbing both
-   here — while the arena is still one contiguous block — guarantees the fixed
-   buffers exist; the later small allocations fill the remaining space and never
-   need a large contiguous run.  Returns FALSE (latching LogErr.HaveErr()) if either
+(* Reserve the one remaining large link buffer (the reusable per-group code
+   buffer) BEFORE any module is scanned.  SegBuf is a fixed 65000-byte block;
+   the symbol/module scan (each .rdf opened through an 8 KB Files buffer)
+   fragments the arena so that no 65000-byte hole survives by link time.
+   Grabbing it here — while the arena is still one contiguous block —
+   guarantees the fixed buffer exists; the later small allocations fill the
+   remaining space and never need a large contiguous run.  The combined data
+   segment no longer needs an equivalent RAM reservation — it is file-backed
+   (ls^.dataFile, opened on first use in PerformLinking) — see LINKBUF-
+   REPORT.MD §4.1.  Returns FALSE (latching LogErr.HaveErr()) if the
    allocation fails. *)
 PROCEDURE ReserveBuffers*(ls: State): BOOLEAN;
 BEGIN
-  NEW(ls^.dataBuf, Rdoff.SegLimit);
-  IF ls^.dataBuf = NIL THEN LogErr.Error("Out of memory (data buffer)"); RETURN FALSE END;
   NEW(ls^.codeBuf, Rdoff.SegLimit);
   IF ls^.codeBuf = NIL THEN LogErr.Error("Out of memory (code buffer)"); RETURN FALSE END;
   RETURN TRUE
@@ -550,15 +570,42 @@ END ProcessFile;
 
 (* ---- smart linking ---- *)
 
+CONST
+  MarkChunk = 64;   (* dependency-module entries per chunk node (small-record rule) *)
+
+TYPE
+  (* Chunked list of dependency Modules found while scanning ONE module's
+     imports — collected while that module's .rdf is open, then the file is
+     closed, and only THEN do we recurse to mark each dependency (see
+     MarkModule below). Without this, MarkModule's recursion held its
+     Rdoff.ScanRelocs file (and its 8 KB Files.MOD read buffer) open across
+     the whole recursive descent into every dependency: a deep, real import
+     chain (Link->Parser->PStmt->PExpr->Cgen->Syms->StrTab, ~7 levels in
+     this compiler's own self-host) stacked up that many concurrent 8 KB
+     buffers, which — combined with the tight free-heap window already
+     measured at this point in a self-host — could fail the buffer's own
+     NEW. Files.Reset's NEW-failure path returns FALSE exactly like a
+     genuine open failure, so this surfaced as a confusing "Cannot open:
+     STRTAB.OM" instead of an out-of-memory message. Fixed by making
+     MarkModule single-file-open-at-a-time: only one Rdoff.ScanRelocs call
+     is ever on the stack at once, regardless of import-graph depth. *)
+  MarkNode = POINTER TO MarkNodeRec;
+  MarkNodeRec = RECORD
+    m:     ARRAY MarkChunk OF Module;
+    count: INTEGER;
+    next:  MarkNode
+  END;
+
 VAR
   markLs:     State;
   markErrbuf: ARRAY 256 OF CHAR;
+  markDeps:   MarkNode;   (* this call's collected dependencies (see MarkModule) *)
 
 PROCEDURE MarkModule(m: Module); FORWARD;
 
 (* flag is unused but fixed by the Import-scan callback signature — do not remove. *)
 PROCEDURE OnImportForMark(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
-  VAR sym: Symbol;
+  VAR sym: Symbol; n: MarkNode;
 BEGIN
   sym := FindSymbol(markLs, name);
   IF sym = NoSym THEN
@@ -566,15 +613,38 @@ BEGIN
     Strings.Append(name, markErrbuf);
     LogErr.Error(markErrbuf); RETURN
   END;
-  MarkModule(SymOwner(markLs, sym))
+  (* Collect only — do NOT recurse here, the caller's .rdf file is still
+     open (see MarkModule's comment). *)
+  IF (markDeps = NIL) OR (markDeps^.count >= MarkChunk) THEN
+    NEW(n);
+    IF n = NIL THEN LogErr.Error("out of memory (mark-pass dependency list)"); RETURN END;
+    n^.count := 0; n^.next := markDeps; markDeps := n
+  END;
+  markDeps^.m[markDeps^.count] := SymOwner(markLs, sym);
+  INC(markDeps^.count)
 END OnImportForMark;
 
 PROCEDURE MarkModule;
+  VAR savedDeps, n, nNext: MarkNode; i: INTEGER;
 BEGIN
-  IF ~m^.used THEN
-    m^.used := TRUE;
-    Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize,
-                       OnImportForMark, NIL, NIL)
+  IF m^.used THEN RETURN END;
+  m^.used := TRUE;
+  (* Save/restore markDeps: this call's collection must not be clobbered by
+     a nested MarkModule call sharing the same module-level relay (mirrors
+     the save/restore discipline used elsewhere in this codebase for
+     single ambient-relay globals reused across recursive descents). *)
+  savedDeps := markDeps; markDeps := NIL;
+  Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, OnImportForMark, NIL, NIL);
+  (* File is closed now (ScanRelocs closes it before returning) — safe to
+     recurse: at most one file is open at any point in the whole mark
+     pass, regardless of import-graph depth. *)
+  n := markDeps; markDeps := savedDeps;
+  WHILE n # NIL DO
+    nNext := n^.next;
+    i := 0;
+    WHILE i < n^.count DO MarkModule(n^.m[i]); INC(i) END;
+    DISPOSE(n);
+    n := nNext
   END
 END MarkModule;
 
@@ -683,7 +753,6 @@ VAR
   lnkMod:     Module;
   lnkImports: ImportNode;
   lnkCodeBuf: Rdoff.SegBuf;
-  lnkDataBuf: Rdoff.SegBuf;
 
 PROCEDURE FindImport(id: INTEGER): Symbol;
   VAR p: ImportNode; k: INTEGER;
@@ -715,25 +784,56 @@ BEGIN
   RETURN m^.codeFinalOfs - m^.groupCodeStart
 END GroupOfs;
 
-(* Patch code or data buffer at group-relative/data offset. *)
-PROCEDURE PatchBuf(rseg: INTEGER; bufOfs: LONGINT; addend: WORD; width: INTEGER);
-  VAR buf: Rdoff.SegBuf; o: WORD; cur: WORD;
+(* Patch the resident code group buffer at a group-relative offset.
+   (Data-segment patches go through PatchDataFile below — see LINKBUF-
+   REPORT.MD §4.1 for why the two diverged: code stays a RAM scratch
+   buffer per group, data is file-backed.) *)
+PROCEDURE PatchBuf(bufOfs: LONGINT; addend: WORD; width: INTEGER);
+  VAR o: WORD; cur: WORD;
 BEGIN
-  IF rseg = Rdoff.SegCode THEN buf := lnkCodeBuf ELSE buf := lnkDataBuf END;
   (* WORD, not INTEGER: buffer offsets are 0..64999 and an offset >= 32768
      carried as a negative INTEGER indexed correctly only via 16-bit
      wraparound — exactly the trap this module's own comments warn about. *)
   o := WORD(bufOfs);
   IF width = 2 THEN
-    cur := WORD(INTEGER(buf^[o]) + SYSTEM.LSL(INTEGER(buf^[o+1]), 8));
+    cur := WORD(INTEGER(lnkCodeBuf^[o]) + SYSTEM.LSL(INTEGER(lnkCodeBuf^[o+1]), 8));
     cur := cur + addend;   (* 16-bit WORD arithmetic wraps mod 65536 *)
-    buf^[o]   := BYTE(SYSTEM.AND(cur, 0FFH));
-    buf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH))
+    lnkCodeBuf^[o]   := BYTE(SYSTEM.AND(cur, 0FFH));
+    lnkCodeBuf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH))
   ELSE
-    cur := WORD(SYSTEM.AND(INTEGER(buf^[o]) + INTEGER(addend), 0FFH));
-    buf^[o] := BYTE(cur)
+    cur := WORD(SYSTEM.AND(INTEGER(lnkCodeBuf^[o]) + INTEGER(addend), 0FFH));
+    lnkCodeBuf^[o] := BYTE(cur)
   END
 END PatchBuf;
+
+(* Patch the file-backed combined data segment (ls^.dataFile) at an
+   absolute data offset — the file-backed counterpart of PatchBuf.
+   CalculateLayout already fixed every module's dataFinalOfs before any
+   relocation runs, so bufOfs here is a stable, already-final byte offset;
+   this is a plain seek+read+seek+write, exactly as PatchBuf's array
+   read-modify-write, just against a file instead of a RAM array. One
+   extra seek pair per relocation (not per byte) — see LINKBUF-REPORT.MD
+   §4.1's risk assessment (~1,700 relocations for this compiler's own
+   self-host image; Files.MOD's own 8 KB internal buffering absorbs most
+   of the actual disk cost when nearby offsets are patched repeatedly). *)
+PROCEDURE PatchDataFile(bufOfs: LONGINT; addend: WORD; width: INTEGER);
+  VAR lo, hi: BYTE; cur: WORD;
+BEGIN
+  Files.Seek(lnkLs^.dataFile, bufOfs);
+  Files.ReadByte(lnkLs^.dataFile, lo);
+  IF width = 2 THEN
+    Files.ReadByte(lnkLs^.dataFile, hi);
+    cur := WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8));
+    cur := cur + addend;
+    Files.Seek(lnkLs^.dataFile, bufOfs);
+    Files.WriteByte(lnkLs^.dataFile, BYTE(SYSTEM.AND(cur, 0FFH)));
+    Files.WriteByte(lnkLs^.dataFile, BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH)))
+  ELSE
+    cur := WORD(SYSTEM.AND(INTEGER(lo) + INTEGER(addend), 0FFH));
+    Files.Seek(lnkLs^.dataFile, bufOfs);
+    Files.WriteByte(lnkLs^.dataFile, BYTE(cur))
+  END
+END PatchDataFile;
 
 (* flag is unused but fixed by the Import-scan callback signature — do not remove. *)
 PROCEDURE OnImportForLink(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
@@ -820,7 +920,8 @@ BEGIN
     END
   END;
 
-  PatchBuf(rseg, patchAddr, fixup, rwidth)
+  IF rseg = Rdoff.SegCode THEN PatchBuf(patchAddr, fixup, rwidth)
+  ELSE PatchDataFile(patchAddr, fixup, rwidth) END
 END OnReloc;
 
 (* rwidth and rrel are unused but fixed by the reloc-scan callback signature
@@ -851,7 +952,8 @@ BEGIN
     END
   END;
 
-  PatchBuf(rseg, patchAddr, fixup, 2);
+  IF rseg = Rdoff.SegCode THEN PatchBuf(patchAddr, fixup, 2)
+  ELSE PatchDataFile(patchAddr, fixup, 2) END;
 
   (* add MZ reloc entry (offset in load image, 0-based from image start) *)
   IF rseg = Rdoff.SegCode THEN
@@ -972,9 +1074,9 @@ BEGIN
     m := m^.next
   END;
 
-  (* apply this group's relocations *)
+  (* apply this group's relocations (data-segment relocs go through
+     lnkLs^.dataFile inside PatchDataFile, not a RAM alias) *)
   lnkCodeBuf := ls^.codeBuf;
-  lnkDataBuf := ls^.dataBuf;
   m := ls^.modHead;
   WHILE m # NIL DO
     IF m^.used & (m^.groupId = gid) THEN
@@ -1002,28 +1104,50 @@ BEGIN
   node^.g[slot].buf := NIL   (* drop the alias; ls^.codeBuf is freed in LinkFree *)
 END ProcessGroup;
 
+PROCEDURE WriteZeros(VAR f: Files.File; n: LONGINT);
+  VAR buf: ARRAY 128 OF BYTE; chunk: WORD;
+BEGIN
+  SYSTEM.FILL(buf, 128, 0);
+  WHILE n > LONGINT(128) DO
+    IF Files.BlockWrite(f, buf, 128) # 128 THEN LogErr.Error("Write error") END;
+    DEC(n, LONGINT(128))
+  END;
+  chunk := WORD(n);
+  IF chunk > 0 THEN
+    IF Files.BlockWrite(f, buf, chunk) # chunk THEN LogErr.Error("Write error") END
+  END
+END WriteZeros;
+
 PROCEDURE PerformLinking*(ls: State);
   VAR m, eso: Module; g: GroupNode; gslot: INTEGER;
-      esym: Symbol; sz, k, pos: LONGINT;
+      esym: Symbol; sz, pos: LONGINT;
 BEGIN
-  (* Data buffer (one resident segment, <= 64 KB) — reserved up front by
-     ReserveBuffers while the arena was contiguous; here we only zero the used
-     span. *)
+  (* Combined data segment (<= 64 KB) — file-backed instead of a resident
+     RAM buffer (LINKBUF-REPORT.MD §4.1: CalculateLayout already fixed
+     every module's dataFinalOfs, so a Files.Seek-capable temp file gives
+     the same random-access guarantee the old ls^.dataBuf did). Pre-zero
+     the whole span first (WriteZeros, sequential — same technique as
+     WriteExe's header padding) so any gap NO module's data covers (e.g.
+     alignment padding between modules) reads back as zero, matching the
+     old buffer's explicit zero-fill. *)
+  IF ~Files.ReWriteTemp(ls^.dataFile) THEN LogErr.Error("Cannot create data temp"); RETURN END;
+  IF Files.IsEmsBacked(ls^.dataFile) THEN LogErr.Debug("TRACE dataFile EMS-backed")
+  ELSE LogErr.Debug("TRACE dataFile DISK-backed") END;
   sz := ls^.totalDataLen;
   IF sz < LONGINT(1) THEN sz := LONGINT(1) END;
-  (* explicit indexed loop, NOT SYSTEM.FILL: dataBuf is the same far-heap
-     SegBuf type that mis-addressed under SYSTEM.FILL before (see
-     implementation-rules.md §"Reusing one shared code buffer"). *)
-  k := LONGINT(0); WHILE k < sz DO ls^.dataBuf^[INTEGER(k)] := BYTE(0); INC(k) END;
+  WriteZeros(ls^.dataFile, sz);
 
-  (* Load all data segments (data is one combined <= 64 KB buffer). *)
+  (* Load all data segments (data is one combined <= 64 KB span, now on
+     disk): each module's Rdoff.ReadDataToFile seeks to its own
+     dataFinalOfs and copies straight from the .rdf into ls^.dataFile —
+     no RAM buffer of segment size is ever needed. *)
   m := ls^.modHead;
   WHILE m # NIL DO
     IF m^.used THEN
       FindOrCreateGroup(ls, m, g, gslot);   (* build group descriptors *)
       IF m^.dataSize > LONGINT(0) THEN
-        Rdoff.ReadData(m^.path, m^.libOfs, m^.hdrSize,
-                         ls^.dataBuf, WORD(m^.dataFinalOfs), WORD(m^.dataSize))
+        Rdoff.ReadDataToFile(m^.path, m^.libOfs, m^.hdrSize,
+                         ls^.dataFile, WORD(m^.dataFinalOfs), WORD(m^.dataSize))
       END
     END;
     m := m^.next
@@ -1033,6 +1157,8 @@ BEGIN
      writing strictly sequentially (pos tracks the next byte). *)
   lnkLs := ls;
   IF ~Files.ReWriteTemp(ls^.spillFile) THEN LogErr.Error("Cannot create code temp"); RETURN END;
+  IF Files.IsEmsBacked(ls^.spillFile) THEN LogErr.Debug("TRACE spillFile EMS-backed")
+  ELSE LogErr.Debug("TRACE spillFile DISK-backed") END;
   pos := LONGINT(0);
   g := ls^.groupHead;
   WHILE (g # NIL) & ~LogErr.HaveErr() DO
@@ -1500,20 +1626,6 @@ END WriteDebugInfo;
 
 (* ---- write MZ EXE ---- *)
 
-PROCEDURE WriteZeros(VAR f: Files.File; n: LONGINT);
-  VAR buf: ARRAY 128 OF BYTE; chunk: WORD;
-BEGIN
-  SYSTEM.FILL(buf, 128, 0);
-  WHILE n > LONGINT(128) DO
-    IF Files.BlockWrite(f, buf, 128) # 128 THEN LogErr.Error("Write error") END;
-    DEC(n, LONGINT(128))
-  END;
-  chunk := WORD(n);
-  IF chunk > 0 THEN
-    IF Files.BlockWrite(f, buf, chunk) # chunk THEN LogErr.Error("Write error") END
-  END
-END WriteZeros;
-
 (* Copy n bytes of the linked code image from the spill file into fout, then
    close (and so delete) the spill file.  The spill file is the one opened in
    PerformLinking and left open + rewound; it is never reopened by name.
@@ -1610,13 +1722,17 @@ BEGIN
   (* copy the linked code image (totalCodeLen bytes) from the spill file *)
   CopyCodeImage(ls, fout, ls^.totalCodeLen);
 
-  (* write data segment *)
+  (* write data segment: copy from the file-backed ls^.dataFile (rewound
+     first) instead of a resident RAM buffer — see LINKBUF-REPORT.MD §4.1.
+     Files.BlockCopy already does exactly this chunked-copy pattern
+     (staged through its own small stack buffer). *)
   IF ls^.totalDataLen > LONGINT(0) THEN
-    IF Files.BlockWrite(fout, ls^.dataBuf^[0], WORD(ls^.totalDataLen))
-       # WORD(ls^.totalDataLen) THEN
+    Files.Seek(ls^.dataFile, LONGINT(0));
+    IF ~Files.BlockCopy(ls^.dataFile, fout, ls^.totalDataLen) THEN
       LogErr.Error("Write error (data)")
     END
   END;
+  Files.Close(ls^.dataFile);   (* delete-on-close removes the data temp *)
 
   (* /G: append the TDS debug block after the data image (debugger-only tail —
      DOS loads only header+code+data; no header field above changes). *)
@@ -1687,7 +1803,6 @@ BEGIN
   WHILE m # NIL DO mNext := m^.next; DISPOSE(m); m := mNext END;
   ls^.modHead := NIL; ls^.modTail := NIL;
 
-  IF ls^.dataBuf # NIL THEN DISPOSE(ls^.dataBuf); ls^.dataBuf := NIL END;
   IF ls^.codeBuf # NIL THEN DISPOSE(ls^.codeBuf); ls^.codeBuf := NIL END
 END LinkFree;
 

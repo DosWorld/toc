@@ -16,6 +16,7 @@
 
 BIN_TOC  = ../../BIN/TOC.EXE
 BIN_OM   = ../../BIN/OBERON.OM
+BIN_TRUBO_OM = ../../BIN/TRUBO.OM
 XT       = xt
 
 # No -c: xt uses process CWD (SRC/TASM/) as the C:\ mount root, matching
@@ -32,14 +33,17 @@ TASM_SRCS = SCAN.MOD SYM.MOD ENC.MOD DIR.MOD PARSE.MOD TASM.MOD
 
 all: TASM.EXE
 
+TRUBO.OM: $(BIN_TRUBO_OM)
+	cp $(BIN_TRUBO_OM) TRUBO.OM
+
 $(TOC): $(BIN_TOC)
 	cp $(BIN_TOC) $(TOC)
 
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
-TASM.EXE: $(TASM_SRCS) $(TOC) OBERON.OM
-	time $(XTRUN) $(TOC) /ENTRY=Run TASM.MOD /M
+TASM.EXE: $(TASM_SRCS) $(TOC) OBERON.OM TRUBO.OM
+	time $(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /ENTRY=Run TASM.MOD /M
 
 install: TASM.EXE
 	mkdir -p ../../BIN

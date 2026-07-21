@@ -1,4 +1,4 @@
-(*$M 32000, 256000, 600000*)
+(*$M 26000, 256000, 256000*)
 (*$D-*)
 MODULE TOC;
 (*
@@ -22,7 +22,7 @@ MODULE TOC;
   docs/implementation-rules.md §".DBG file format").
 *)
 IMPORT Dos, Files, Strings, Scan, Syms, Cgen, Rdoff, Tar,
-       Import, Parser, PExpr, Link, LogErr, Time, Out;
+       Import, Parser, PExpr, Link, LogErr, Time, Out, StrTab;
 
 CONST
   NameLen  = 33;
@@ -634,12 +634,16 @@ END RepackOm;
 
 PROCEDURE DbgMemSize(umsg : ARRAY OF CHAR);
 VAR msg : ARRAY 512 OF CHAR;
+    am  : WORD;
 BEGIN
   IF ~LogErr.IsDebug() THEN RETURN END;
+  am := SYSTEM.MemAvail();
   Strings.Copy(umsg, msg);
-  Strings.Append(" Max free memory block ", msg);
-  Strings.AppendInt(LONGINT(SYSTEM.MemAvail()), msg);
-  Strings.Append(" paragraphs)", msg);
+  Strings.Append(" Free memory ", msg);
+  Strings.AppendInt(LONGINT(am), msg);
+  Strings.Append(" paragraphs / ", msg);
+  Strings.AppendInt(LONGINT(am)*16 DIV 1024, msg);
+  Strings.Append("kb", msg);
   LogErr.Debug(msg)
 END DbgMemSize;
 
@@ -736,12 +740,15 @@ PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug: BOOLEAN);
       p: ARRAY 512 OF CHAR;
       dir: ARRAY MaxPath OF CHAR;
       omExe: ARRAY MaxPath OF CHAR;
+      memBefore: WORD;
 BEGIN
   (* The module graph lives entirely in gModFile (never in the heap), so the
      arena is contiguous here.  Reserve the two fixed 65000-byte link buffers
      NOW — before the module scan opens each .rdf through an 8 KB Files buffer and
      fragments the arena so no 65000-byte hole survives. *)
+  DbgMemSize("Linker, before init state.");
   NEW(ls);
+  DbgMemSize("Linker, after init state.");
   IF ls = NIL THEN LogErr.Error("out of memory (link state)"); RETURN END;
   Link.InitState(ls);
   ls^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
@@ -753,7 +760,8 @@ BEGIN
      sortNext chain.  A latched read/parse error stops the load. *)
   m := gSortHead;
   WHILE (m # NoMod) & ~LogErr.HaveErr() DO
-    ModRead(m, mr);
+     DbgMemSize("Linker load module.");
+     ModRead(m, mr);
     IF HasFlag(mr, FlagHasSrc) THEN
       MakeOmName(mr.name, omPath);
       Link.ProcessFile(ls, omPath)
@@ -761,7 +769,6 @@ BEGIN
     m := mr.sortNext
   END;
 
-  (* Load each OBERON_LIB entry (semicolon-separated .OM file paths) *)
   Dos.GetEnv("OBERON_LIB", p);
   pos := 0;
   WHILE p[pos] # 0X DO
@@ -781,16 +788,30 @@ BEGIN
      exe's directory (same two locations the old hand-assembled fallback
      covered), returning whichever path exists (or the bare name if neither
      does, in which case IsOmFile below correctly rejects it). *)
+
   Link.FindFile("OBERON.OM", omExe);
   IF Files.FileExists(omExe) & Tar.IsOmFile(omExe) THEN
     Link.ProcessFile(ls, omExe)
   END;
 
+  DbgMemSize("Linker has been load all modules");
+
+  memBefore := SYSTEM.MemAvail();
   IF ~LogErr.HaveErr() THEN Link.SmartLink(ls) END;
+  LeakGuard(memBefore, "link", " in SmartLink");
+  memBefore := SYSTEM.MemAvail();
   IF ~LogErr.HaveErr() THEN Link.ReadStackSize(ls) END;
+  LeakGuard(memBefore, "link", " in ReadStackSize");
+  memBefore := SYSTEM.MemAvail();
   IF ~LogErr.HaveErr() THEN Link.CalculateLayout(ls) END;
+  LeakGuard(memBefore, "link", " in CalculateLayout");
+  DbgMemSize("Linker, after calculate layouts.");
+  memBefore := SYSTEM.MemAvail();
   IF ~LogErr.HaveErr() THEN Link.PerformLinking(ls) END;
+  DbgMemSize("Linker, after linking, before write .exe");
+  memBefore := SYSTEM.MemAvail();
   IF ~LogErr.HaveErr() THEN Link.WriteExe(ls, outExe) END;
+  LeakGuard(memBefore, "link", " in WriteExe");
   Link.LinkFree(ls);
   DISPOSE(ls);
   IF LogErr.HaveErr() THEN
@@ -979,6 +1000,15 @@ BEGIN
     memBefore := SYSTEM.MemAvail();
     LinkAll(outExe, genDbg);
     FreeMods;             (* close + delete the module-graph temp after linking *)
+    (* LinkAll's own symbol table now interns names via StrTab (LINK.MOD's
+       SymRec.nameId refactor) — those names are never referenced again once
+       linking is done (Phase 2 compile, the table's only other user, already
+       finished before Phase 3 link began), so release them here rather than
+       waiting for the process-wide Syms.SymsFree() in Cleanup.  Without this,
+       the leak checkpoint below sees them as still-allocated and reports a
+       false-positive leak even though Cleanup frees them moments later (see
+       the "whole run" LeakGuard in Run, which stays clean either way). *)
+    StrTab.Reset;
     LeakGuard(memBefore, "link all module(s)", "");
     IF LogErr.HaveErr() THEN RETURN 1 END
   ELSE
@@ -988,11 +1018,13 @@ BEGIN
 END RunBody;
 
 PROCEDURE Run*;
-  VAR exitCode: INTEGER;
+  VAR exitCode: INTEGER; memBefore: WORD;
 BEGIN
   LogErr.Open;               (* open output.log / error.log for this run *)
+  memBefore := SYSTEM.MemAvail();
   exitCode := RunBody();
   Cleanup;                (* close every temp + free heap on EVERY exit path *)
+  LeakGuard(memBefore, "whole run", "");
   LogErr.Close;              (* flush + close the log files *)
   SYSTEM.Halt(exitCode)   (* the ONE and ONLY SYSTEM.Halt in the compiler *)
 END Run;

@@ -487,14 +487,12 @@ than real-NASM proofs — see `TESTS/test_tasm.sh`'s header comment. See
 `TESTS/TESTS.MD` §"TASM assembler regression test" for the full check
 breakdown.
 
-**Bugs found and fixed while adding the `SRC/CC` ccasm backend
-(2026-07-14):**
+**Bugs found and fixed in TASM/TLINK (2026-07-14):**
 - **`PARSE.MOD`'s bare-label immediate operand didn't consume a trailing
-  `+`/`-` displacement** (`mov ax, label+N`, e.g. ccasm's array-address
-  form): the leftover `+`/`-` token was never advanced past, so
-  `RunPass`'s main loop span forever (never reaching `TEol`/`TEof`) —
-  this hung TASM on any `.ASM` using that form (`HELLO.C`'s ccasm output
-  via `SMOKEASM.SH`). Fixed by consuming an optional `+ disp`/`- disp`
+  `+`/`-` displacement** (`mov ax, label+N` array-address form): the
+  leftover `+`/`-` token was never advanced past, so `RunPass`'s main loop
+  spun forever (never reaching `TEol`/`TEof`) — this hung TASM on any
+  `.ASM` using that form. Fixed by consuming an optional `+ disp`/`- disp`
   chain after the label, mirroring `ParseMemBody`'s bracketed-operand
   logic. `ParseMemBody` itself was unaffected (already had this).
 - **`TLINK.MOD`'s small-model `.EXE` writer had two related bugs**, both
@@ -503,22 +501,40 @@ breakdown.
   (used directly as `SS`) truncated instead of rounding up, so a
   non-16-aligned code length left the stack segment physically
   overlapping the tail of the code image — runtime stack pushes silently
-  corrupted live code bytes (observed as a `jnz` target flipping mid-
-  execution, `VOIDF.C`'s `putint` looping extra times); (2) the on-disk
-  layout appended `.data` immediately after `.text` with no padding, but
-  `SS`(`=DS`, set at runtime via `mov ax,ss / mov ds,ax`) points at
-  `codePara*16` — if that didn't equal the true on-disk code length, `DS:0`
-  landed a few bytes before the real start of `.data`, corrupting every
-  `mov ax, label`-style data reference (`HELLO.C` printing `ello, CC!`,
-  losing its first byte). Fixed by rounding `codePara` up and padding the
-  on-disk code region to `codePara*16` bytes before writing `.data`;
-  `CalculateLayoutSmall`'s BSS placement was adjusted to match (BSS
-  starts right after data within the DS/SS segment, not independently
-  from 0 — small model is CS as one 64K segment, DS=SS as a *second* 64K
-  segment holding data+bss+stack together; tiny model, unaffected by
-  either bug, keeps CS=DS=SS as one shared segment with no MZ relocation
-  table). See `TESTS/FIX/`'s `SRC/CC` fixtures (`VOIDF.C`, `HELLO.C` via
-  `SMOKEASM.SH`) for the regressions these fixed.
+  corrupted live code bytes (observed as a `jnz` target flipping
+  mid-execution); (2) the on-disk layout appended `.data` immediately
+  after `.text` with no padding, but `SS`(`=DS`, set at runtime via
+  `mov ax,ss / mov ds,ax`) points at `codePara*16` — if that didn't equal
+  the true on-disk code length, `DS:0` landed a few bytes before the real
+  start of `.data`, corrupting every `mov ax, label`-style data reference.
+  Fixed by rounding `codePara` up and padding the on-disk code region to
+  `codePara*16` bytes before writing `.data`; `CalculateLayoutSmall`'s BSS
+  placement was adjusted to match (BSS starts right after data within the
+  DS/SS segment, not independently from 0 — small model is CS as one 64K
+  segment, DS=SS as a *second* 64K segment holding data+bss+stack
+  together; tiny model, unaffected by either bug, keeps CS=DS=SS as one
+  shared segment with no MZ relocation table).
+
+**Bug found and fixed while adding `/T=texe` (2026-07-21):** `TLINK.MOD`'s
+tiny-model `OnReloc` never applied the PSP (`CS:100h`) address bias to
+**absolute** in-image references (`rrel = 0`, e.g. a plain `mov dx, msg`) —
+only relative fixups (`call`/`jmp` displacements) worked correctly, since
+the bias cancels out on both sides of that subtraction. `.COM`'s DOS loader
+convention runs code at `CS:0100h` (PSP segment, code physically loaded
+0x100 bytes past `CS:0`), so any absolute reference to a code/data label
+resolved to the wrong byte offset — `.COM` output that took an absolute
+address of anything ran but printed garbage or looped forever (`INT 21h
+AH=9`'s `$`-terminated string search reading unrelated memory), rather than
+failing loudly. This had been latent in `/T=com` since tiny-model linking
+was added; it surfaced while implementing `/T=texe` (which needs the
+identical bias — `texe`'s MZ header reproduces the same `CS=SS=PSP`,
+`IP=entry+0x100` runtime layout without relying on DOS's implicit `.COM`
+convention) and writing `TESTS/test_tlink.sh`'s byte-exact stdout check,
+which fails loudly on this class of bug instead of just checking exit
+code 0. Fixed by adding the `+0x100` bias in `OnReloc` for absolute
+fixups, gated on `mode = ModeCom OR mode = ModeTExe` (never `ModeSys`,
+which has no PSP — a device driver's `CS` is its own load segment, not
+PSP-relative).
 
 ---
 

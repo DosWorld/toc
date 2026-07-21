@@ -18,8 +18,8 @@ err      : BOOLEAN;
 level    : INTEGER;
 errRider : IO.Rider;
 outRider : IO.Rider;
-outLog   : Files.File;   (* every message (incl. errors) is logged here *)
-errLog   : Files.File;   (* errors only *)
+// outLog   : Files.File;   (* every message (incl. errors) is logged here *)
+// errLog   : Files.File;   (* errors only *)
 logOpen  : BOOLEAN;      (* TRUE between Open and Close *)
 
 (* Open* opens the two log files (output.log = all messages, error.log = errors
@@ -28,12 +28,14 @@ logOpen  : BOOLEAN;      (* TRUE between Open and Close *)
    Parameters: none.  Result: none. *)
 PROCEDURE Open*;
 BEGIN
+(*
   logOpen := Files.ReWrite(outLog, "OUTPUT.LOG");
   IF logOpen THEN
     IF ~Files.ReWrite(errLog, "ERROR.LOG") THEN
       Files.Close(outLog); logOpen := FALSE
     END
   END
+*)
 END Open;
 
 (* Close*: close the log files opened by Open (if any), deleting error.log if
@@ -42,10 +44,12 @@ END Open;
    Parameters: none.  Result: none. *)
 PROCEDURE Close*;
 BEGIN
+(*
   IF logOpen THEN
     IF ~err THEN Files.SetDeleteOnClose(errLog, TRUE) END;
     Files.Close(outLog); Files.Close(errLog); logOpen := FALSE
   END
+*)
 END Close;
 
 PROCEDURE CheckLevel(lvl : INTEGER) : BOOLEAN;
@@ -105,10 +109,12 @@ BEGIN
   IF toErr THEN rider := SYSTEM.ADR(errRider)
   ELSE rider := SYSTEM.ADR(outRider) END;
   IO.WriteStr(rider^, line); IO.WriteLn(rider^);
+(*
   IF logOpen THEN
     Files.WriteLine(outLog, line);
     IF toErr THEN Files.WriteLine(errLog, line) END
   END
+*)
 END Emit;
 
 PROCEDURE Message(lvl : INTEGER; VAR msg: ARRAY OF CHAR);

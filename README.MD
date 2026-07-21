@@ -94,10 +94,12 @@ That means:
   of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
-  `SRC/TLINK/` is one TOC-tool (`tlink /T=com|sys|exe`) covering both
-  tiny model (`.COM`/`.SYS`, no relocation table) and small model (`.EXE`
-  with an MZ relocation table) — memory models `toc.exe`'s own embedded
-  linker does not target — see `DOCS/BUILD.MD`'s "Using tlink" section.
+  `SRC/TLINK/` is one TOC-tool (`tlink /T=com|sys|exe|texe`) covering both
+  tiny model (`.COM`/`.SYS`/`texe`, no relocation table) and small model
+  (`.EXE` with an MZ relocation table) — memory models `toc.exe`'s own
+  embedded linker does not target. `texe` is a tiny-model `.COM`-equivalent
+  wrapped in an MZ header instead of relying on DOS's `.COM`-load
+  convention — see `DOCS/BUILD.MD`'s "Using tlink" section.
 
 ---
 

@@ -4,10 +4,10 @@ MODULE Tar;
   ustar archive module: read/write .om archives.
   All .om archives use standard ustar format with 512-byte header blocks.
 *)
-IMPORT Files, LogErr, Strings;
+IMPORT Files, Strings, LogErr;
 
 TYPE
-  HdrBuf = POINTER TO ARRAY 512 OF BYTE;
+  HdrBuf = ARRAY 512 OF BYTE;
 
   (* Callback for ScanTar: called for each .rdf member found. *)
   MemberProc* = PROCEDURE(name: ARRAY OF CHAR; libOfs, rawSize: LONGINT);
@@ -30,17 +30,17 @@ BEGIN
   RETURN last
 END BasenameStart;
 
-PROCEDURE ParseOctal(hdr: HdrBuf; offset, width: INTEGER): LONGINT;
+PROCEDURE ParseOctal(VAR hdr: HdrBuf; offset, width: INTEGER): LONGINT;
   VAR i: INTEGER; res: LONGINT;
 BEGIN
   res := LONGINT(0);
   i := offset;
   (* some tar writers pad octal fields with leading spaces; skip them so the
      digit scan below isn't short-circuited by the very first byte. *)
-  WHILE (i < offset + width) & (hdr^[i] = BYTE(ORD(" "))) DO INC(i) END;
+  WHILE (i < offset + width) & (hdr[i] = BYTE(ORD(" "))) DO INC(i) END;
   WHILE i < offset + width DO
-    IF (hdr^[i] >= BYTE(ORD("0"))) & (hdr^[i] <= BYTE(ORD("7"))) THEN
-      res := res * LONGINT(8) + LONGINT(INTEGER(hdr^[i]) - ORD("0"))
+    IF (hdr[i] >= BYTE(ORD("0"))) & (hdr[i] <= BYTE(ORD("7"))) THEN
+      res := res * LONGINT(8) + LONGINT(INTEGER(hdr[i]) - ORD("0"))
     ELSE
       i := offset + width
     END;
@@ -49,12 +49,12 @@ BEGIN
   RETURN res
 END ParseOctal;
 
-PROCEDURE ReadHdrName(hdr: HdrBuf; VAR name: ARRAY OF CHAR);
+PROCEDURE ReadHdrName(VAR hdr: HdrBuf; VAR name: ARRAY OF CHAR);
   VAR i: INTEGER;
 BEGIN
   i := 0;
-  WHILE (i < 100) & (i < LEN(name) - 1) & (hdr^[i] # BYTE(0)) DO
-    name[i] := CHR(INTEGER(hdr^[i]));
+  WHILE (i < 100) & (i < LEN(name) - 1) & (hdr[i] # BYTE(0)) DO
+    name[i] := CHR(INTEGER(hdr[i]));
     INC(i)
   END;
   name[i] := 0X
@@ -62,41 +62,41 @@ END ReadHdrName;
 
 (* ---- writer helpers ---- *)
 
-PROCEDURE FillOctal(hdr: HdrBuf; offset, width: INTEGER; val: LONGINT);
+PROCEDURE FillOctal(VAR hdr: HdrBuf; offset, width: INTEGER; val: LONGINT);
   VAR i: INTEGER;
 BEGIN
   i := offset + width - 1;
-  hdr^[i] := BYTE(0);
+  hdr[i] := BYTE(0);
   DEC(i);
   WHILE i >= offset DO
-    hdr^[i] := BYTE(ORD('0') + INTEGER(val MOD LONGINT(8)));
+    hdr[i] := BYTE(ORD('0') + INTEGER(val MOD LONGINT(8)));
     val := val DIV LONGINT(8);
     DEC(i)
   END
 END FillOctal;
 
-PROCEDURE TarChecksum(hdr: HdrBuf): LONGINT;
+PROCEDURE TarChecksum(VAR hdr: HdrBuf): LONGINT;
   VAR sum: LONGINT; i: INTEGER;
 BEGIN
   sum := LONGINT(0);
   i := 0;
   WHILE i < 512 DO
     IF (i >= 148) & (i < 156) THEN INC(sum, LONGINT(20H))
-    ELSE INC(sum, LONGINT(INTEGER(hdr^[i])))
+    ELSE INC(sum, LONGINT(INTEGER(hdr[i])))
     END;
     INC(i)
   END;
   RETURN sum
 END TarChecksum;
 
-PROCEDURE SetStr(hdr: HdrBuf; offset, maxLen: INTEGER; s: ARRAY OF CHAR);
+PROCEDURE SetStr(VAR hdr: HdrBuf; offset, maxLen: INTEGER; s: ARRAY OF CHAR);
   VAR i: INTEGER;
 BEGIN
   i := 0;
   WHILE (i < maxLen - 1) & (s[i] # 0X) DO
-    hdr^[offset + i] := BYTE(ORD(s[i])); INC(i)
+    hdr[offset + i] := BYTE(ORD(s[i])); INC(i)
   END;
-  hdr^[offset + i] := BYTE(0)
+  hdr[offset + i] := BYTE(0)
 END SetStr;
 
 PROCEDURE WriteZeros(VAR f: Files.File; n: WORD);
@@ -109,27 +109,24 @@ END WriteZeros;
 PROCEDURE WriteTarHeader(VAR f: Files.File; VAR name: ARRAY OF CHAR; dataLen: LONGINT);
   VAR hdr: HdrBuf; csum: LONGINT;
 BEGIN
-  NEW(hdr);
-  IF hdr = NIL THEN LogErr.Error("out of memory (tar header)"); RETURN END;
-  SYSTEM.FILL(hdr^, 512, 0);
+  SYSTEM.FILL(hdr, 512, 0);
   SetStr(hdr, 0, 100, name);
   FillOctal(hdr, 100, 8, LONGINT(420));  (* mode 0644 *)
   FillOctal(hdr, 108, 8, LONGINT(0));
   FillOctal(hdr, 116, 8, LONGINT(0));
   FillOctal(hdr, 124, 12, dataLen);
   FillOctal(hdr, 136, 12, LONGINT(0));
-  SYSTEM.FILL(hdr^[148], 8, 32);
-  hdr^[156] := BYTE(ORD('0'));
-  hdr^[257] := BYTE(ORD('u')); hdr^[258] := BYTE(ORD('s'));
-  hdr^[259] := BYTE(ORD('t')); hdr^[260] := BYTE(ORD('a'));
-  hdr^[261] := BYTE(ORD('r')); hdr^[262] := BYTE(0);
-  hdr^[263] := BYTE(ORD('0')); hdr^[264] := BYTE(ORD('0'));
+  SYSTEM.FILL(hdr[148], 8, 32);
+  hdr[156] := BYTE(ORD('0'));
+  hdr[257] := BYTE(ORD('u')); hdr[258] := BYTE(ORD('s'));
+  hdr[259] := BYTE(ORD('t')); hdr[260] := BYTE(ORD('a'));
+  hdr[261] := BYTE(ORD('r')); hdr[262] := BYTE(0);
+  hdr[263] := BYTE(ORD('0')); hdr[264] := BYTE(ORD('0'));
   csum := TarChecksum(hdr);
   IF csum >= LONGINT(2097152) THEN LogErr.Error("tar: checksum overflow") END;
   FillOctal(hdr, 148, 7, csum);
-  hdr^[155] := BYTE(ORD(' '));
-  Files.BlockWrite(f, hdr^, 512);
-  DISPOSE(hdr)
+  hdr[155] := BYTE(ORD(' '));
+  Files.BlockWrite(f, hdr, 512);
 END WriteTarHeader;
 
 (* ---- public writer procedures ---- *)
@@ -211,12 +208,10 @@ PROCEDURE TarExtract*(libPath: ARRAY OF CHAR; memberName: ARRAY OF CHAR;
       done: BOOLEAN;
 BEGIN
   IF ~Files.Reset(lib, libPath) THEN RETURN FALSE END;
-  NEW(hdr);
-  IF hdr = NIL THEN LogErr.Error("out of memory (tar header)"); Files.Close(lib); RETURN FALSE END;
   done := FALSE;
   WHILE ~done DO
-    n := Files.BlockRead(lib, hdr^[0], 512);
-    IF (n # 512) OR (hdr^[0] = BYTE(0)) THEN
+    n := Files.BlockRead(lib, hdr[0], 512);
+    IF (n # 512) OR (hdr[0] = BYTE(0)) THEN
       done := TRUE
     ELSE
       fsize := ParseOctal(hdr, 124, 12);
@@ -230,12 +225,11 @@ BEGIN
 
       IF (Strings.EqualICase(bn, memberName) OR Strings.EqualICase(name, memberName)) &
          (fsize > LONGINT(0)) THEN
-        IF ~Files.ReWriteTemp(tmp) THEN Files.Close(lib); DISPOSE(hdr); RETURN FALSE END;
+        IF ~Files.ReWriteTemp(tmp) THEN Files.Close(lib); RETURN FALSE END;
         Files.BlockCopy(lib, tmp, fsize);
         Files.Close(lib);
         Files.Seek(tmp, LONGINT(0));
         out := tmp;
-        DISPOSE(hdr);
         RETURN TRUE
       END;
 
@@ -246,7 +240,6 @@ BEGIN
     END
   END;
   Files.Close(lib);
-  DISPOSE(hdr);
   RETURN FALSE
 END TarExtract;
 
@@ -274,21 +267,19 @@ PROCEDURE ScanTar*(archPath: ARRAY OF CHAR; onMember: MemberProc;
       val: LONGINT;
       ok: BOOLEAN;
 BEGIN
-  NEW(hdr);
-  IF hdr = NIL THEN LogErr.Error("out of memory (tar header)"); RETURN END;
-  IF ~Files.Reset(f, archPath) THEN LogErr.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
+  IF ~Files.Reset(f, archPath) THEN LogErr.Error2("Cannot open: ", archPath); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);
 
   WHILE curPos + LONGINT(512) <= fsize DO
     Files.Seek(f, curPos);
-    n := Files.BlockRead(f, hdr^[0], 512);
+    n := Files.BlockRead(f, hdr[0], 512);
     IF n < 512 THEN curPos := fsize
-    ELSIF hdr^[0] = BYTE(0) THEN curPos := fsize
+    ELSIF hdr[0] = BYTE(0) THEN curPos := fsize
     ELSE
       ReadHdrName(hdr, name);
       modSize  := ParseOctal(hdr, 124, 12);
-      typeFlag := INTEGER(hdr^[156]);
+      typeFlag := INTEGER(hdr[156]);
 
       IF (typeFlag = ORD("0")) OR (typeFlag = 0) THEN
         IF Strings.EndsWith(name, ".rdf", TRUE) THEN
@@ -321,8 +312,7 @@ BEGIN
     END
   END;
 
-  Files.Close(f);
-  DISPOSE(hdr)
+  Files.Close(f)
 END ScanTar;
 
 (*
@@ -370,17 +360,15 @@ PROCEDURE ListTar*(archPath: ARRAY OF CHAR; onMember: MemberProc);
       curPos, fsize: LONGINT;
       n: INTEGER;
 BEGIN
-  NEW(hdr);
-  IF hdr = NIL THEN LogErr.Error("out of memory (tar header)"); RETURN END;
-  IF ~Files.Reset(f, archPath) THEN LogErr.Error2("Cannot open: ", archPath); DISPOSE(hdr); RETURN END;
+  IF ~Files.Reset(f, archPath) THEN LogErr.Error2("Cannot open: ", archPath); RETURN END;
   fsize := Files.Size(f);
   curPos := LONGINT(0);
 
   WHILE curPos + LONGINT(512) <= fsize DO
     Files.Seek(f, curPos);
-    n := Files.BlockRead(f, hdr^[0], 512);
+    n := Files.BlockRead(f, hdr[0], 512);
     IF n < 512 THEN curPos := fsize
-    ELSIF hdr^[0] = BYTE(0) THEN curPos := fsize
+    ELSIF hdr[0] = BYTE(0) THEN curPos := fsize
     ELSE
       ReadHdrName(hdr, name);
       modSize := ParseOctal(hdr, 124, 12);
@@ -393,7 +381,6 @@ BEGIN
   END;
 
   Files.Close(f);
-  DISPOSE(hdr)
 END ListTar;
 
 END Tar.

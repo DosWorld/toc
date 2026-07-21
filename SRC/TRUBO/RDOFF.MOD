@@ -1027,4 +1027,62 @@ BEGIN
   ReadSeg(path, libOfs, hdrSize, buf, dstOfs, dataSize, 2)
 END ReadData;
 
+(*
+  Read a module's data segment bytes directly into an ALREADY-OPEN
+  destination file at a given byte offset, instead of into a RAM SegBuf —
+  the file-backed counterpart of ReadData, used by Link.MOD so the linker
+  no longer needs a 65000-byte resident data buffer (see LINKBUF-REPORT.MD
+  §4.1: Link.CalculateLayout fixes every module's final byte offset before
+  any data is read or patched, so a Files.Seek-capable file provides the
+  same random-access guarantee a RAM buffer did, at the cost of one seek
+  pair per call instead of an array index).
+
+  Parameters: path — file to read; libOfs — byte offset within path where
+  the RDOFF2 image starts; hdrSize — size of the header-record area (as
+  filled by ScanHeader); dst — destination file, ALREADY OPEN for writing;
+  dstOfs — byte offset within dst to start writing; dataSize — number of
+  data bytes to copy.
+  Result: none (failures latch via LogErr). dst's seek position is left
+  at dstOfs + dataSize; caller must re-seek before its next write if it
+  relies on a specific position afterward.
+*)
+PROCEDURE ReadDataToFile*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
+                          VAR dst: Files.File; dstOfs, dataSize: WORD);
+  VAR f: Files.File;
+      dataStart: LONGINT;
+      stype, dummy: INTEGER;
+      slen: LONGINT;
+      done: BOOLEAN;
+      segPos: LONGINT;
+BEGIN
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("Cannot open: ", path); RETURN END;
+  dataStart := libOfs + LONGINT(14) + hdrSize;
+  Files.Seek(f, dataStart);
+  done := FALSE; segPos := dataStart;
+  WHILE ~done DO
+    Files.ReadWord(f, stype);
+    IF stype <= 0 THEN done := TRUE
+    ELSE
+      Files.ReadWord(f, dummy);           (* num *)
+      Files.ReadWord(f, dummy);           (* reserved *)
+      Files.ReadDWord(f, slen);           (* length *)
+      segPos := segPos + LONGINT(10);
+      IF stype = 2 THEN                   (* wantType: data *)
+        Files.Seek(f, segPos);
+        Files.Seek(dst, LONGINT(dstOfs));
+        IF ~Files.BlockCopy(f, dst, LONGINT(dataSize)) THEN
+          Files.Close(f); LogErr.Error2("Read error in ", path); RETURN
+        END;
+        done := TRUE
+      ELSIF slen > LONGINT(0) THEN
+        segPos := segPos + slen;
+        Files.Seek(f, segPos)
+      ELSE
+        done := TRUE
+      END
+    END
+  END;
+  Files.Close(f)
+END ReadDataToFile;
+
 END Rdoff.

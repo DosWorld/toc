@@ -11,8 +11,9 @@
 
 BOOT_TOC  = ../../BOOT/TOC.EXE
 BIN_OM   = ../../BIN/OBERON.OM
-BIN_TRUBO_OM = ../../BIN/TRUBO.OM
 XT       = xt
+
+BOOT_TOLIB  = ../../BOOT/TOLIB.EXE
 
 # No -c: xt uses process CWD (SRC/TOC/) as the C:\ mount root, so the stdlib
 # OBERON.OM (which lives OUTSIDE this dir, in BIN/) is not reachable via a DOS
@@ -25,6 +26,7 @@ XT       = xt
 # working option here regardless of quoting/slash convention.)
 XTRUN  = $(XT) run --max=40000000000
 TOC = _TOC.EXE
+TOLIB = TOLIB.EXE
 
 # Every compiler source — the single-process build scans, compiles and links the
 # whole image in ONE call, so TOC.exe depends on the sources directly (no
@@ -41,30 +43,33 @@ TOC = _TOC.EXE
 # no OBERON_LIB entry here, so it will not find RDOFF.MOD/TAR.MOD/LOGERR.MOD
 # as source and will correctly treat them as .OM-only dependencies (same
 # path every other stdlib import already takes during self-host).
-OC_SRCS = \
-    SCAN.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
-    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD TOC.MOD
-# STRTAB.MOD
+TRUBO_SRCS = \
+    STRTAB.MOD LOGERR.MOD RDOFF.MOD TAR.MOD
 
-all: TOC.EXE
+all: TRUBO.OM
 
 $(TOC): $(BOOT_TOC)
 	cp $(BOOT_TOC) $(TOC)
 
+$(TOLIB): $(BOOT_TOLIB)
+	cp $(BOOT_TOLIB) $(TOLIB)
+
 OBERON.OM: $(BIN_OM)
 	cp $(BIN_OM) OBERON.OM
 
-TRUBO.OM: $(BIN_TRUBO_OM)
-	cp $(BIN_TRUBO_OM) TRUBO.OM
-
 # Single-command self-host: toc /ENTRY=Run TOC.MOD scans deps, compiles every
 # stale module and links TOC.exe in one process.
-TOC.EXE: $(OC_SRCS) $(TOC) OBERON.OM TRUBO.OM
-	time $(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TOC.MOD /M
+TRUBO.OM: $(TRUBO_SRCS) $(TOC) $(TOLIB) OBERON.OM
+	$(XTRUN) $(TOC) LOGERR.MOD
+	$(XTRUN) $(TOC) STRTAB.MOD
+	$(XTRUN) $(TOC) RDOFF.MOD
+	$(XTRUN) $(TOC) TAR.MOD
+	rm -f TRUBO.OM
+	$(XTRUN) $(TOLIB) merge TRUBO.OM LOGERR.OM STRTAB.OM RDOFF.OM TAR.OM
 
-install: TOC.EXE
+install: TRUBO.OM
 	mkdir -p ../../BIN
-	cp TOC.EXE ../../BIN/TOC.EXE
+	cp TRUBO.OM ../../BIN/TRUBO.OM
 
 clean:
 	rm -f *.OM *.EXE OUTPUT.LOG

@@ -543,47 +543,6 @@ memory models, plus two real bugs found and fixed along the way:**
 
 ---
 
-## 2026-07-13/14 — SRC/CC side project: C-subset compiler + VM + 8086 backend
-
-- **SRC/CC brought from "never compiled" to a complete, tested mini
-  toolchain** (standalone side project, same status as `SRC/TASM/` and
-  `SRC/TLINK/` — not in the top-level build graph). Three tools:
-  `cc.exe` (C subset → `.cbc` stack-machine byte-code), `ccvm.exe`
-  (interpreter), `ccasm.exe` (byte-code → NASM 8086 source assembling
-  into a small-model MZ `.EXE`). Spec: `SRC/CC/CC.MD` (+ §10
-  implementation deviations).
-- **Build blocker root-caused**: in this dialect the implementation of a
-  FORWARD-declared procedure must be the bare header `PROCEDURE Name;`
-  (no repeated parameter list / return type) — the mysterious
-  `CPARSE.MOD(812): expected 38 got 30` from the old README.
-- **Five latent bugs fixed** (none had ever run): VM `OpRet` lacked the
-  frame epilogue and never restored BP; backward calls were never
-  patched (fixed by a single end-of-file resolve-all pass); pointer
-  arithmetic scaled the pointer instead of the index; `void f();`
-  statements popped a live stack word (now every return pushes a value);
-  and `ccvm` hung because the 64 KB VM memory was a stack local (SP
-  wrap) — moved to the heap as `SYSTEM.ADDRESS`.
-- **Compiler refactored from 2127 to 1000 lines** (hard user limit
-  <= 1000; `CC.MOD` 743 + `CSCAN.MOD` 257) via architecture, not
-  formatting: deferred-load lvalue Items instead of scanner
-  backtracking (also made `*p = x` a legal target), one
-  precedence-climbing loop with `&&`/`||` as jump-emitting precedence
-  levels, operator tokens encoding `opcode*16+precedence`
-  (EX/TINYCC1-style), flat index-based symbol/patch tables, single-unit
-  module layout (EX/CC500-style), direct buffer-to-file `.cbc` write.
-  Full write-up: `SRC/CC/SHRINK.MD`.
-- **`.cbc` gained a trailing symbol section** ({kind, addr, name} for
-  every top-level function/global; `ccvm` ignores it) so `ccasm`
-  preserves real names as `global _name` labels in the generated
-  assembly.
-- **Verification**: `SMOKE.SH` (7 C fixtures via ccvm) and
-  `SMOKEASM.SH` (same fixtures via ccasm → host nasm → MZ `.EXE` under
-  xt, identical expected stdout) both 7/7. MZ-header traps (CS/SS are
-  image-relative; header must be padded to its declared paragraph
-  count) recorded in `SRC/CC/PLAN.MD`.
-
----
-
 ## 2026-07-14 — SYS.ASM/SYS.RDF renamed to SYSTEM.ASM/SYSTEM.RDF
 
 - `SRC/LIB/SYS.ASM` -> `SRC/LIB/SYSTEM.ASM` and `SRC/LIB/SYS.RDF` ->
@@ -597,3 +556,39 @@ memory models, plus two real bugs found and fixed along the way:**
   compiled `SYSTEM.RDF` member. The `.RDF` content is byte-identical
   (TASM embeds no source filename), so generated code is unchanged;
   verified with a full clean `make test`.
+
+---
+
+## 2026-07-21 — `tlink /T=texe` (tiny-model MZ `.EXE`) added
+
+- New `/T=texe` mode: the same tiny-model layout as `/T=com` (contiguous
+  code+data+bss, no relocation table, `DS=CS=SS=PSP` at runtime) but
+  wrapped in a minimal MZ header instead of relying on DOS's `.COM`-loader
+  convention — no on-disk `JMP` stub, header `CS=SS=-1` paragraph (PSP
+  segment), `IP=entry+0x100`, `SP=0xFFFE`, `MinAlloc=MaxAlloc` sized to
+  reserve the rest of the 64K PSP segment. New module
+  `SRC/TLINK/TEXE.MOD` (`TExe`) holds the writer; `TLINK.MOD` gained
+  `ModeTExe` and dispatch to it.
+- **Real bug found and fixed** while validating `texe` end-to-end:
+  `TLINK.MOD`'s `OnReloc` never applied the PSP (`CS:100h`) address bias to
+  *absolute* in-image references — only relative (`call`/`jmp`) fixups
+  worked, since the bias cancels out on both sides of that subtraction.
+  This had been silently broken in `/T=com` since tiny-model linking was
+  first added: any `.COM` output taking an absolute address of code/data
+  (e.g. `mov dx, msg`) resolved to the wrong byte and either printed
+  garbage or looped forever (`INT 21h AH=9`'s `$`-terminated string scan
+  reading unrelated memory) instead of failing loudly, so it went
+  unnoticed until `texe` needed the identical bias and a byte-exact stdout
+  test caught it. Fixed by adding `+0x100` to `OnReloc`'s absolute-fixup
+  path, gated on `ModeCom OR ModeTExe` (never `ModeSys`, which has no PSP).
+  See [DOCS/IMPLRULE.MD](IMPLRULE.MD) §"Bug found and fixed while adding
+  `/T=texe`".
+- New regression test `TESTS/test_tlink.sh` (fixtures
+  `TESTS/FIX/TLINKHI.ASM`, `TESTS/FIX/TLINKDRV.ASM`): links `/T=com` and
+  `/T=texe` outputs and runs each under `xt`, checking stdout matches the
+  expected greeting byte-for-byte (catches both wrong data and runaway
+  output); checks `/T=sys`'s device-driver header fields. Wired into
+  `make test` alongside `test_tasm.sh`. See
+  [DOCS/TESTS.MD](TESTS.MD) §"TLINK linker regression test".
+- `DOCS/BUILD.MD`, `DOCS/PORTING.MD`, and `CLAUDE.md`'s directory layout
+  updated for the new mode/module/test.

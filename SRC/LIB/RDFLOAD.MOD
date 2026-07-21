@@ -17,6 +17,12 @@ CONST
   RecBss      = 5;
   RecSegReloc = 6;
 
+  MaxSeg*     = 64;   (* RDOFF2 physical-segment index is 6 bits: segNum 0..63.
+                         segNum (physical index, addressed by a RELOC's
+                         low-6-bit "physical segment" field / a SEGRELOC's
+                         segment-index byte) is DISTINCT from segType (kind:
+                         1=code, 2=data). See DOCS/RDOFF2.MD §4. *)
+
 TYPE
   (* Resolver: returns the host address of `name`, or NIL if unknown. *)
   Resolver* = PROCEDURE(name: ARRAY OF CHAR): SYSTEM.ADDRESS;
@@ -36,8 +42,37 @@ TYPE
     next:  ImportSym
   END;
 
+  (* One physical segment.  A module may hold up to MaxSeg of these, each
+     addressed by its own segNum.  segType is the KIND (1=code, 2=data);
+     segNum is the PHYSICAL INDEX a relocation patches into.  These are two
+     independent values — an RDF may, e.g., carry several code segments each
+     with segType=1 but distinct segNum.  Internal: RDFModule stays an opaque
+     handle to importers (RDFModuleDesc's fields are not exported), so SegInfo
+     does not enter the public interface either. *)
+  SegInfo = RECORD
+    base:    SYSTEM.ADDRESS;   (* heap block holding this segment (NIL if empty) *)
+    segType: INTEGER;          (* 1=code, 2=data *)
+    segNum:  INTEGER;          (* physical index 0..MaxSeg-1 *)
+    rawSize: WORD;             (* file-backed byte count (before BSS tail) *)
+    size:    WORD;             (* allocated byte count (raw, aligned; first DATA seg also holds BSS) *)
+    bss:     WORD              (* BSS bytes appended after rawSize (data segments only) *)
+  END;
+
   RDFModule* = POINTER TO RDFModuleDesc;
-  RDFModuleDesc = RECORD
+  (* RDFModuleDesc is exported (like Link.StateRec) so the .def emits its RECORD
+     header + size and importers can resolve `POINTER RDFModuleDesc`.  Its FIELDS
+     stay non-exported, so the record is opaque and SegInfo never enters the
+     interface. *)
+  RDFModuleDesc* = RECORD
+    (* Per-segment store, indexed by segNum. *)
+    seg:         ARRAY MaxSeg OF SegInfo;
+    nSeg*:       INTEGER;          (* highest (segNum+1) seen; slots 0..nSeg-1 valid-or-empty.
+                                      Exported (a harmless scalar) so RDFModuleDesc's .def
+                                      RECORD block carries a FIELD line — a field-less
+                                      exported record's stub does not round-trip through the
+                                      importer's .def pre-pass (empty RECORD/END). *)
+    (* Legacy convenience aliases into seg[] — the FIRST code segment and the
+       FIRST data segment — so existing two-segment callers keep working. *)
     codeBase:    SYSTEM.ADDRESS;
     dataBase:    SYSTEM.ADDRESS;
     codeSize:    WORD;
@@ -183,32 +218,44 @@ BEGIN
   RETURN total
 END GetBSSSize;
 
+(* ScanSegments — record every physical segment's kind (segType) and raw file
+   size into mod.seg[segNum].  Does NOT read segment content (that is
+   LoadSegmentData's job); it only seeks past each block.  Returns FALSE if the
+   file names a segNum outside 0..MaxSeg-1 or any single segment exceeds the
+   65520-byte real-mode limit. *)
 PROCEDURE ScanSegments(VAR f: Files.File; startPos: LONGINT;
-                       VAR cSize, dSize: LONGINT);
-  VAR sh: SegHeader;
+                       mod: RDFModule): BOOLEAN;
+  VAR sh: SegHeader; n: INTEGER;
 BEGIN
-  cSize := 0; dSize := 0;
   Files.Seek(f, startPos);
   REPEAT
     Files.BlockRead(f, sh, 10);
-    IF    sh.segType = 1 THEN cSize := cSize + sh.length
-    ELSIF sh.segType = 2 THEN dSize := dSize + sh.length
+    IF sh.segType # 0 THEN
+      n := sh.segNum;
+      IF (n < 0) OR (n >= MaxSeg) THEN RETURN FALSE END;
+      IF sh.length > LONGINT(65520) THEN RETURN FALSE END;
+      mod.seg[n].segType := sh.segType;
+      mod.seg[n].segNum  := n;
+      mod.seg[n].rawSize := WORD(sh.length);
+      IF n + 1 > mod.nSeg THEN mod.nSeg := n + 1 END
     END;
     IF sh.length > 0 THEN Files.Seek(f, Files.Position(f) + sh.length) END
-  UNTIL sh.segType = 0
+  UNTIL sh.segType = 0;
+  RETURN TRUE
 END ScanSegments;
 
+(* LoadSegmentData — read each physical segment's content into its own
+   heap block mod.seg[segNum].base (allocated by the caller). *)
 PROCEDURE LoadSegmentData(VAR f: Files.File; startPos: LONGINT; mod: RDFModule);
-  VAR sh: SegHeader;
+  VAR sh: SegHeader; n: INTEGER;
 BEGIN
   Files.Seek(f, startPos);
   REPEAT
     Files.BlockRead(f, sh, 10);
     IF sh.length > 0 THEN
-      IF sh.segType = 1 THEN
-        Files.BlockRead(f, mod.codeBase^, WORD(sh.length))
-      ELSIF sh.segType = 2 THEN
-        Files.BlockRead(f, mod.dataBase^, WORD(sh.length))
+      n := sh.segNum;
+      IF (sh.segType # 0) & (n >= 0) & (n < MaxSeg) & (mod.seg[n].base # NIL) THEN
+        Files.BlockRead(f, mod.seg[n].base^, WORD(sh.length))
       ELSE
         Files.Seek(f, Files.Position(f) + sh.length)
       END
@@ -268,7 +315,7 @@ PROCEDURE ApplyRecords(VAR f: Files.File; startPos, endPos: LONGINT;
       baseAddr, targetPtr, patchAddr: SYSTEM.ADDRESS;
       relFlags, relWidth, gSegId: BYTE;
       relOffset, gOffset: LONGINT;
-      relRSeg: INTEGER;
+      relRSeg, physSeg: INTEGER;
       newSym: ExportSym;
       imp:    ImportSym;
       pW: POINTER TO INTEGER;
@@ -282,15 +329,23 @@ BEGIN
       SYSTEM.MOVE(buf[1], relOffset, 4);
       relWidth := buf[5];
       SYSTEM.MOVE(buf[6], relRSeg, 2);
-      IF SYSTEM.AND(relFlags, 0FH) = 0 THEN baseAddr := mod.codeBase
-      ELSE                                  baseAddr := mod.dataBase
+      (* The patch-into segment is the low 6 bits of byte +0 (the physical
+         segment index / segNum, 0..63 — DISTINCT from the RSEG target below).
+         Bit 6 (0x40) is the RELOC relative flag, not part of the index. *)
+      physSeg := INTEGER(SYSTEM.AND(relFlags, 3FH));
+      IF (physSeg >= 0) & (physSeg < MaxSeg) & (mod.seg[physSeg].base # NIL) THEN
+        baseAddr := mod.seg[physSeg].base
+      ELSE
+        baseAddr := NIL
       END;
       patchAddr := baseAddr + WORD(relOffset);
-      (* Resolve the target:
-           RSeg=0 → Code segment of this module
-           RSeg=1 → Data segment of this module
-           RSeg=2 → BSS  (concatenated after raw data)
-           RSeg>2 → IMPORT ID — look up in mod.imports list             *)
+      (* Resolve the RSEG target (byte +6, NOT a physical index):
+           RSeg=0 → this module's (first) code segment
+           RSeg=1 → this module's (first) data segment
+           RSeg=2 → BSS  (concatenated after that data segment's raw bytes)
+           RSeg>2 → IMPORT ID — look up in mod.imports list.
+         Per RDOFF2 the import id base is 3, so RSEG can never name a physical
+         segment 3..63 directly; cross-segment references go by import name. *)
       IF    relRSeg = 0 THEN targetPtr := mod.codeBase
       ELSIF relRSeg = 1 THEN targetPtr := mod.dataBase
       ELSIF relRSeg = 2 THEN
@@ -303,7 +358,7 @@ BEGIN
         ELSE targetPtr := imp^.addr
         END
       END;
-      IF targetPtr # NIL THEN
+      IF (targetPtr # NIL) & (baseAddr # NIL) THEN
         IF h.recType = RecReloc THEN
           IF relWidth = 2 THEN
             pW := patchAddr;
@@ -317,18 +372,21 @@ BEGIN
         END
       END
     ELSIF h.recType = RecGlobal THEN
+      (* GLOBAL segId (byte +1) is a physical segment index (segNum): a symbol
+         may live in any loaded segment, not just code(0)/data(1).  segNum=2 is
+         the virtual BSS, resolved after the (first) data segment's raw bytes. *)
       gSegId := buf[1];
       SYSTEM.MOVE(buf[2], gOffset, 4);
       NEW(newSym);
       ExtractString(buf, 6, ORD(h.recLen), newSym.name);
       newSym.next := mod.exports;
       mod.exports := newSym;
-      IF gSegId = 0 THEN
-        newSym.addr := mod.codeBase + WORD(gOffset)
-      ELSIF gSegId = 2 THEN
+      IF gSegId = 2 THEN
         newSym.addr := mod.dataBase + mod.dataRawSize + WORD(gOffset)
+      ELSIF (INTEGER(gSegId) < MaxSeg) & (mod.seg[gSegId].base # NIL) THEN
+        newSym.addr := mod.seg[gSegId].base + WORD(gOffset)
       ELSE
-        newSym.addr := mod.dataBase + WORD(gOffset)
+        newSym.addr := NIL   (* symbol in an empty/absent segment *)
       END
     END
   END
@@ -347,13 +405,41 @@ END ApplyRecords;
    lists), or NIL if the file could not be opened, is not a valid RDOFF2
    signature, or its code/data+bss size exceeds the 65520-byte segment
    limit. *)
+(* InitModule — NEW'd memory is NOT zero-initialised on this runtime, so every
+   seg[] slot must be cleared explicitly before use (an uninitialised base would
+   be read as a live pointer by LoadSegmentData/ApplyRecords/FreeLibrary). *)
+PROCEDURE InitModule(mod: RDFModule);
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < MaxSeg DO
+    mod.seg[i].base    := NIL;
+    mod.seg[i].segType := 0;
+    mod.seg[i].segNum  := i;
+    mod.seg[i].rawSize := 0;
+    mod.seg[i].size    := 0;
+    mod.seg[i].bss     := 0;
+    INC(i)
+  END;
+  mod.nSeg        := 0;
+  mod.codeBase    := NIL;
+  mod.dataBase    := NIL;
+  mod.codeSize    := 0;
+  mod.dataSize    := 0;
+  mod.dataRawSize := 0;
+  mod.exports     := NIL;
+  mod.imports     := NIL
+END InitModule;
+
 PROCEDURE LoadLibraryWith*(fileName: ARRAY OF CHAR;
                           resolve: Resolver): RDFModule;
   VAR f: Files.File;
       hdr: RdfHeader;
       recStart, segStart: LONGINT;
-      cSize, dSize, bSize: LONGINT;
+      bSize: LONGINT;
       mod: RDFModule;
+      i, firstData: INTEGER;
+      total: WORD;
 BEGIN
   IF ~Files.Reset(f, fileName) THEN RETURN NIL END;
   Files.BlockRead(f, hdr, 14);
@@ -364,23 +450,52 @@ BEGIN
   recStart := Files.Position(f);
   segStart := recStart + hdr.headSize;
   bSize := GetBSSSize(f, recStart, segStart);
-  ScanSegments(f, segStart, cSize, dSize);
-  IF (cSize > LONGINT(65520)) OR (LONGINT(dSize + bSize) > LONGINT(65520)) THEN
-    Files.Close(f); RETURN NIL
-  END;
-  NEW(mod);
-  mod.codeBase := NIL;
-  mod.dataBase := NIL;
-  mod.exports  := NIL;
-  mod.imports  := NIL;
-  mod.codeSize    := WORD(Align2(cSize));
-  mod.dataSize    := WORD(Align2(dSize + bSize));
-  mod.dataRawSize := WORD(dSize);
 
-  IF mod.codeSize > 0 THEN NEW(mod.codeBase, mod.codeSize) END;
-  IF mod.dataSize > 0 THEN
-    NEW(mod.dataBase, mod.dataSize);
-    SYSTEM.FILL(mod.dataBase^, mod.dataSize, 0)
+  NEW(mod);
+  IF mod = NIL THEN Files.Close(f); RETURN NIL END;
+  InitModule(mod);
+
+  IF ~ScanSegments(f, segStart, mod) THEN Files.Close(f); RETURN NIL END;
+
+  (* BSS is appended to the FIRST data segment (lowest segNum with segType=2),
+     matching RSEG=2 → dataBase + dataRawSize. *)
+  firstData := -1;
+  i := 0;
+  WHILE i < mod.nSeg DO
+    IF (firstData < 0) & (mod.seg[i].segType = 2) THEN firstData := i END;
+    INC(i)
+  END;
+
+  (* Size and allocate one heap block per non-empty segment. *)
+  i := 0;
+  WHILE i < mod.nSeg DO
+    IF mod.seg[i].segType # 0 THEN
+      total := WORD(Align2(LONGINT(mod.seg[i].rawSize)));
+      IF i = firstData THEN total := WORD(Align2(LONGINT(mod.seg[i].rawSize) + bSize)) END;
+      IF LONGINT(total) > LONGINT(65520) THEN Files.Close(f); RETURN NIL END;
+      mod.seg[i].size := total;
+      IF i = firstData THEN mod.seg[i].bss := WORD(bSize) END;
+      IF total > 0 THEN
+        NEW(mod.seg[i].base, total);
+        IF mod.seg[i].base = NIL THEN Files.Close(f); RETURN NIL END;
+        SYSTEM.FILL(mod.seg[i].base^, total, 0)   (* clears the BSS tail too *)
+      END
+    END;
+    INC(i)
+  END;
+
+  (* Legacy aliases: first code segment, first data segment. *)
+  i := 0;
+  WHILE i < mod.nSeg DO
+    IF (mod.codeBase = NIL) & (mod.seg[i].segType = 1) & (mod.seg[i].base # NIL) THEN
+      mod.codeBase := mod.seg[i].base; mod.codeSize := mod.seg[i].size
+    END;
+    INC(i)
+  END;
+  IF firstData >= 0 THEN
+    mod.dataBase    := mod.seg[firstData].base;
+    mod.dataSize    := mod.seg[firstData].size;
+    mod.dataRawSize := mod.seg[firstData].rawSize
   END;
 
   LoadSegmentData(f, segStart, mod);
@@ -426,7 +541,7 @@ END GetProcAddress;
    Parameters: module — a module returned by LoadLibrary/LoadLibraryWith.
    Result: none. *)
 PROCEDURE FreeLibrary*(module: RDFModule);
-  VAR eNext: ExportSym; iNext: ImportSym;
+  VAR eNext: ExportSym; iNext: ImportSym; i: INTEGER;
 BEGIN
   IF module = NIL THEN RETURN END;
   WHILE module.exports # NIL DO
@@ -439,12 +554,18 @@ BEGIN
     DISPOSE(module.imports);
     module.imports := iNext
   END;
-  IF (module.codeSize > 0) & (module.codeBase # NIL) THEN
-    DISPOSE(module.codeBase)
+  (* Free every physical segment's heap block.  codeBase/dataBase are only
+     ALIASES into seg[], so they must NOT be disposed separately. *)
+  i := 0;
+  WHILE i < MaxSeg DO
+    IF module.seg[i].base # NIL THEN
+      DISPOSE(module.seg[i].base);
+      module.seg[i].base := NIL
+    END;
+    INC(i)
   END;
-  IF (module.dataSize > 0) & (module.dataBase # NIL) THEN
-    DISPOSE(module.dataBase)
-  END;
+  module.codeBase := NIL;
+  module.dataBase := NIL;
   DISPOSE(module)
 END FreeLibrary;
 

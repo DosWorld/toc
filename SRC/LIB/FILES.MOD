@@ -630,6 +630,12 @@ BEGIN
   RETURN ok
 END ReWriteTemp;
 
+(* TEMP DIAGNOSTIC — remove after investigation: is this file EMS-backed? *)
+PROCEDURE IsEmsBacked*(VAR F: File): BOOLEAN;
+BEGIN
+  RETURN F.backend = BkEms
+END IsEmsBacked;
+
 (* Delete: remove a file from disk (clears the read-only attribute first if
    needed, via DOS AH=71h long-name delete, falling back to AH=41h).
    Parameters: FileName — path of the file to delete.

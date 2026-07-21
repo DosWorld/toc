@@ -4,18 +4,18 @@ MODULE Strings;
 TYPE
 PCHAR*=SYSTEM.ADDRESS;
 
-(* Length: compute the length of a NUL-terminated string.
-   Parameters: s — the string to measure.
-   Result: number of characters before the terminating 0X. *)
-PROCEDURE Length*(s: ARRAY OF CHAR): INTEGER;
-BEGIN
-  RETURN SYSTEM.LENGTH(s)
-END Length;
-
-PROCEDURE NearLength(s: ARRAY OF CHAR): INTEGER; NEAR;
+PROCEDURE NearLength(s: ARRAY OF CHAR): WORD; NEAR;
 BEGIN
   RETURN SYSTEM.LENGTH(s)
 END NearLength;
+
+(* Length: compute the length of a NUL-terminated string.
+   Parameters: s — the string to measure.
+   Result: number of characters before the terminating 0X. *)
+PROCEDURE Length*(s: ARRAY OF CHAR): WORD;
+BEGIN
+  RETURN NearLength(s)
+END Length;
 
 (* Pos: find the first occurrence of substr in string, starting the scan at
    the offset passed in pos.
@@ -217,7 +217,7 @@ END EqualCase;
    Result: TRUE if a and b are identical (case-sensitive). *)
 PROCEDURE Equal*(a, b: ARRAY OF CHAR): BOOLEAN;
 BEGIN
-  RETURN SYSTEM.COMPARE(a[0], b[0], SYSTEM.LENGTH(a) + 1)
+  RETURN SYSTEM.COMPARE(a[0], b[0], NearLength(a) + 1)
 END Equal;
 
 (* EqualICase: compare two strings for equality, ignoring letter case.
@@ -372,8 +372,8 @@ END HexVal;
    and NUL-terminated. *)
 PROCEDURE ByteToHexStr*(val : BYTE; VAR str : ARRAY OF CHAR);
 BEGIN
-  str[1] := HexVal(val);  val := SYSTEM.LSR(val, 4);
-  str[0] := HexVal(val);
+  str[0] := HexVal(SYSTEM.LSR(val, 4));
+  str[1] := HexVal(val);
   str[2] := 0X;
 END ByteToHexStr;
 
@@ -382,10 +382,10 @@ END ByteToHexStr;
    and NUL-terminated. *)
 PROCEDURE WordToHexStr*(val : WORD; VAR str : ARRAY OF CHAR);
 BEGIN
-  str[3] := HexVal(BYTE(val));  val := SYSTEM.LSR(val, 4);
-  str[2] := HexVal(BYTE(val));  val := SYSTEM.LSR(val, 4);
-  str[1] := HexVal(BYTE(val));  val := SYSTEM.LSR(val, 4);
-  str[0] := HexVal(BYTE(val));
+  str[0] := HexVal(BYTE(SYSTEM.LSR(val, 12)));
+  str[1] := HexVal(BYTE(SYSTEM.LSR(val, 8)));
+  str[2] := HexVal(BYTE(SYSTEM.LSR(val, 4)));
+  str[3] := HexVal(BYTE(val));
   str[4] := 0X;
 END WordToHexStr;
 
@@ -432,7 +432,7 @@ PROCEDURE RTrim*(VAR s: ARRAY OF CHAR);
 VAR l: WORD;
 BEGIN
   l := NearLength(s);
-  WHILE (l > 0) & SYSTEM.ISSPACE(s[l - 1]) DO DEC(l) END;
+  WHILE (l # 0) & SYSTEM.ISSPACE(s[l - 1]) DO DEC(l) END;
   s[l] := 0X
 END RTrim;
 
