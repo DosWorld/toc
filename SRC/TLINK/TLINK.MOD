@@ -20,7 +20,7 @@ MODULE TLink;
   DWORD size, sequential, '.'-prefixed entries (e.g. ".sig") are metadata
   and skipped.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Strings, Tar, TExe, Out;
+IMPORT Dos, Files, LogErr, Rdoff, Strings, StrTab, Tar, TExe, Out;
 
 CONST
   ModeCom = 0;
@@ -55,7 +55,7 @@ TYPE
 
   SymNode = POINTER TO SymNodeRec;
   SymNodeRec = RECORD
-    name:   ARRAY SymChunk OF ARRAY MaxName OF CHAR;
+    nameId: ARRAY SymChunk OF WORD;   (* StrTab id, not the string itself — matches SRC/TOC's Syms nameId convention *)
     owner:  ARRAY SymChunk OF Module;
     segId:  ARRAY SymChunk OF INTEGER;
     offset: ARRAY SymChunk OF LONGINT;
@@ -187,7 +187,7 @@ BEGIN
     IF symHead = NIL THEN symHead := n ELSE symTail.next := n END;
     symTail := n
   END;
-  Strings.Copy(name, symTail.name[symTail.count]);
+  symTail.nameId[symTail.count] := StrTab.Intern(name);
   symTail.owner[symTail.count] := owner;
   symTail.segId[symTail.count] := segId;
   symTail.offset[symTail.count] := offset;
@@ -197,15 +197,19 @@ END AddSymbol;
 (* FindSymbol: look up a symbol by exact name across all chunk nodes.
    Parameters: name — the symbol name; VAR e — receives the result
    (node=NIL if not found).
-   Result: none. *)
+   Result: none.
+   A name never interned (StrTab.Find returns 0) cannot be any symbol's
+   name (StrTab id 0 matches nothing), so the id compare alone is exact —
+   no fallback string compare needed, same as SRC/TOC/SYMS.MOD's SymFindId. *)
 PROCEDURE FindSymbol(name: ARRAY OF CHAR; VAR e: SymEntry);
-  VAR n: SymNode; i: INTEGER;
+  VAR n: SymNode; i: INTEGER; id: WORD;
 BEGIN
+  id := StrTab.Find(name);
   n := symHead;
   WHILE n # NIL DO
     i := 0;
     WHILE i < n.count DO
-      IF Strings.Equal(n.name[i], name) THEN
+      IF n.nameId[i] = id THEN
         e.node := n; e.slot := i; RETURN
       END;
       INC(i)
@@ -540,13 +544,16 @@ END PatchMem;
 
 (* ---- linking: load code/data, apply relocations ---- *)
 
-(* LeakGuard: report (DEBUG level only) if free heap shrank across a bounded
-   unit of work that is expected to return to its starting baseline —
-   matches SRC/TOC/TOC.MOD's own LeakGuard exactly (zero-heap-leak
-   discipline applies to every tool in this toolchain, not just toc.exe).
+(* LeakGuard: report (ERROR level, aborts the run) if free heap shrank
+   across a bounded unit of work that is expected to return to its
+   starting baseline — matches SRC/TOC/TOC.MOD's own LeakGuard exactly
+   (zero-heap-leak discipline applies to every tool in this toolchain,
+   not just toc.exe). A leak is a bug to fix, not an acceptable warning:
+   LogErr.Error latches HaveErr() so the run fails fast exactly like any
+   other fatal error.
    Parameters: memBefore — SYSTEM.MemAvail() captured before the unit of
    work; what — description of the unit, for the diagnostic message.
-   Result: none (diagnostic only via LogErr.Debug). *)
+   Result: none. *)
 PROCEDURE LeakGuard(memBefore: WORD; what: ARRAY OF CHAR);
   VAR memAfter: WORD; msg: ARRAY 256 OF CHAR;
 BEGIN
@@ -557,7 +564,7 @@ BEGIN
     Strings.Append(" (", msg);
     Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
     Strings.Append(" paragraphs)", msg);
-    LogErr.Debug(msg)
+    LogErr.Error(msg)
   END
 END LeakGuard;
 
