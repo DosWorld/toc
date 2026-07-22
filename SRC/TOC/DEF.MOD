@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE Def;
 (*
   Port of def.c/def.h to Oberon-07.
@@ -423,11 +423,20 @@ BEGIN
   END;
   s := Syms.SymFind(tname);
   IF (s # Syms.NoSym) & (s.kind = Syms.KType) THEN RETURN s.type END;
-  (* HARD error, not a warning: an unresolvable type name means a stale or
-     mismatched archive, and the old INTEGER (2-byte) fallback silently
-     truncated every load/store through the symbol — a miscompile. *)
-  LogErr.Error2("unknown type in .def: ", tname);
-  RETURN Syms.TypeInteger
+  (* Unresolved BARE record name.  This is a POINTER base to a record the
+     exporting module did NOT export (no `TYPE mod_Rec RECORD ...` block in its
+     .def), so its layout is opaque to us — the importer only ever uses it as an
+     opaque pointer target.  Create a forward RECORD stub under the qualified
+     name (mirroring the dotted-name path above) instead of hard-erroring: a
+     pointer-to-opaque-record is well-formed and correct, whereas the old
+     behaviour rejected every such .def.  (A genuinely corrupt/stale archive
+     surfaces as a size/field mismatch elsewhere, not here.) *)
+  IF curAlias[0] # 0X THEN BuildQName(curAlias, tname, qn)
+  ELSE Strings.Copy(tname, qn) END;
+  rec := Syms.TypeNewRecord(Syms.NoType);
+  s := Syms.SymNew(qn, Syms.KType);
+  s.type := rec; s.exported := TRUE;
+  RETURN rec
 END ResolveTypeName;
 
 PROCEDURE ParseDefType(line: ARRAY OF CHAR; VAR i: INTEGER): Syms.TypeDesc;

@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE Parser;
 (*
   Oberon compiler — declaration parsing (CONST/TYPE/VAR/PROCEDURE) and
@@ -53,6 +53,15 @@ VAR
   fwdRefs:          ARRAY MaxFwdRefs OF FwdRef;
   nFwdRefs:         INTEGER;
   curModName:       ARRAY NameLen OF CHAR;
+
+PROCEDURE IsLex(sym : INTEGER):BOOLEAN;
+BEGIN
+  IF PExpr.sc.sym = sym THEN
+    Scan.Next(PExpr.sc);
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END IsLex;
 
 (* ---- syscomment handler ---- *)
 
@@ -270,8 +279,8 @@ BEGIN
   WHILE PExpr.sc.sym = Scan.TIdent DO
     head := IdListAppend(head, tail, PExpr.sc.id, FALSE);
     Scan.Next(PExpr.sc);
-    IF PExpr.sc.sym = Scan.TStar THEN tail^.exported := TRUE; Scan.Next(PExpr.sc) END;
-    IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+    IF IsLex(Scan.TStar) THEN tail^.exported := TRUE END;
+    IsLex(Scan.TComma)
   END
 END ParseExportedIdentList;
 
@@ -328,7 +337,7 @@ BEGIN
     ELSE
       PExpr.Error("parameter name expected"); Scan.Next(PExpr.sc)
     END;
-    IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END;
+    IsLex(Scan.TComma);
     WHILE (PExpr.sc.sym # Scan.TColon) & (PExpr.sc.sym # Scan.TSemi) &
           (PExpr.sc.sym # Scan.TRparen) & (PExpr.sc.sym # Scan.TEof) DO
       IF PExpr.sc.sym = Scan.TIdent THEN
@@ -337,10 +346,10 @@ BEGIN
       ELSE
         PExpr.Error("parameter name expected"); Scan.Next(PExpr.sc)
       END;
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+      IsLex(Scan.TComma)
     END;
-    IF PExpr.sc.sym = Scan.TColon THEN
-      Scan.Next(PExpr.sc); ptype := Syms.TypeInteger; ParseType(ptype)
+    IF IsLex(Scan.TColon) THEN
+      ptype := Syms.TypeInteger; ParseType(ptype)
     ELSE
       IF ~isVar THEN PExpr.Error("parameter requires a type") END;
       typelessVar := TRUE; ptype := Syms.TypeAddress
@@ -364,7 +373,7 @@ BEGIN
       pi := pi^.next
     END;
     IdListFree(head);
-    IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TSemi)
   END;
   PExpr.Expect(Scan.TRparen)
 END ParseFormalPars;
@@ -401,8 +410,8 @@ BEGIN
     IF (out # Syms.NoType) & ((out.form = Syms.TFReal) OR (out.form = Syms.TFLongreal)) THEN
       PExpr.modUsesFpu := TRUE
     END
-  ELSIF PExpr.sc.sym = Scan.TArray THEN
-    Scan.Next(PExpr.sc); len := -1;
+  ELSIF IsLex(Scan.TArray) THEN
+    len := -1;
     IF PExpr.sc.sym # Scan.TOf THEN len := ParseArrayDim() END;
     IF PExpr.sc.sym = Scan.TComma THEN
       (* Multi-dim: ARRAY m, n OF T → ARRAY m OF ARRAY n OF T.
@@ -420,8 +429,8 @@ BEGIN
       PExpr.Expect(Scan.TOf); elem := Syms.TypeInteger; ParseType(elem);
       out := Syms.TypeNewArray(elem, len)
     END
-  ELSIF PExpr.sc.sym = Scan.TRecord THEN
-    Scan.Next(PExpr.sc); base := NIL;
+  ELSIF IsLex(Scan.TRecord) THEN
+    base := NIL;
     IF PExpr.sc.sym = Scan.TLparen THEN
       Scan.Next(PExpr.sc); ParseType(base); PExpr.Expect(Scan.TRparen)
     END;
@@ -437,11 +446,11 @@ BEGIN
         fi := fi^.next
       END;
       IdListFree(fhead);
-      IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
+      IsLex(Scan.TSemi)
     END;
     PExpr.Expect(Scan.TEnd); EmitTypeDescriptor(rec); out := rec
-  ELSIF PExpr.sc.sym = Scan.TPointer THEN
-    Scan.Next(PExpr.sc); PExpr.Expect(Scan.TTo);
+  ELSIF IsLex(Scan.TPointer) THEN
+    PExpr.Expect(Scan.TTo);
     IF (PExpr.sc.sym = Scan.TIdent) & (Syms.SymFind(PExpr.sc.id) = Syms.NoSym) THEN
       out := Syms.TypeNewPointer(Syms.TypeNotype);
       IF nFwdRefs < MaxFwdRefs THEN
@@ -452,8 +461,7 @@ BEGIN
     ELSE
       base := Syms.TypeInteger; ParseType(base); out := Syms.TypeNewPointer(base)
     END
-  ELSIF PExpr.sc.sym = Scan.TProcedure THEN
-    Scan.Next(PExpr.sc);
+  ELSIF IsLex(Scan.TProcedure) THEN
     out := Syms.TypeNewProc(Syms.TypeNotype);
     (* A PROCEDURE type (used to declare a proc-typed VAR) is always FAR: a
        stored procedure value's address is loaded/called indirectly through
@@ -473,8 +481,8 @@ BEGIN
       END
     END;
     IF PExpr.sc.sym = Scan.TLparen THEN ParseFormalPars(out, FALSE) END;
-    IF PExpr.sc.sym = Scan.TColon THEN
-      Scan.Next(PExpr.sc); rtmp := Syms.TypeInteger; ParseType(rtmp);
+    IF IsLex(Scan.TColon) THEN
+      rtmp := Syms.TypeInteger; ParseType(rtmp);
       CheckResultType(rtmp);
       out.elemOrRet := rtmp
     END;
@@ -492,8 +500,7 @@ BEGIN
   WHILE PExpr.sc.sym = Scan.TIdent DO
     Strings.Copy(PExpr.sc.id, name); Scan.Next(PExpr.sc);
     IF Syms.SymFindLocal(name) # NIL THEN PExpr.Error2("duplicate identifier", name) END;
-    exported := FALSE;
-    IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
+    exported := IsLex(Scan.TStar);
     PExpr.Expect(Scan.TEql); PExpr.ParseExpression(val);
     (* A CONST must be an integer-family compile-time value: INTEGER, LONGINT,
        WORD, or BYTE.  CHAR/BOOLEAN/REAL/LONGREAL/SET constants and string,
@@ -509,7 +516,7 @@ BEGIN
     IF val.mode = Cgen.MConst THEN s.val := val.val; s.adr := val.adr
     ELSIF val.mode = Cgen.MGlobal THEN s.val := 0; s.adr := val.adr
     ELSE s.val := 0; s.adr := 0 END;
-    IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TSemi)
   END
 END ParseConstDecl;
 
@@ -523,8 +530,7 @@ BEGIN
   WHILE PExpr.sc.sym = Scan.TIdent DO
     Strings.Copy(PExpr.sc.id, name); Scan.Next(PExpr.sc);
     IF Syms.SymFindLocal(name) # Syms.NoSym THEN PExpr.Error2("duplicate identifier", name) END;
-    exported := FALSE;
-    IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc) END;
+    exported := IsLex(Scan.TStar);
     (* Pre-register placeholder so self-referential pointers (POINTER TO T inside T)
        resolve to the same TypeDesc and stay valid after the real type is parsed. *)
     placeholder := Syms.TypeNew(Syms.TFNotype, 0);
@@ -561,7 +567,7 @@ BEGIN
     IF (Syms.TopScope^.level = 0) & TDbg.Enabled() THEN
       TDbg.AddSymT("Y", "-", 0, TDbg.TypeIndex(placeholder), name)
     END;
-    IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TSemi)
   END;
   (* Resolve forward POINTER TO <name> references *)
   i := 0;
@@ -606,7 +612,7 @@ BEGIN
       it := it^.next
     END;
     IdListFree(head);
-    IF PExpr.sc.sym = Scan.TSemi THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TSemi)
   END
 END ParseVarDecl;
 
@@ -648,13 +654,12 @@ BEGIN
     sym := Syms.SymNew(name, Syms.KProc);
     sym.declLine := PExpr.sc.line;
     exported := FALSE;
-    IF PExpr.sc.sym = Scan.TStar THEN exported := TRUE; Scan.Next(PExpr.sc);
-      sym.exported := TRUE END;
+    IF IsLex(Scan.TStar) THEN exported := TRUE; sym.exported := TRUE END;
     pt := Syms.TypeNewProc(Syms.TypeNotype);
     sym.type := pt;
     Syms.SymOpenScope();
     IF PExpr.sc.sym = Scan.TLparen THEN ParseFormalPars(pt, TRUE) END;
-    IF PExpr.sc.sym = Scan.TColon THEN Scan.Next(PExpr.sc);
+    IF IsLex(Scan.TColon) THEN
       rtmp := Syms.TypeInteger; ParseType(rtmp);
       CheckResultType(rtmp);
       pt.elemOrRet := rtmp END;
@@ -706,7 +711,7 @@ BEGIN
             Syms.InlineAppend(inlNode, inlTail, TRUE, BYTE(0), idx);
             INC(nInl); Scan.Next(PExpr.sc)
           ELSE PExpr.Error("byte literal or parameter name expected"); Scan.Next(PExpr.sc) END;
-          IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+          IsLex(Scan.TComma)
         END;
         PExpr.Expect(Scan.TRparen); PExpr.Expect(Scan.TSemi);
         pt.isInline := TRUE; pt.inlineList := inlNode;
@@ -754,9 +759,7 @@ BEGIN
 
   PStmt.PatchFrameSize;
 
-  IF PExpr.sc.sym = Scan.TBegin THEN
-    Scan.Next(PExpr.sc); ParseStatSeq(pt.elemOrRet)
-  END;
+  IF IsLex(Scan.TBegin) THEN ParseStatSeq(pt.elemOrRet) END;
   PExpr.Expect(Scan.TEnd);
   IF PExpr.sc.sym = Scan.TIdent THEN
     IF ~Strings.Equal(PExpr.sc.id, name) THEN PExpr.Error("procedure name mismatch") END;
@@ -806,12 +809,12 @@ BEGIN
      (e.g. VAR after nested PROCEDURE blocks). *)
   WHILE (PExpr.sc.sym = Scan.TConst) OR (PExpr.sc.sym = Scan.TType) OR
         (PExpr.sc.sym = Scan.TVar)   OR (PExpr.sc.sym = Scan.TProcedure) DO
-    IF PExpr.sc.sym = Scan.TConst THEN
-      Scan.Next(PExpr.sc); ParseConstDecl
-    ELSIF PExpr.sc.sym = Scan.TType THEN
-      Scan.Next(PExpr.sc); ParseTypeDecl
-    ELSIF PExpr.sc.sym = Scan.TVar THEN
-      Scan.Next(PExpr.sc); ParseVarDecl
+    IF IsLex(Scan.TConst) THEN
+      ParseConstDecl
+    ELSIF IsLex(Scan.TType) THEN
+      ParseTypeDecl
+    ELSIF IsLex(Scan.TVar) THEN
+      ParseVarDecl
     ELSE
       ParseProcDecl
     END;
@@ -1083,13 +1086,11 @@ BEGIN
   PExpr.Expect(Scan.TSemi);
 
   (* IMPORT list *)
-  IF PExpr.sc.sym = Scan.TImport THEN
-    Scan.Next(PExpr.sc);
+  IF IsLex(Scan.TImport) THEN
     WHILE PExpr.sc.sym = Scan.TIdent DO
       Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc);
       Strings.Copy(iname, alias);
-      IF PExpr.sc.sym = Scan.TAssign THEN
-        Scan.Next(PExpr.sc);
+      IF IsLex(Scan.TAssign) THEN
         IF PExpr.sc.sym = Scan.TIdent THEN
           Strings.Copy(PExpr.sc.id, iname); Scan.Next(PExpr.sc)
         ELSE
@@ -1116,7 +1117,7 @@ BEGIN
         END;
         Import.LoadExplicitImport(iname, alias)
       END;
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+      IsLex(Scan.TComma)
     END;
     PExpr.Expect(Scan.TSemi)
   END;
@@ -1184,9 +1185,7 @@ BEGIN
       Cgen.CgCallFar(depImportId);
       ip := ip^.next
     END;
-    IF PExpr.sc.sym = Scan.TBegin THEN
-      Scan.Next(PExpr.sc); ParseStatSeq(Syms.TypeNotype)
-    END;
+    IF IsLex(Scan.TBegin) THEN ParseStatSeq(Syms.TypeNotype) END;
     Cgen.Emit1(BYTE(Cgen.OpRetf))
   END;
 

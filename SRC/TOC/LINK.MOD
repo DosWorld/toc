@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE Link;
 (*
   RDOFF2 smart linker core for MS-DOS.
@@ -1131,8 +1131,6 @@ BEGIN
      alignment padding between modules) reads back as zero, matching the
      old buffer's explicit zero-fill. *)
   IF ~Files.ReWriteTemp(ls^.dataFile) THEN LogErr.Error("Cannot create data temp"); RETURN END;
-  IF Files.IsEmsBacked(ls^.dataFile) THEN LogErr.Debug("TRACE dataFile EMS-backed")
-  ELSE LogErr.Debug("TRACE dataFile DISK-backed") END;
   sz := ls^.totalDataLen;
   IF sz < LONGINT(1) THEN sz := LONGINT(1) END;
   WriteZeros(ls^.dataFile, sz);
@@ -1157,8 +1155,6 @@ BEGIN
      writing strictly sequentially (pos tracks the next byte). *)
   lnkLs := ls;
   IF ~Files.ReWriteTemp(ls^.spillFile) THEN LogErr.Error("Cannot create code temp"); RETURN END;
-  IF Files.IsEmsBacked(ls^.spillFile) THEN LogErr.Debug("TRACE spillFile EMS-backed")
-  ELSE LogErr.Debug("TRACE spillFile DISK-backed") END;
   pos := LONGINT(0);
   g := ls^.groupHead;
   WHILE (g # NIL) & ~LogErr.HaveErr() DO

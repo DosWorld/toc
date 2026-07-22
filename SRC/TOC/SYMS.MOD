@@ -1,4 +1,4 @@
-(*D-,A-*)
+(*$D-,A-*)
 MODULE Syms;
 (*
   Symbol table: types, symbols, scopes, predeclared universe.

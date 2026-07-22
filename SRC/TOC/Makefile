@@ -23,7 +23,7 @@ XT       = xt
 # populate the child DOS process's environment block -- confirmed empirically
 # 2026-07-16, see SRC/TASM/TASM.MD §K -- so an OBERON_LIB env var is never a
 # working option here regardless of quoting/slash convention.)
-XTRUN  = $(XT) run --max=40000000000
+XTRUN  = $(XT) run --max=40000000000 --memkb=544
 TOC = _TOC.EXE
 
 # Every compiler source — the single-process build scans, compiles and links the

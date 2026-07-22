@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE PExpr;
 IMPORT Scan, Syms, Cgen, Rdoff, Strings, LogErr, StrTab;
 
@@ -56,6 +56,15 @@ BEGIN
   Strings.Append(name, buf); Strings.Append("'", buf);
   Error(buf)
 END Error2;
+
+PROCEDURE IsLex(t: INTEGER):BOOLEAN;
+BEGIN
+  IF sc.sym = t THEN
+    Scan.Next(sc);
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END IsLex;
 
 PROCEDURE Expect*(t: INTEGER);
   VAR buf: ARRAY 64 OF CHAR; num: ARRAY 16 OF CHAR;
@@ -184,8 +193,7 @@ BEGIN
   IF sc.sym # Scan.TIdent THEN Error("type name expected in SIZE"); RETURN END;
   sym := Syms.SymFind(sc.id);
   Scan.Next(sc);
-  IF (sym # Syms.NoSym) & (sym.kind = Syms.KImport) & (sc.sym = Scan.TDot) THEN
-    Scan.Next(sc);
+  IF (sym # Syms.NoSym) & (sym.kind = Syms.KImport) & IsLex(Scan.TDot) THEN
     IF sc.sym # Scan.TIdent THEN Error("type name expected after '.'"); RETURN END;
     (* build "Alias.Name" *)
     StrTab.Get(sym.nameId, tkey); Strings.Append(".", tkey);
@@ -714,7 +722,7 @@ BEGIN
       END;
       p := p.next
     END;
-    IF sc.sym = Scan.TComma THEN Scan.Next(sc)
+    IF IsLex(Scan.TComma) THEN
     ELSIF sc.sym # Scan.TRparen THEN
       (* Malformed list: after an argument the next token must be ',' or ')'.
          Anything else (e.g. a missing ')' that lets a statement terminator leak
@@ -752,7 +760,7 @@ BEGIN
       END;
       INC(nArgs);
       IF f # Syms.NoSym THEN f := f.next END;
-      IF sc.sym = Scan.TComma THEN Scan.Next(sc) END
+      IsLex(Scan.TComma)
     END;
     Expect(Scan.TRparen);
     n := pt.inlineList;
@@ -968,8 +976,7 @@ BEGIN
   END;
 
   WHILE (sc.sym = Scan.TDot) OR (sc.sym = Scan.TLbrak) OR (sc.sym = Scan.TArrow) DO
-    IF sc.sym = Scan.TDot THEN
-      Scan.Next(sc);
+    IF IsLex(Scan.TDot) THEN
       IF sc.sym # Scan.TIdent THEN Error("identifier expected after '.'"); RETURN END;
       IF sym.kind = Syms.KImport THEN
         StrTab.Get(sym.nameId, qname); Strings.Append(".", qname); Strings.Append(sc.id, qname);
@@ -1313,10 +1320,9 @@ BEGIN
       Scan.Next(sc);
       Cgen.EmitCodeStr("33,C0,50");   (* XOR AX,AX; PUSH AX *)
       WHILE sc.sym # Scan.TRbrace DO
-        IF sc.sym = Scan.TComma THEN Scan.Next(sc) END;
+        IsLex(Scan.TComma);
         ParseExpression(lo); Cgen.CgLoadItem(lo);
-        IF sc.sym = Scan.TDotdot THEN
-          Scan.Next(sc);
+        IF IsLex(Scan.TDotdot) THEN
           Cgen.Emit1(BYTE(Cgen.OpPushAx));
           ParseExpression(hi); Cgen.CgLoadItem(hi);
           Cgen.Emit2(089H, 0C2H);
@@ -1361,8 +1367,8 @@ BEGIN
             OR (form = Syms.TFWord) OR (form = Syms.TFAddress)
             OR (form = Syms.TFReal) OR (form = Syms.TFLongreal) THEN
           Scan.Next(sc);
-          IF sc.sym = Scan.TLparen THEN
-            Scan.Next(sc); ParseExpression(arg);
+          IF IsLex(Scan.TLparen) THEN
+            ParseExpression(arg);
             Expect(Scan.TRparen);
             srcForm := Syms.TFInteger;
             IF arg.type # NIL THEN srcForm := arg.type.form END;
@@ -1608,15 +1614,13 @@ BEGIN
   IF wantTrue THEN
     n := CondBpPush(bpList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); bpList := n;
     ParseCondFactor(rhs, TRUE, bpList);
-    WHILE sc.sym = Scan.TAnd DO
-      Scan.Next(sc);
+    WHILE IsLex(Scan.TAnd) DO
       ParseCondFactor(rhs, TRUE, bpList)
     END
   ELSE
     n := CondBpPush(chainFalseList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); chainFalseList := n;
     ParseCondFactor(rhs, TRUE, chainFalseList);
-    WHILE sc.sym = Scan.TAnd DO
-      Scan.Next(sc);
+    WHILE IsLex(Scan.TAnd) DO
       ParseCondFactor(rhs, TRUE, chainFalseList)
     END;
     (* every operand true (fell through) -> chain is TRUE -> branch to bpList's target *)
@@ -1646,8 +1650,7 @@ BEGIN
   savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
   ParseFactor(item);
   Cgen.condArmed := savedArmed;
-  IF sc.sym = Scan.TAnd THEN
-    Scan.Next(sc);
+  IF IsLex(Scan.TAnd) THEN
     ParseCondAndChain(item, wantTrue, bpList)
   ELSE
     Cgen.CgLoadItem(item); Cgen.CgTestAx();
@@ -1910,15 +1913,13 @@ BEGIN
     IF ~Cgen.condWantTrue THEN
       n := CondBpPush(condBpList); Cgen.CgCondNear(Cgen.OpJnz, n^.bp); condBpList := n;
       ParseCondTerm(rhs, FALSE, condBpList);
-      WHILE sc.sym = Scan.TOr DO
-        Scan.Next(sc);
+      WHILE IsLex(Scan.TOr) DO
         ParseCondTerm(rhs, FALSE, condBpList)
       END
     ELSE
       n := CondBpPush(chainTrueList); Cgen.CgCondNear(Cgen.OpJnz, n^.bp); chainTrueList := n;
       ParseCondTerm(rhs, FALSE, chainTrueList);
-      WHILE sc.sym = Scan.TOr DO
-        Scan.Next(sc);
+      WHILE IsLex(Scan.TOr) DO
         ParseCondTerm(rhs, FALSE, chainTrueList)
       END;
       (* every operand false (fell through) -> chain is FALSE -> branch to condBpList *)
@@ -1966,9 +1967,7 @@ BEGIN
      comparison fusion but starved the chain fusion of the armed state it
      needs to reach ParseAndTail/ParseOrTail). *)
   negate := FALSE;
-  IF    sc.sym = Scan.TMinus THEN negate := TRUE; Scan.Next(sc)
-  ELSIF sc.sym = Scan.TPlus  THEN Scan.Next(sc)
-  END;
+  IF IsLex(Scan.TMinus) THEN negate := TRUE ELSE IsLex(Scan.TPlus) END;
   ParseTerm(item);
   IF negate THEN
     IF (item.mode = Cgen.MConst) & ~IsFpuType(item) THEN
@@ -2192,12 +2191,10 @@ END RelopJccU;
 PROCEDURE ParseCondFactor;
   VAR n: CondBpNode; savedArmed: BOOLEAN;
 BEGIN
-  IF sc.sym = Scan.TNot THEN
-    Scan.Next(sc);
+  IF IsLex(Scan.TNot) THEN
     ParseCondFactor(item, ~wantTrue, bpList);
     item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
-  ELSIF sc.sym = Scan.TLparen THEN
-    Scan.Next(sc);
+  ELSIF IsLex(Scan.TLparen) THEN
     ParseCondExpr(item, wantTrue, bpList);
     Expect(Scan.TRparen)
   ELSE
@@ -2404,8 +2401,7 @@ BEGIN
       END
     END;
     item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
-  ELSIF sc.sym = Scan.TIn THEN
-    Scan.Next(sc);
+  ELSIF IsLex(Scan.TIn) THEN
     Cgen.CgLoadItem(item); Cgen.Emit1(BYTE(Cgen.OpPushAx));
     ParseSimpleExpression(rhs); Cgen.CgLoadItem(rhs);
     Cgen.EmitCodeStr("89,C3,58,8A,C8");   (* MOV BX,AX; POP AX; MOV CL,AL *)
@@ -2419,9 +2415,8 @@ BEGIN
     Cgen.Emit2(085H, 0C3H);
     Cgen.CgSetcc(Cgen.OpJnz);
     item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
-  ELSIF sc.sym = Scan.TIs THEN
+  ELSIF IsLex(Scan.TIs) THEN
     (* IS type test *)
-    Scan.Next(sc);
     IF (item.type = Syms.NoType) OR (item.type.form # Syms.TFPointer) THEN
       Error("IS: left operand must be a POINTER");
       item.type := Syms.TypeBoolean; item.mode := Cgen.MConst; item.val := 0; RETURN

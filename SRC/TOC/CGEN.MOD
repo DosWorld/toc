@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE Cgen;
 (*
   Oberon compiler code generator.

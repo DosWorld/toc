@@ -1,4 +1,4 @@
-(*$M 26000, 256000, 256000*)
+(*$M 26000, 256000, 650000*)
 (*$D-*)
 MODULE TOC;
 (*
@@ -653,16 +653,18 @@ VAR memAfter: WORD;
 BEGIN
   memAfter := SYSTEM.MemAvail();
   IF (memAfter < memBefore) THEN
-    (* ZERO HEAP LEAKS is a KEY RULE (CLAUDE.md): a leak is a bug to fix, so
-       the report must be visible at the DEFAULT log level, not gated behind
-       /LOG=debug (where regressions went unseen). *)
-    Strings.Copy("oc: WARNING: heap leak compiling ", msg);
+    (* ZERO HEAP LEAKS is a KEY RULE (CLAUDE.md): a leak is a bug to fix, not
+       an acceptable warning — reported via LogErr.Error (ERROR-level,
+       stderr, latches HaveErr()) so a leak fails the run exactly like any
+       other fatal compile/link error, funneling through this codebase's
+       single-Halt/fail-fast convention. *)
+    Strings.Copy("oc: heap leak compiling ", msg);
     Strings.Append(module, msg);
     Strings.Append(subPart, msg);
     Strings.Append(" (", msg);
     Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
     Strings.Append(" paragraphs)", msg);
-    LogErr.Warn(msg)
+    LogErr.Error(msg)
   END
 END LeakGuard;
 

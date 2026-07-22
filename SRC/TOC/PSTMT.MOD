@@ -1,4 +1,4 @@
-(*D-*)
+(*$D-*)
 MODULE PStmt;
 (*
   Statement parser: IF, WHILE, REPEAT, FOR, CASE, RETURN, procedure calls,
@@ -44,6 +44,20 @@ BEGIN
   WHILE n # NIL DO nx := n^.next; Cgen.CgPatchNear(n^.bp); DISPOSE(n); n := nx END;
   head := NIL
 END BpPatchFree;
+
+(* IsLex — mirrors PExpr.IsLex/Parser.IsLex exactly: peek the current token
+   against PExpr.sc, consume it and return TRUE on a match, else leave the
+   scanner untouched and return FALSE.  Not exported: every call site lives
+   in this module, so NEAR saves the far-call overhead (CALL/RETF vs
+   CALL/RET) on what is otherwise the hottest single check in the parser. *)
+PROCEDURE IsLex(t: INTEGER): BOOLEAN;
+BEGIN
+  IF PExpr.sc.sym = t THEN
+    Scan.Next(PExpr.sc);
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END IsLex;
 
 (* ---- forward declarations ---- *)
 PROCEDURE ParseStatementSequence*(retType: Syms.TypeDesc); FORWARD;
@@ -94,13 +108,9 @@ BEGIN
     ParseStatementSequence(retType);
     endList := BpPush(endList); Cgen.CgJmpNear(endList^.bp);
     PExpr.CondBpPatchFree(jf);
-    IF PExpr.sc.sym = Scan.TElsif THEN Scan.Next(PExpr.sc)
-    ELSE more := FALSE
-    END
+    more := IsLex(Scan.TElsif)
   END;
-  IF PExpr.sc.sym = Scan.TElse THEN
-    Scan.Next(PExpr.sc); ParseStatementSequence(retType)
-  END;
+  IF IsLex(Scan.TElse) THEN ParseStatementSequence(retType) END;
   PExpr.Expect(Scan.TEnd);
   BpPatchFree(endList)
 END ParseIf;
@@ -119,9 +129,7 @@ BEGIN
     ParseStatementSequence(retType);
     Cgen.CgJmpBack(loopTop);
     PExpr.CondBpPatchFree(jf);
-    IF PExpr.sc.sym = Scan.TElsif THEN Scan.Next(PExpr.sc)
-    ELSE more := FALSE
-    END
+    more := IsLex(Scan.TElsif)
   END;
   PExpr.Expect(Scan.TEnd)
 END ParseWhile;
@@ -191,9 +199,8 @@ BEGIN
   v.isRef := FALSE;
   Cgen.CgStoreItem(v);
   step := 1; neg := FALSE;
-  IF PExpr.sc.sym = Scan.TBy THEN
-    Scan.Next(PExpr.sc);
-    IF PExpr.sc.sym = Scan.TMinus THEN neg := TRUE; Scan.Next(PExpr.sc) END;
+  IF IsLex(Scan.TBy) THEN
+    neg := IsLex(Scan.TMinus);
     IF PExpr.sc.sym # Scan.TInt THEN PExpr.Error("constant expected")
     ELSE
       step := PExpr.sc.ival; IF neg THEN step := -step END;
@@ -256,7 +263,7 @@ PROCEDURE PreScanLabel(VAR ok: BOOLEAN): INTEGER;
   VAR neg: BOOLEAN; v: INTEGER;
 BEGIN
   neg := FALSE; v := 0; ok := TRUE;
-  IF PExpr.sc.sym = Scan.TMinus THEN neg := TRUE; Scan.Next(PExpr.sc) END;
+  neg := IsLex(Scan.TMinus);
   IF PExpr.sc.sym = Scan.TInt THEN
     v := INTEGER(PExpr.sc.ival); Scan.Next(PExpr.sc)
   ELSIF (~neg) & (PExpr.sc.sym = Scan.TChar) THEN
@@ -294,12 +301,12 @@ BEGIN
        (PExpr.sc.sym = Scan.TWhile) OR (PExpr.sc.sym = Scan.TFor) OR
        (PExpr.sc.sym = Scan.TRepeat) THEN
       INC(depth); Scan.Next(PExpr.sc)
-    ELSIF PExpr.sc.sym = Scan.TUntil THEN
+    ELSIF IsLex(Scan.TUntil) THEN
       (* only valid at depth>0 belonging to a REPEAT; well-formed input
          guarantees pairing, so just close one level like END does *)
-      DEC(depth); Scan.Next(PExpr.sc)
-    ELSIF PExpr.sc.sym = Scan.TEnd THEN
-      DEC(depth); Scan.Next(PExpr.sc)
+      DEC(depth)
+    ELSIF IsLex(Scan.TEnd) THEN
+      DEC(depth)
     ELSE
       Scan.Next(PExpr.sc)
     END
@@ -337,14 +344,11 @@ BEGIN
         IF v > hi THEN hi := v END
       END;
       INC(count);
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc)
-      ELSE more := FALSE
-      END
+      more := IsLex(Scan.TComma)
     END;
-    IF PExpr.sc.sym # Scan.TColon THEN RETURN FALSE END;
-    Scan.Next(PExpr.sc);
+    IF ~IsLex(Scan.TColon) THEN RETURN FALSE END;
     IF ~SkipArmBody() THEN RETURN FALSE END;
-    IF PExpr.sc.sym = Scan.TBar THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TBar)
   END;
   RETURN TRUE
 END PreScanCase;
@@ -452,17 +456,15 @@ BEGIN
     more := TRUE; armHead := NIL; armTail := NIL;
     WHILE more DO
       v := ParseConstLabel();
-      IF PExpr.sc.sym = Scan.TDotdot THEN
+      IF IsLex(Scan.TDotdot) THEN
         (* PreScanCase never lets a range label reach the table path —
            unreachable in practice, but stay well-formed regardless. *)
-        Scan.Next(PExpr.sc); v := ParseConstLabel()
+        v := ParseConstLabel()
       ELSE
         i := v - lo;
         IF (i >= 0) & (i < nSlots) THEN ArmSlotPush(armHead, armTail, i) END
       END;
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc)
-      ELSE more := FALSE
-      END
+      more := IsLex(Scan.TComma)
     END;
     PExpr.Expect(Scan.TColon);
     bodyStart := Cgen.CgPc();
@@ -481,15 +483,13 @@ BEGIN
     ArmSlotFree(armHead);
     ParseStatementSequence(retType);
     n := BpPush(endList); Cgen.CgJmpNear(n^.bp); endList := n;
-    IF PExpr.sc.sym = Scan.TBar THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TBar)
   END;
   (* The "no match" landing spot: right before the ELSE body if present,
      otherwise right here (matches the chain path — no ELSE means an
      unmatched value simply falls through past the whole CASE). *)
   Cgen.CgPatchNear(defaultJmp);
-  IF PExpr.sc.sym = Scan.TElse THEN
-    Scan.Next(PExpr.sc); ParseStatementSequence(retType)
-  END;
+  IF IsLex(Scan.TElse) THEN ParseStatementSequence(retType) END;
   PExpr.Expect(Scan.TEnd);
   BpPatchFree(endList)
 END ParseCaseTable;
@@ -550,8 +550,8 @@ BEGIN
     ReloadCase(caseLoad, caseSym);
     WHILE more DO
       lo := ParseConstLabel();
-      IF PExpr.sc.sym = Scan.TDotdot THEN
-        Scan.Next(PExpr.sc); hi := ParseConstLabel();
+      IF IsLex(Scan.TDotdot) THEN
+        hi := ParseConstLabel();
         Cgen.CgCmpAxImm(lo);
         Cgen.CgCondNear(Cgen.OpJl, skipLo);
         Cgen.CgCmpAxImm(hi);
@@ -561,9 +561,7 @@ BEGIN
         Cgen.CgCmpAxImm(lo);
         n := BpPush(bodyList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); bodyList := n
       END;
-      IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc)
-      ELSE more := FALSE
-      END
+      more := IsLex(Scan.TComma)
     END;
     Cgen.CgJmpNear(skipArm);
     BpPatchFree(bodyList);
@@ -571,11 +569,9 @@ BEGIN
     ParseStatementSequence(retType);
     n := BpPush(endList); Cgen.CgJmpNear(n^.bp); endList := n;
     Cgen.CgPatchNear(skipArm);
-    IF PExpr.sc.sym = Scan.TBar THEN Scan.Next(PExpr.sc) END
+    IsLex(Scan.TBar)
   END;
-  IF PExpr.sc.sym = Scan.TElse THEN
-    Scan.Next(PExpr.sc); ParseStatementSequence(retType)
-  END;
+  IF IsLex(Scan.TElse) THEN ParseStatementSequence(retType) END;
   PExpr.Expect(Scan.TEnd);
   BpPatchFree(endList)
 END ParseCase;
@@ -873,8 +869,7 @@ BEGIN
       condConst := (cond.mode = Cgen.MConst) & (cond.type # Syms.NoType) &
                    (cond.type.form = Syms.TFBoolean);
       IF ~condConst THEN Cgen.CgLoadItem(cond) END;
-      IF PExpr.sc.sym = Scan.TComma THEN
-        Scan.Next(PExpr.sc);
+      IF IsLex(Scan.TComma) THEN
         IF PExpr.sc.sym = Scan.TInt THEN errCode := PExpr.sc.ival; Scan.Next(PExpr.sc)
         ELSE PExpr.Error("integer constant expected") END
       END;
@@ -959,7 +954,7 @@ BEGIN
         ELSE
           Cgen.Emit1(BYTE(PExpr.sc.ival MOD LONGINT(256)));
           Scan.Next(PExpr.sc);
-          IF PExpr.sc.sym = Scan.TComma THEN Scan.Next(PExpr.sc) END
+          IsLex(Scan.TComma)
         END
       END;
       PExpr.Expect(Scan.TRparen);
@@ -972,8 +967,7 @@ BEGIN
     IF (item.mode = Cgen.MSysProc) THEN
       ParseSysprocCall(INTEGER(item.val)); RETURN
     END;
-    IF PExpr.sc.sym = Scan.TAssign THEN
-      Scan.Next(PExpr.sc);
+    IF IsLex(Scan.TAssign) THEN
       (* The destination must be a variable (an l-value).  Without this,
          `myConst := x` / `MyProc := x` parsed, evaluated the RHS, and were
          then silently DISCARDED (CgStoreItem has no branch for MConst/MProc
@@ -1323,9 +1317,7 @@ END ParseStatement;
 PROCEDURE ParseStatementSequence;
 BEGIN
   ParseStatement(retType);
-  WHILE PExpr.sc.sym = Scan.TSemi DO
-    Scan.Next(PExpr.sc); ParseStatement(retType)
-  END
+  WHILE IsLex(Scan.TSemi) DO ParseStatement(retType) END
 END ParseStatementSequence;
 
 BEGIN
