@@ -387,6 +387,21 @@ BEGIN
   RETURN tmp
 END PeekDataByte;
 
+(* PatchDataByte: overwrite a single byte previously written to the data
+   segment, without disturbing the current append position.
+   Parameters: obj — the object file being built; offset — byte offset
+   within the data segment to write; b — the new byte value.
+   Result: none. *)
+PROCEDURE PatchDataByte*(obj: ObjFile; offset: LONGINT; b: BYTE);
+  VAR tmp: BYTE; save: LONGINT;
+BEGIN
+  tmp := b;
+  save := Files.Position(obj^.dataFile);
+  Files.Seek(obj^.dataFile, offset);
+  Files.BlockWrite(obj^.dataFile, tmp, 1);
+  Files.Seek(obj^.dataFile, save)
+END PatchDataByte;
+
 (* RdfFindImport: look up an existing import entry by name.
    Parameters: obj — the object file being built; name — the imported
    symbol's link name to search for.
@@ -680,9 +695,16 @@ END CheckSign;
    filename — path of the .rdf file to read.
    Result: TRUE if the file was opened, signed correctly, and fully copied;
    FALSE otherwise. *)
-PROCEDURE RdfLoad*(obj: ObjFile; filename: ARRAY OF CHAR): BOOLEAN;
-  VAR f: Files.File;
-      n: INTEGER;
+(* LoadFrom: replay an already-open RDOFF2 file (positioned at its start)
+   into obj (already RdfInit'd/reset by the caller) — the shared record/
+   segment-parsing loop behind both RdfLoad (opens by name) and MergeRdf
+   (operates on caller-supplied open handles).
+   Parameters: obj — the object to fill in (caller owns RdfFree/RdfInit);
+   f — the source file, positioned at offset 0, left open on return.
+   Result: TRUE if the signature checked out and both segment copies
+   succeeded; FALSE otherwise. *)
+PROCEDURE LoadFrom(obj: ObjFile; VAR f: Files.File): BOOLEAN;
+  VAR n: INTEGER;
       hlen, hdrConsumed, segLen: LONGINT;
       recType, recLen: BYTE;
       bodyStart: LONGINT;
@@ -697,11 +719,7 @@ PROCEDURE RdfLoad*(obj: ObjFile; filename: ARRAY OF CHAR): BOOLEAN;
       segType: INTEGER;
       bssBytes: LONGINT;
 BEGIN
-  IF ~Files.Reset(f, filename) THEN RETURN FALSE END;
-  RdfFree(obj); RdfInit(obj);
-  IF LogErr.HaveErr() THEN Files.Close(f); RETURN FALSE END;
-
-  IF ~CheckSign(f) THEN Files.Close(f); RETURN FALSE END;
+  IF ~CheckSign(f) THEN RETURN FALSE END;
 
   Files.ReadDWord(f, hlen);
   Files.ReadDWord(f, hlen);
@@ -731,8 +749,7 @@ BEGIN
       ok := Rs(f, name);
       NEW(imp);
       IF imp = NIL THEN
-        LogErr.Error("out of memory (import record)");
-        Files.Close(f); RETURN FALSE
+        LogErr.Error("out of memory (import record)"); RETURN FALSE
       END;
       imp^.flags := flags; imp^.segId := segIdWord; imp^.next := NIL;
       n := 0;
@@ -749,8 +766,7 @@ BEGIN
       ok := Rs(f, name);
       NEW(g);
       IF g = NIL THEN
-        LogErr.Error("out of memory (global record)");
-        Files.Close(f); RETURN FALSE
+        LogErr.Error("out of memory (global record)"); RETURN FALSE
       END;
       g^.flags := flags; g^.segId := segIdByte; g^.offset := offset; g^.next := NIL;
       n := 0;
@@ -787,9 +803,452 @@ BEGIN
     END
   END;
 
-  Files.Close(f);
   RETURN cpOk
+END LoadFrom;
+
+(* RdfLoad: read an entire RDOFF2 file into obj — resets obj, verifies the
+   signature, replays the header records (relocations, imports, globals,
+   bss) into obj's lists, and copies the code/data segment bodies into
+   obj's code/data temp files.
+   Parameters: obj — the object file to load into (re-initialised first);
+   filename — path of the .rdf file to read.
+   Result: TRUE if the file was opened, signed correctly, and fully copied;
+   FALSE otherwise. *)
+PROCEDURE RdfLoad*(obj: ObjFile; filename: ARRAY OF CHAR): BOOLEAN;
+  VAR f: Files.File; ok: BOOLEAN;
+BEGIN
+  IF ~Files.Reset(f, filename) THEN RETURN FALSE END;
+  RdfFree(obj); RdfInit(obj);
+  IF LogErr.HaveErr() THEN Files.Close(f); RETURN FALSE END;
+  ok := LoadFrom(obj, f);
+  Files.Close(f);
+  RETURN ok
 END RdfLoad;
+
+(* ---- merge two RDOFF2 objects into one (compile-time $L folding) ---- *)
+
+(* RdfFindGlobal: locate a global (exported symbol) by name.
+   Parameters: obj — the object file; name — the symbol's link name.
+   Result: the GlobalNode if found, NIL otherwise. *)
+PROCEDURE RdfFindGlobal(obj: ObjFile; name: ARRAY OF CHAR): GlobalNode;
+  VAR g: GlobalNode;
+BEGIN
+  g := obj^.globalHead;
+  WHILE g # NIL DO
+    IF Strings.Equal(g^.name, name) THEN RETURN g END;
+    g := g^.next
+  END;
+  RETURN NIL
+END RdfFindGlobal;
+
+(* Pad12: round n up to the next even (2-byte aligned) offset by emitting one
+   zero byte to the given segment file if n is currently odd.
+   Parameters: f — the segment file, positioned at its end (offset n);
+   n — current length of the segment.
+   Result: the (possibly incremented) new length. *)
+PROCEDURE Pad2(VAR f: Files.File; n: WORD): WORD;
+  VAR z: BYTE;
+BEGIN
+  IF ODD(n) THEN
+    z := BYTE(0);
+    Files.BlockWrite(f, z, 1);
+    RETURN n + 1
+  END;
+  RETURN n
+END Pad2;
+
+(* PatchRelocTarget: replicate LINK.MOD's OnReloc patch step once, at merge
+   time, for a reloc whose target is now fully known — read the existing
+   width-byte addend already baked into the donor's code/data bytes at the
+   patch site (by the original codegen), add the resolved absolute target
+   offset, write the sum back.  Mirrors PatchBuf/PatchDataFile's "read cur,
+   add, write back" arithmetic (16-bit wraparound is correct: these are
+   in-segment offsets, exactly the semantics LINK.MOD already relies on).
+   Parameters: donor — the object whose code/data bytes get patched;
+   siteSeg — SegCode or SegData, which file the patch site lives in;
+   siteOfs — byte offset of the patch site within that file; width — 1 or 2
+   (RDOFF2 relocs here are always width 1 or 2, never 4); target — the
+   resolved absolute offset to add in.
+   Result: none (donor^.codeFile/dataFile is patched in place). *)
+PROCEDURE PatchRelocTarget(donor: ObjFile; siteSeg: INTEGER; siteOfs: LONGINT;
+                          width: INTEGER; target: LONGINT);
+  VAR lo, hi: BYTE; cur, addend, sum: WORD;
+BEGIN
+  (* WORD, not INTEGER: an in-segment offset can exceed 32767 and must wrap
+     mod 65536 exactly like LINK.MOD's own PatchBuf/PatchDataFile (fixup,
+     cur: WORD there too) — carrying it as signed INTEGER either range-
+     checks or silently corrupts on conversion for any target >= 32768. *)
+  addend := WORD(target MOD LONGINT(65536));
+  IF siteSeg = SegCode THEN
+    lo := PeekCodeByte(donor, siteOfs);
+    IF width = 2 THEN
+      hi := PeekCodeByte(donor, siteOfs + LONGINT(1));
+      cur := WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8));
+      sum := cur + addend;
+      PatchCodeByte(donor, siteOfs, BYTE(SYSTEM.AND(sum, 0FFH)));
+      PatchCodeByte(donor, siteOfs + LONGINT(1), BYTE(SYSTEM.AND(SYSTEM.LSR(sum, 8), 0FFH)))
+    ELSE
+      sum := WORD(SYSTEM.AND(INTEGER(lo) + INTEGER(addend), 0FFH));
+      PatchCodeByte(donor, siteOfs, BYTE(sum))
+    END
+  ELSE
+    lo := PeekDataByte(donor, siteOfs);
+    IF width = 2 THEN
+      hi := PeekDataByte(donor, siteOfs + LONGINT(1));
+      cur := WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8));
+      sum := cur + addend;
+      PatchDataByte(donor, siteOfs, BYTE(SYSTEM.AND(sum, 0FFH)));
+      PatchDataByte(donor, siteOfs + LONGINT(1), BYTE(SYSTEM.AND(SYSTEM.LSR(sum, 8), 0FFH)))
+    ELSE
+      sum := WORD(SYSTEM.AND(INTEGER(lo) + INTEGER(addend), 0FFH));
+      PatchDataByte(donor, siteOfs, BYTE(sum))
+    END
+  END
+END PatchRelocTarget;
+
+(* ResolveImports: for each of donor's imports that `other`'s globals can
+   satisfy, resolve every reloc/segreloc entry referencing that import into
+   an ORDINARY SegCode/SegData/SegBss-target reloc — the patch-site OFFSET
+   is left untouched (it is shifted later, like any other reloc, by
+   AppendShiftedRelocs' codeBase/dataBase math); only the REFERENCE
+   (rseg) and the byte ADDEND already sitting at the patch site change:
+     - rseg is rewritten from the (about-to-be-removed) import id to the
+       resolved global's plain segment id (SegCode/SegData/SegBss) — this
+       is now a completely ordinary same-object reloc, exactly the shape
+       ScanRelocs/OnReloc/OnSegReloc already handle for any other
+       intra-module reference, so the real LINKER still finishes the
+       computation at final link time (DOCS/RDOFF2.MD §6.4:
+       `*PatchAddr += module_code_ofs` for RELOC, target's code-group
+       paragraph for SEGRELOC — both depend on final module placement,
+       never knowable at merge time).
+     - For a RELOC (byte-offset addend, width 1/2), the addend at the
+       patch site is patched from 0 (unresolved-import placeholder) to
+       the target's offset WITHIN THE MERGED OBJECT (g^.offset +
+       otherBase) via PatchRelocTarget — this is the "local" half of the
+       eventual value; OnReloc's own GroupOfs(module) addition still
+       happens on top of this at final link time.  A SEGRELOC's own
+       "addend" is always 0 (its target is a paragraph value entirely
+       computed by the linker, nothing to patch here).
+   Earlier revisions of this code additionally DROPPED the reloc after
+   patching the RELOC case (rseg := Consumed) on the theory that the
+   value was already final — this was wrong (confirmed via the
+   SIMPLE.MOD/HelperA.MOD repro): dropping the record skips OnReloc's own
+   GroupOfs(module) addition entirely, so the call only worked by
+   accident when the merged object happened to sit at group-offset 0 in
+   its code group.  The reloc MUST survive so the real linker still runs
+   its normal same-segment fixup pass over it.
+   The import itself is marked resolved (segId := -1) so the caller's
+   append pass drops it (resolved imports must be removed, not left
+   dangling) — safe because the surviving reloc no longer references the
+   import id at all (rewritten to a plain segment id above).
+   Parameters: donor — the object whose imports are being resolved; other —
+   the counterpart object; otherCodeBase, otherDataBase, otherBssBase — the
+   byte offset within the FINAL merged object at which `other`'s own code/
+   data/bss now start.
+   Result: none (donor^.importHead entries are mutated/flagged in place;
+   donor^.codeFile/dataFile bytes are patched in place for RELOC entries;
+   donor^.relocHead entries have rseg rewritten to a plain segment id —
+   offset and width are untouched, no records dropped). *)
+PROCEDURE ResolveImports(donor, other: ObjFile;
+                         otherCodeBase, otherDataBase, otherBssBase: LONGINT);
+  VAR imp: ImportNode; g: GlobalNode;
+      r: RelocNode; k: INTEGER;
+      target: LONGINT; siteSeg: INTEGER;
+BEGIN
+  imp := donor^.importHead;
+  WHILE imp # NIL DO
+    IF imp^.segId >= 3 THEN
+      g := RdfFindGlobal(other, imp^.name);
+      IF g # NIL THEN
+        IF g^.segId = SegCode THEN target := g^.offset + otherCodeBase
+        ELSIF g^.segId = SegData THEN target := g^.offset + otherDataBase
+        ELSE target := g^.offset + otherBssBase
+        END;
+        r := donor^.relocHead;
+        WHILE r # NIL DO
+          k := 0;
+          WHILE k < r^.count DO
+            IF r^.rseg[k] = imp^.segId THEN
+              IF INTEGER(r^.physSeg[k]) < 80H THEN
+                (* RELOC only: patch the addend at the patch site (its
+                   OWN location, r^.offset[k], is untouched — that gets
+                   shifted later like any other reloc). SEGRELOC's
+                   "addend" is always 0 and computed entirely by the
+                   linker, so there is nothing to patch for it. *)
+                siteSeg := INTEGER(r^.physSeg[k]) MOD 40H;
+                PatchRelocTarget(donor, siteSeg, r^.offset[k], INTEGER(r^.width[k]), target)
+              END;
+              r^.rseg[k] := g^.segId
+            END;
+            INC(k)
+          END;
+          r := r^.next
+        END;
+        imp^.segId := -1 (* mark resolved: append pass below skips it *)
+      END
+    END;
+    imp := imp^.next
+  END
+END ResolveImports;
+
+(* PatchTargetShift: for every plain (non-import) reloc in donor whose TARGET
+   (rseg) is donor's own SegCode/SegData/SegBss, add the matching base to the
+   ADDEND already stored at the patch site — the target moved within the
+   merged object by that same base, and per DOCS/RDOFF2.MD §6.4 the linker's
+   own OnReloc adds only GroupOfs(module)/dataFinalOfs/bssFinalOfs on top of
+   whatever addend is already in the bytes, so that addend must reflect the
+   target's offset from the MERGED object's own start, not donor's pre-merge
+   start.  MUST run on donor's own file before its bytes are copied into host
+   (mirrors ResolveImports, which patches donor's bytes in place for the same
+   reason).  SEGRELOC entries carry no addend (their value is a paragraph
+   number computed entirely at final link) and are skipped.
+   Parameters: donor — object whose code/data bytes get patched; codeBase,
+   dataBase, bssBase — donor's placement within the merged object.
+   Result: none (donor^.codeFile/dataFile patched in place). *)
+PROCEDURE PatchTargetShift(donor: ObjFile; codeBase, dataBase, bssBase: LONGINT);
+  VAR r: RelocNode; k: INTEGER; siteSeg: INTEGER; base: LONGINT;
+BEGIN
+  r := donor^.relocHead;
+  WHILE r # NIL DO
+    k := 0;
+    WHILE k < r^.count DO
+      IF INTEGER(r^.physSeg[k]) < 80H THEN (* RELOC only, not SEGRELOC *)
+        IF r^.rseg[k] = SegCode THEN base := codeBase
+        ELSIF r^.rseg[k] = SegData THEN base := dataBase
+        ELSIF r^.rseg[k] = SegBss THEN base := bssBase
+        ELSE base := LONGINT(0)
+        END;
+        IF base # LONGINT(0) THEN
+          siteSeg := INTEGER(r^.physSeg[k]) MOD 40H;
+          PatchRelocTarget(donor, siteSeg, r^.offset[k], INTEGER(r^.width[k]), base)
+        END
+      END;
+      INC(k)
+    END;
+    r := r^.next
+  END
+END PatchTargetShift;
+
+(* AppendShiftedRelocs: append every entry of donor's relocHead chain into
+   host, shifting the PATCH-SITE offset by the matching code/data base (the
+   site is moving because donor's bytes are appended after host's) and
+   remapping import ids via idMap.  rseg (the reloc's TARGET segment/import)
+   is never offset-shifted here — for rseg=SegCode/SegData/SegBss the target
+   address is computed entirely by the linker at final link time from the
+   module's own placement (see DOCS/RDOFF2.MD §6.4); only rseg>=3 (a
+   surviving, still-external import id) needs remapping via idMap.  The
+   addend for the SegCode/SegData/SegBss cases was already shifted by
+   PatchTargetShift (called earlier, before donor's bytes were copied into
+   host) — this procedure only ever moves the record's own site pointer.
+   Parameters: host — destination object; donor — source object; codeBase,
+   dataBase, bssBase — donor's placement within host's combined segments
+   (bssBase currently unused: kept for signature symmetry with the other
+   Append* procedures and possible future use);
+   idMap — array mapping donor's original import segId to its renumbered id
+   in host (only meaningful for entries still present in donor^.importHead
+   after ResolveImports, i.e. imp^.segId # -1).
+   Result: none (host^.relocHead grows). *)
+PROCEDURE AppendShiftedRelocs(host, donor: ObjFile;
+                              codeBase, dataBase, bssBase: LONGINT;
+                              VAR idMap: ARRAY OF INTEGER);
+  VAR r: RelocNode; k: INTEGER;
+      physSeg: BYTE; masked: INTEGER;
+      offset: LONGINT; rseg: INTEGER;
+BEGIN
+  r := donor^.relocHead;
+  WHILE r # NIL DO
+    k := 0;
+    WHILE k < r^.count DO
+      rseg := r^.rseg[k];
+      physSeg := r^.physSeg[k]; offset := r^.offset[k];
+      masked := INTEGER(physSeg) MOD 40H;
+      IF masked = SegCode THEN offset := offset + codeBase
+      ELSIF masked = SegData THEN offset := offset + dataBase
+      END;
+      IF rseg >= 3 THEN
+        rseg := idMap[rseg]
+      END;
+      AddRelocNode(host, physSeg, offset, r^.width[k], rseg);
+      INC(k)
+    END;
+    r := r^.next
+  END
+END AppendShiftedRelocs;
+
+(* AppendShiftedGlobals: re-emit donor's globals into host with offsets
+   shifted by the matching base, so donor's exports stay link-visible to any
+   OTHER module that imports them (matching today's behavior where a $L
+   extra's globals are linkable regardless of which module pulled it in).
+   Parameters: host, donor — as above; codeBase, dataBase, bssBase — donor's
+   placement within host's combined segments.
+   Result: none (host^.globalHead grows). *)
+PROCEDURE AppendShiftedGlobals(host, donor: ObjFile;
+                               codeBase, dataBase, bssBase: LONGINT);
+  VAR g: GlobalNode; base: LONGINT;
+BEGIN
+  g := donor^.globalHead;
+  WHILE g # NIL DO
+    IF g^.segId = SegCode THEN base := codeBase
+    ELSIF g^.segId = SegData THEN base := dataBase
+    ELSE base := bssBase
+    END;
+    RdfAddGlobal(host, g^.name, g^.segId, g^.offset + base);
+    g := g^.next
+  END
+END AppendShiftedGlobals;
+
+(* AppendSurvivingImports: append donor's still-unresolved imports (segId
+   # -1, i.e. ResolveImports did not find a matching host global) into host,
+   renumbering each to a fresh host import id and recording the mapping in
+   idMap for AppendShiftedRelocs to use.  Imports ResolveImports already
+   resolved (segId = -1) are skipped entirely — CLAUDE.md: resolved imports
+   must be removed, not merely left dangling.
+   Parameters: host, donor — as above; VAR idMap — filled in: idMap[old
+   donor segId] := new host segId, for every surviving import.
+   Result: none (host^.importHead grows; idMap filled). *)
+PROCEDURE AppendSurvivingImports(host, donor: ObjFile; VAR idMap: ARRAY OF INTEGER);
+  VAR imp: ImportNode; existing: INTEGER;
+BEGIN
+  imp := donor^.importHead;
+  WHILE imp # NIL DO
+    IF imp^.segId # -1 THEN
+      (* dedup: donor and host may both import the same external name (e.g.
+         two hand-written .rdf's both calling the same runtime helper) *)
+      existing := RdfFindImport(host, imp^.name);
+      IF existing >= 0 THEN idMap[imp^.segId] := existing
+      ELSE idMap[imp^.segId] := RdfAddImport(host, imp^.name)
+      END
+    END;
+    imp := imp^.next
+  END
+END AppendSurvivingImports;
+
+(* MergeRdf: merge two already-serialised RDOFF2 object files (srcRdf1,
+   srcRdf2 — a module's own .rdf plus one $L extra, or the result of a prior
+   MergeRdf call folded with the next extra) into a single RDOFF2 file
+   written to dstRdf.  Code, data, AND bss are concatenated 2-byte aligned;
+   relocations and globals are offset-corrected; an import from either side
+   that the other side's globals can satisfy is resolved directly (that
+   import is dropped, not merely rewritten) and every affected reloc is
+   repointed at the resolved segment; any import left over is kept, renumbered
+   to avoid colliding with the host's own import ids.
+   Parameters: srcRdf1, srcRdf2 — the two source files, each positioned at
+   its own start (offset 0) and left open by the caller; dstRdf — the
+   destination file, already open for writing (caller owns Close on all
+   three).
+   Result: TRUE on success; FALSE on any read/write/signature failure (the
+   underlying LogErr latch, if any, reports the specific cause). *)
+PROCEDURE MergeRdf*(VAR srcRdf1, srcRdf2, dstRdf: Files.File): BOOLEAN;
+  VAR obj1, obj2: ObjFile;
+      codeBase, dataBase, bssBase: LONGINT;
+      idMap1to2: ARRAY 256 OF INTEGER; (* donor(2)'s old segId -> host(1)'s new segId *)
+      ok: BOOLEAN;
+BEGIN
+  NEW(obj1); NEW(obj2);
+  IF (obj1 = NIL) OR (obj2 = NIL) THEN
+    LogErr.Error("out of memory (MergeRdf scratch objects)"); RETURN FALSE
+  END;
+  RdfInit(obj1);
+  IF LogErr.HaveErr() THEN DISPOSE(obj1); DISPOSE(obj2); RETURN FALSE END;
+  RdfInit(obj2);
+  IF LogErr.HaveErr() THEN RdfFree(obj1); DISPOSE(obj1); DISPOSE(obj2); RETURN FALSE END;
+
+  ok := LoadFrom(obj1, srcRdf1) & LoadFrom(obj2, srcRdf2);
+  IF ~ok THEN
+    RdfFree(obj1); RdfFree(obj2); DISPOSE(obj1); DISPOSE(obj2); RETURN FALSE
+  END;
+
+  (* 2-byte-align obj1's own segments before appending obj2's bytes/offsets —
+     host(obj1) keeps its own bytes at offset 0, so only the pad AFTER
+     obj1's existing content (i.e. the base obj2 lands at) needs rounding. *)
+  obj1^.codeLen := Pad2(obj1^.codeFile, obj1^.codeLen);
+  obj1^.dataLen := Pad2(obj1^.dataFile, obj1^.dataLen);
+  IF ODD(obj1^.bssSize) THEN obj1^.bssSize := obj1^.bssSize + LONGINT(1) END;
+  codeBase := LONGINT(obj1^.codeLen);
+  dataBase := LONGINT(obj1^.dataLen);
+  bssBase  := obj1^.bssSize;
+
+  (* obj2's bytes are about to move by codeBase/dataBase/bssBase within the
+     merged object: every reloc obj2 ALREADY has that targets its OWN
+     SegCode/SegData/SegBss content needs its stored addend shifted by that
+     same base (DOCS/RDOFF2.MD §6.4 — the linker only adds
+     GroupOfs(module)/dataFinalOfs/bssFinalOfs on top at final link, so the
+     addend must already reflect the target's offset from the MERGED
+     object's start).  This MUST run before ResolveImports(obj2, obj1, ...)
+     below, which rewrites some of obj2's import relocs into plain
+     SegCode/SegData/SegBss entries targeting obj1's (host, unshifted)
+     frame — those must NOT be shifted, so PatchTargetShift only ever sees
+     obj2's ORIGINAL self-targeting relocs, never the newly-resolved ones. *)
+  PatchTargetShift(obj2, codeBase, dataBase, bssBase);
+
+  (* Resolve imports each side can satisfy from the other's globals BEFORE
+     appending anything — ResolveImports rewrites obj2's relocs in place to
+     target obj1's (host-frame) segments/offsets directly, and obj1's relocs
+     in place to target obj2's (donor-frame, PRE-shift) segments/offsets;
+     the latter get base-shifted below along with the rest of obj1... but
+     obj1 is the host and is never itself shifted.  So: run host-imports-
+     vs-donor-globals with the donor's bases (codeBase/dataBase/bssBase,
+     since that's where donor's bytes will land), and donor-imports-vs-host-
+     globals with base 0 (host's own frame never moves). *)
+  ResolveImports(obj1, obj2, codeBase, dataBase, bssBase);
+  ResolveImports(obj2, obj1, LONGINT(0), LONGINT(0), LONGINT(0));
+
+  (* Append obj2's code/data bytes at the padded append position. *)
+  IF obj2^.codeLen > 0 THEN
+    Files.Seek(obj1^.codeFile, LONGINT(obj1^.codeLen));
+    Files.Seek(obj2^.codeFile, LONGINT(0));
+    IF ~Files.BlockCopy(obj2^.codeFile, obj1^.codeFile, LONGINT(obj2^.codeLen)) THEN
+      LogErr.Error("MergeRdf: code copy failed");
+      RdfFree(obj1); RdfFree(obj2); DISPOSE(obj1); DISPOSE(obj2); RETURN FALSE
+    END
+  END;
+  IF LONGINT(obj1^.codeLen) + LONGINT(obj2^.codeLen) > LONGINT(SegLimit) THEN
+    LogErr.Error("error: code segment exceeds limit")
+  END;
+  INC(obj1^.codeLen, obj2^.codeLen);
+
+  IF obj2^.dataLen > 0 THEN
+    Files.Seek(obj1^.dataFile, LONGINT(obj1^.dataLen));
+    Files.Seek(obj2^.dataFile, LONGINT(0));
+    IF ~Files.BlockCopy(obj2^.dataFile, obj1^.dataFile, LONGINT(obj2^.dataLen)) THEN
+      LogErr.Error("MergeRdf: data copy failed");
+      RdfFree(obj1); RdfFree(obj2); DISPOSE(obj1); DISPOSE(obj2); RETURN FALSE
+    END
+  END;
+  IF LONGINT(obj1^.dataLen) + LONGINT(obj2^.dataLen) > LONGINT(SegLimit) THEN
+    LogErr.Error("error: data segment exceeds limit")
+  END;
+  INC(obj1^.dataLen, obj2^.dataLen);
+
+  IF obj1^.bssSize + obj2^.bssSize > LONGINT(SegLimit) THEN
+    LogErr.Error("error: bss segment exceeds limit")
+  END;
+  obj1^.bssSize := obj1^.bssSize + obj2^.bssSize;
+
+  (* Imports: renumber obj2's surviving (unresolved) imports into obj1's
+     namespace, then append both objects' relocs/globals with the id map
+     and base shifts.  obj1's OWN surviving imports need no renumbering
+     (they keep their ids; obj2's ids are the ones colliding). *)
+  AppendSurvivingImports(obj1, obj2, idMap1to2);
+
+  (* obj1's own relocs: base 0 (host frame unchanged), no id remap needed
+     (its surviving import ids are untouched) — but ResolveImports may have
+     rewritten some of obj1's rseg values to point into obj2's (donor) frame
+     using codeBase/dataBase/bssBase already, so AppendShiftedRelocs must
+     NOT re-shift those.  Since obj1 is already the host, its relocs are
+     simply copied as-is (no base shift, no id remap) except the entries
+     ResolveImports already corrected in place. *)
+  (* Re-home obj1's own reloc chain onto itself is a no-op (it's already
+     there) — nothing to append for obj1's side; only obj2's relocs/globals/
+     surviving imports need to be folded INTO obj1. *)
+  AppendShiftedRelocs(obj1, obj2, codeBase, dataBase, bssBase, idMap1to2);
+  AppendShiftedGlobals(obj1, obj2, codeBase, dataBase, bssBase);
+
+  RdfWriteTo(obj1, dstRdf);
+  ok := ~LogErr.HaveErr();
+  RdfFree(obj1); RdfFree(obj2); DISPOSE(obj1); DISPOSE(obj2);
+  RETURN ok
+END MergeRdf;
 
 (* ---- public reader/scanner procedures (linker side) ---- *)
 
@@ -1047,7 +1506,7 @@ END ReadData;
   relies on a specific position afterward.
 *)
 PROCEDURE ReadDataToFile*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
-                          VAR dst: Files.File; dstOfs, dataSize: WORD);
+                          VAR dst: Files.File; dstOfs: LONGINT; dataSize: WORD);
   VAR f: Files.File;
       dataStart: LONGINT;
       stype, dummy: INTEGER;
@@ -1069,7 +1528,7 @@ BEGIN
       segPos := segPos + LONGINT(10);
       IF stype = 2 THEN                   (* wantType: data *)
         Files.Seek(f, segPos);
-        Files.Seek(dst, LONGINT(dstOfs));
+        Files.Seek(dst, dstOfs);
         IF ~Files.BlockCopy(f, dst, LONGINT(dataSize)) THEN
           Files.Close(f); LogErr.Error2("Read error in ", path); RETURN
         END;

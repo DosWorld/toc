@@ -49,7 +49,8 @@
 #
 # Pre-requisites:
 #   - BOOT/TOC.EXE      (bootstrap DOS binary, immutable)
-#   - BIN/OBERON.OM     (runtime library archive, supplies Rdoff/LogErr/etc.)
+#   - BIN/OBERON.OM     (runtime library archive, supplies Rdoff/etc.)
+#   - BIN/TRUBO.OM      (supplies LogErr/StrTab)
 #   - xt emulator in PATH or $XT
 #
 # Run from oberonc/:  bash TESTS/test_tasm.sh
@@ -61,6 +62,7 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 BOOTOC="$ROOT/BOOT/TOC.EXE"
 BINOM="$ROOT/BIN/OBERON.OM"
+BINTRUBOOM="$ROOT/BIN/TRUBO.OM"
 BINRDFGREP="$ROOT/BIN/RDFGREP.EXE"
 TASMDIR="$ROOT/SRC/TASM"
 LIBDIR="$ROOT/SRC/LIB"
@@ -80,6 +82,7 @@ trap cleanup EXIT
 mkdir -p "$ROOT/TMP"
 cp "$BOOTOC" "$WORK/TOC_BOOT.EXE"
 cp "$BINOM" "$WORK/OBERON.OM"
+cp "$BINTRUBOOM" "$WORK/TRUBO.OM"
 cp "$TASMDIR"/*.MOD "$WORK/"
 cp "$LIBDIR/SYSTEM.ASM" "$LIBDIR/SYSTEM.RDF" "$WORK/"
 cp "$LIBDIR/EMS.ASM" "$LIBDIR/EMS.RDF" "$WORK/"
@@ -160,7 +163,7 @@ cp "$FIXDIR/TMACRECUR.ASM" "$FIXDIR/TMACARG3.ASM" "$WORK/"
 if [ -f "$BINRDFGREP" ]; then cp "$BINRDFGREP" "$WORK/RDFGREP.EXE"; fi
 
 echo "[tasm] building TASM.exe via BOOT/TOC.EXE ..."
-( cd "$WORK" && "$XT" run --max=$MAX TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build.log 2>&1 ) \
+( cd "$WORK" && "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build.log 2>&1 ) \
     || { echo "FAIL: TASM.exe did not build"; cat "$WORK/build.log"; exit 1; }
 [ -f "$WORK/TASM.exe" ] || { echo "FAIL: TASM.exe not produced"; cat "$WORK/build.log"; exit 1; }
 

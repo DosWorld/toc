@@ -1,0 +1,15 @@
+MODULE LinkNE;
+
+IMPORT Files;
+
+(*$L STUB.RDF*)
+PROCEDURE StubMZ; EXTERNAL;
+
+PROCEDURE WriteStubMZ*(VAR F: Files.File): BOOLEAN;
+VAR a : SYSTEM.ADDRESS;
+BEGIN
+  a := SYSTEM.ADR(StubMZ);
+  RETURN Files.BlockWrite(F, a^, 64) = 64
+END WriteStubMZ;
+
+END LinkNE;

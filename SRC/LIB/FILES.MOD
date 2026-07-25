@@ -630,12 +630,6 @@ BEGIN
   RETURN ok
 END ReWriteTemp;
 
-(* TEMP DIAGNOSTIC — remove after investigation: is this file EMS-backed? *)
-PROCEDURE IsEmsBacked*(VAR F: File): BOOLEAN;
-BEGIN
-  RETURN F.backend = BkEms
-END IsEmsBacked;
-
 (* Delete: remove a file from disk (clears the read-only attribute first if
    needed, via DOS AH=71h long-name delete, falling back to AH=41h).
    Parameters: FileName — path of the file to delete.
@@ -875,6 +869,76 @@ BEGIN
   SYSTEM.Intr(21H, r);
   pspSeg := WORD(r.BX)
 END InitPsp;
+
+PROCEDURE IncB*(VAR f : File; ofs : LONGINT; b : BYTE);
+VAR p : LONGINT; cp : WORD;
+BEGIN
+  IF b = 0 THEN RETURN END;
+  p := Position(f);
+  Seek(f, ofs);
+  cp := SYSTEM.AND(WORD(p), BUFSIZE - 1);
+  f.buf[cp] := CHR(ORD(f.buf[cp]) + b);
+  f.dirty := TRUE;
+  Seek(f, p)
+END IncB;
+
+PROCEDURE DecB*(VAR f : File; ofs : LONGINT; b : BYTE);
+VAR p : LONGINT; cp : WORD;
+BEGIN
+  IF b = 0 THEN RETURN END;
+  p := Position(f);
+  Seek(f, ofs);
+  cp := SYSTEM.AND(WORD(p), BUFSIZE - 1);
+  f.buf[cp] := CHR(ORD(f.buf[cp]) - b);
+  f.dirty := TRUE;
+  Seek(f, p)
+END DecB;
+
+(*
+PROCEDURE IncI*(VAR f : File; ofs : LONGINT; i : INTEGER);
+TYPE PINT = POINTER TO INTEGER;
+VAR p : LONGINT; cp : PINT; lo, hi : BYTE; w : INTEGER;
+BEGIN
+  IF i = 0 THEN RETURN END;
+  p := Position(f);
+  Seek(f, ofs);
+  IF F.bufPos + 1 < F.bufSize THEN
+    cp := SYSTEM.ADR(F.buf^[F.bufPos]);
+    INC(cp^, i);
+    f.dirty := TRUE
+  ELSE
+    ReadByte(f, lo); ReadByte(f, hi);
+    w := SYSTEM.IOR(WORD(lo), SYSTEM.LSL(WORD(hi), 8));
+    INC(w, i);
+    Seek(f, ofs);
+    WriteByte(f, SYSTEM.AND(w, 0FFH));
+    WriteByte(f, SYSTEM.AND(SYSTEM.LSR(w, 8), 0FFH))
+  END;
+  Seek(f, p)
+END IncI;
+
+PROCEDURE IncW*(VAR f : File; ofs : LONGINT; i : WORD);
+TYPE PINT = POINTER TO WORD;
+VAR p : LONGINT; cp : PINT; lo, hi : BYTE; w : WORD;
+BEGIN
+  IF i = 0 THEN RETURN END;
+  p := Position(f);
+  Seek(f, ofs);
+  IF F.bufPos + 1 < F.bufSize THEN
+    cp := SYSTEM.ADR(F.buf^[F.bufPos]);
+    INC(cp^, i);
+    f.dirty := TRUE
+  ELSE
+    ReadByte(f, lo); ReadByte(f, hi);
+    w := SYSTEM.IOR(WORD(lo), SYSTEM.LSL(WORD(hi), 8));
+    INC(w, i);
+    Seek(f, ofs);
+    WriteByte(f, SYSTEM.AND(w, 0FFH));
+    WriteByte(f, SYSTEM.AND(SYSTEM.LSR(w, 8), 0FFH))
+  END;
+  Seek(f, p)
+END IncW;
+*)
 
 BEGIN
   tempSeq := 0;

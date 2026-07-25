@@ -284,29 +284,48 @@ END EmitDataString;
 
 (* ---- frame ---- *)
 
-PROCEDURE CgPrologue*(localBytes: INTEGER);
+(* Procedure prologue: PUSH BP / MOV BP,SP / SUB SP,imm16.  When isFar, ALSO
+   saves + reloads DS to THIS module's own DATA segment:
+     PUSH DS                    ; save caller's DS
+     MOV AX, imm16              ; SEGRELOC-patched: this module's own dataPara
+     MOV DS, AX
+   One module = one DATA segment now (see Link.CalculateLayout): DS is no
+   longer valid across a FAR CALL boundary (the caller's DS points at ITS
+   OWN module's data), so every FAR/exported procedure must re-establish DS
+   on entry — mirroring the existing SYSTEM_INIT/"seg i87" SEGRELOC pattern
+   in SYSTEM.ASM, generalised to every FAR procedure instead of just
+   SYSTEM's own init routine.  NEAR procs skip this: a NEAR call never
+   crosses a module boundary, so DS is already correct on entry.
+   The DS save/reload is emitted AFTER the frame is set up so the pushed DS
+   doesn't shift BP-relative param offsets — CgEpilogue's isFar branch pops
+   it back before the frame is torn down, keeping the two symmetric. *)
+PROCEDURE CgPrologue*(localBytes: INTEGER; isFar: BOOLEAN);
+  VAR patch: LONGINT;
 BEGIN
-  (* PUSH BP / MOV BP,SP / SUB SP,imm16 *)
   EmitCodeStr("55,8B,EC,81,EC");
-  EmitW(localBytes)
+  EmitW(localBytes);
+  IF isFar THEN
+    Emit1(01EH);                          (* PUSH DS *)
+    Emit1(0B8H); patch := CgPc(); EmitW(0);  (* MOV AX, imm16 (patched) *)
+    Rdoff.RdfAddSegReloc(CgObj, Rdoff.SegCode, patch, Rdoff.SegData);
+    EmitCodeStr("8E,D8")                  (* MOV DS, AX *)
+  END
 END CgPrologue;
 
-PROCEDURE CgEpilogue*(argBytes: INTEGER);
+PROCEDURE CgEpilogue*(argBytes: INTEGER; isFar: BOOLEAN);
 BEGIN
-  (* MOV SP,BP / POP BP *)
-  EmitCodeStr("8B,E5,5D");
-  IF argBytes = 0 THEN Emit1(BYTE(OpRet))
-  ELSE Emit1(BYTE(OpRetN)); EmitW(argBytes)
+  IF isFar THEN Emit1(01FH) END;  (* POP DS — restore caller's DS, see CgPrologue *)
+  EmitCodeStr("8B,E5,5D");        (* MOV SP,BP / POP BP *)
+  IF isFar THEN
+    IF argBytes = 0 THEN Emit1(BYTE(OpRetf))
+    ELSE Emit1(BYTE(OpRetfN)); EmitW(argBytes)
+    END
+  ELSE
+    IF argBytes = 0 THEN Emit1(BYTE(OpRet))
+    ELSE Emit1(BYTE(OpRetN)); EmitW(argBytes)
+    END
   END
 END CgEpilogue;
-
-PROCEDURE CgEpilogueFar*(argBytes: INTEGER);
-BEGIN
-  EmitCodeStr("8B,E5,5D");  (* MOV SP,BP / POP BP *)
-  IF argBytes = 0 THEN Emit1(BYTE(OpRetf))
-  ELSE Emit1(BYTE(OpRetfN)); EmitW(argBytes)
-  END
-END CgEpilogueFar;
 
 (* ---- calls ---- *)
 

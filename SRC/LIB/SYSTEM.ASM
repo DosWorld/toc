@@ -61,7 +61,16 @@ nomemmsg:
     db 'Not enough memory.$'
 
 SYSTEM_REQUIRE87:
+        ; FAR-called from any module's __init (via SYSTEM_REQUIRE87 import) —
+        ; the caller's DS is now THEIR OWN data segment (one module = one
+        ; data segment), not SYSTEM's, so [i87] must be read through
+        ; SYSTEM's own DS, saved/restored around the check like
+        ; SYSTEM_GetExitProc/SYSTEM_SetExitProc already do.
+        push ds
+        mov  ax, seg i87
+        mov  ds, ax
         cmp  BYTE[i87], 0
+        pop  ds
         jne  .ok
         mov  al, 87
         mov  dx, i87msg

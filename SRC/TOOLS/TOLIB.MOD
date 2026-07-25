@@ -1,6 +1,6 @@
 MODULE TOLib;
 (*
-  tolib — .OM archive manager for the Oberon toolchain.
+  tolib — .OM library manager for the Oberon toolchain.
 
   Commands:
     tolib list    FILE.OM              print member names and sizes
@@ -8,9 +8,9 @@ MODULE TOLib;
     tolib create  OUT.OM FILE ...      create archive from files
     tolib merge   OUT.OM IN.OM ...     merge archives into one
 
-  Uses the shared Tar module for all archive I/O.
+  Uses the shared Tar module for all library I/O.
 *)
-IMPORT Dos, Files, IO, LogErr, Strings, Tar;
+IMPORT Dos, Files, IO, LogErr, Strings, Tar, Out;
 
 CONST
   MaxPath = 128;
@@ -144,13 +144,14 @@ END OnMergeMember;
 
 PROCEDURE Usage;
 BEGIN
-  LogErr.Info("olib - .OM archive manager");
-  LogErr.Info("Usage:");
-  LogErr.Info("  tolib list    FILE.OM");
-  LogErr.Info("  tolib extract FILE.OM MEMBER OUTFILE");
-  LogErr.Info("  tolib create  OUT.OM  FILE ...");
-  LogErr.Info("  tolib merge   OUT.OM  IN.OM ...");
-  LogErr.Info("  @listfile    expand file with one arg per line (any command)")
+  Out.String("Trubo Lib (c) 2026 DosWorld, Public domain (unlicense)");Out.Ln;
+  Out.Ln;
+  Out.String("Usage:");Out.Ln;
+  Out.String("  tolib list    FILE.OM");Out.Ln;
+  Out.String("  tolib extract FILE.OM MEMBER OUTFILE");Out.Ln;
+  Out.String("  tolib create  OUT.OM  FILE ...");Out.Ln;
+  Out.String("  tolib merge   OUT.OM  IN.OM ...");Out.Ln;
+  Out.String("  @listfile    expand file with one arg per line (any command)");Out.Ln
 END Usage;
 
 (* ---- entry point ---- *)
@@ -255,7 +256,6 @@ BEGIN
     Tar.TarEnd(mergeOut);
     Files.Close(mergeOut);
     IF LogErr.HaveErr() THEN ret := 1 END
-
   ELSE
     LogErr.Error2("olib: unknown command: ", cmd);
     Usage; ret := 1

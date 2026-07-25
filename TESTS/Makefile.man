@@ -62,7 +62,7 @@ T.$(subst /,.,$(1)):
 	oc_flags=""; \
 	if [ -n "$$$$cmd" ] && [ "$$$$cmd" != "fails" ]; then oc_flags="$$$$cmd"; fi; \
 	stderr_file=$$$$wd/_stderr.txt; \
-	( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture >/dev/null 2>$$$$stderr_file ) || compile_status=$$$$?; \
+	( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture >$$$$stderr_file 2>&1 ) || compile_status=$$$$?; \
 	base=$$$$(echo $$$$fixture | sed -E 's/\.[mM][oO][dD]$$$$//' | tr '[:lower:]' '[:upper:]'); \
 	diag_file=$$$$wd/output.log; \
 	[ -f $$$$diag_file ] || diag_file=$$$$stderr_file; \

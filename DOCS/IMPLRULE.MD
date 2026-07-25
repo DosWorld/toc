@@ -71,6 +71,143 @@ zero Metric-A change.)
 
 ---
 
+## IsLex pattern  ← USE IT
+
+`SRC/TOC/PARSER.MOD`, `PEXPR.MOD`, and `PSTMT.MOD` each carry their own
+**private, non-exported** `IsLex`:
+
+```oberon
+PROCEDURE IsLex(t: INTEGER): BOOLEAN;
+BEGIN
+  IF sc.sym = t THEN
+    Scan.Next(sc);
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END IsLex;
+```
+
+(`PEXPR.MOD`/`PSTMT.MOD` read/write `sc`/`PExpr.sc` directly; `PARSER.MOD`
+and `PSTMT.MOD` go through `PExpr.sc` since the scanner instance lives in
+`PExpr`.) It collapses the recurring "peek current token, and if it matches,
+consume it" idiom — `IF sc.sym = X THEN Scan.Next(sc) ... END` — into one
+call: `IF IsLex(X) THEN ... END`. Each module keeps its **own** copy rather
+than exporting one from `PExpr` and importing it everywhere: NEAR (no `*`)
+means a 3-byte `E8 rel16` call and a `RET` epilogue instead of FAR's `9A` +
+2 relocs (see "Visibility / NEAR rule" above) — `IsLex` is called at nearly
+every token boundary in the parser, so the NEAR-vs-FAR cost is not
+negligible here.
+
+**When it applies:** the check and the consume are the same event — nothing
+meaningful happens between "is this token X?" and "consume it if so".
+**When it does NOT apply** (leave the manual `sc.sym = X` form):
+- **The matched token's payload is read before it would be consumed** —
+  `sc.ival`/`sc.sval`/`sc.id` must be captured while `sc` still points at
+  the matched token; `IsLex` consumes as part of the boolean test itself,
+  so reading the payload after `IsLex(X)` returns TRUE reads the *next*
+  token, not the matched one (e.g. `PreScanLabel`'s `TInt`/`TChar`/`TString`
+  arms in `PSTMT.MOD`).
+- **Multi-alternative lookahead where the caller needs to know which token
+  matched** — `WHILE (sc.sym=A) OR (sc.sym=B) OR (sc.sym=C) DO op := sc.sym;
+  Scan.Next(sc); ... END` (`PExpr.ParseTerm`'s operator loop): `IsLex` only
+  returns TRUE/FALSE, not the symbol, so it can't replace the `op :=` capture.
+- **The token feeds a callee that consumes it itself** — e.g. any
+  `IF sc.sym = Scan.TLparen THEN ParseActualParameters(...) END` /
+  `ParseFormalPars(...)`: both callees start with their own
+  `Expect(Scan.TLparen)`. Converting the guard to `IsLex(TLparen)` would
+  double-consume the `(` and desync the parse. Same reasoning applies to
+  any other "guard feeds a self-consuming callee" shape — check the callee's
+  first statement before converting.
+- **Bare lookahead used only to pick a branch, never followed by an
+  unconditional consume of that same token** — e.g. `hasBody := (sc.sym =
+  Scan.TBegin)` read back much later, or a `WHILE` loop condition that is
+  pure lookahead because the loop body itself decides what/when to consume.
+
+**Style once converted:**
+- If nothing else belongs in the `THEN`, call it as a bare statement and
+  discard the result — this dialect explicitly allows a function call as a
+  statement (see `DOCS/OBERON07.EBN` §ProcCall): `IsLex(Scan.TComma)` alone
+  on its own line, not `IF IsLex(Scan.TComma) THEN END`.
+- A `WHILE more DO ... IF sc.sym=X THEN Scan.Next(sc) ELSE more:=FALSE END
+  END`-shaped list loop becomes `more := IsLex(Scan.TX)` (valid whenever
+  `more` is freshly TRUE going into that check, which is the case at every
+  site converted so far — verify this locally before applying).
+- Same simplification for a freshly-reset boolean flag: `flag := FALSE; IF
+  IsLex(Scan.TX) THEN flag := TRUE END` becomes `flag := IsLex(Scan.TX)` —
+  again only when the `IF` body does nothing but set that one flag.
+
+---
+
+## StrTab adoption pattern  ← USE IT (SRC/TLINK, SRC/TASM)
+
+`StrTab` (`SRC/TRUBO/STRTAB.MOD`, merged into `TRUBO.OM`) interns strings
+into a `StrTab.TStrTabId` (currently `= WORD`; 1-based, 0 = "no string").
+`SRC/TOC`'s own symbol table has always stored `nameId: TStrTabId` instead
+of `name: ARRAY OF CHAR`; `SRC/TLINK/TLINK.MOD`'s `SymNodeRec` and
+`SRC/TASM/SYM.MOD`'s `LabelNodeDesc`/`DefineNodeDesc`/`MacroNodeDesc` were
+converted the same way (2026-07-22) — a template for any future table in
+this codebase keyed by name:
+
+1. **Storage:** replace `name: ARRAY Chunk OF ARRAY MaxName OF CHAR` with
+   `nameId: ARRAY Chunk OF StrTab.TStrTabId`. If the table had its own
+   cached hash field for a hand-rolled `Strings.HashCode` + `Strings.Equal`
+   fast path (TASM's tables all did), **drop the hash field entirely** —
+   `StrTab.Find`'s own internal hash-bucket chaining already does that
+   work once per lookup; a second hash-then-compare on top of an id
+   compare is pure redundancy.
+2. **Insert:** `nameId[idx] := StrTab.Intern(name)`. `name` must be a
+   by-value parameter (`ARRAY OF CHAR`, not `VAR`) at every call site
+   that might ever pass a string literal — `Intern`'s own by-value `name`
+   parameter exists for exactly this reason (see the 2026-06-29
+   literal→VAR hang bug elsewhere in this file). A table's own `Define`/
+   `AddSymbol`-style entry point inherits this same by-value requirement
+   from `Intern`.
+3. **Lookup:** `id := StrTab.Find(name); ... IF nameId[i] = id THEN ...`.
+   A name never interned (`Find` returns 0) cannot equal any stored
+   `nameId` (0 is never assigned by `Intern`), so the id compare alone is
+   exact — no fallback string compare needed.
+4. **Read-back:** only add this where a caller genuinely needs the string
+   back (diagnostics, an external callback signature that takes
+   `ARRAY OF CHAR`, etc.) — audit every `.name[i]` read site first;
+   several tables turn out to never need one (pure intern-and-compare).
+   Where needed: `StrTab.Get(nameId[i], buf)` into a local buffer sized
+   to the table's own `MaxName`.
+5. **In-place compaction** (an `Undef`-style "swap last slot into the
+   removed slot" op): with `nameId` this is a single WORD assignment
+   (`nameId[idx] := nameId[last]`) — simpler than the old two-field
+   name+hash copy.
+6. **Cross-table id collisions are harmless.** Every table sharing one
+   process-wide `StrTab` instance means the same interned string gets
+   the same id everywhere — e.g. TASM's label table, `%define` table, and
+   `%macro` table all resolve through the same `StrTab.Find`. A stray id
+   match across tables cannot happen: a table's `nameId[i]` is only ever
+   set by that same table's own `Intern` call at insertion, so an id
+   equality found while searching table A can only be true if A itself
+   actually holds that name — table B having interned the identical
+   string first (and thus "claiming" that id) changes nothing.
+7. **Reset discipline — the single most important rule.** A `nameId` is
+   only valid for reads within the same `StrTab` table lifetime it was
+   produced in (see `SRC/TOC/LINK.MOD`'s existing "do not cache a nameId
+   across a `StrTab.Reset`" comment). TLINK and TASM each run exactly one
+   job per process invocation (one link, one assemble) and **never call
+   `StrTab.Reset`** — process exit reclaims everything, and there is no
+   mid-run reset boundary to violate. If either tool is ever changed to
+   loop over multiple jobs in one process, this must be revisited before
+   any `Reset` call is added.
+8. **Leak-guard interaction — watch for this.** `StrTab.Intern` grows its
+   own chunked arena (a fresh ~8 KB text chunk / ~2 KB entry chunk) the
+   first time a new chunk boundary is crossed, most conspicuously on the
+   very first `Intern` call anywhere in the process. A per-file/per-job
+   `LeakGuard` window that captures its baseline `SYSTEM.MemAvail()`
+   *after* that point will report a false "leak" for whichever job
+   happens to go first — this really happened (`SRC/TASM/TESTS`'
+   `TMACRO.ASM` leak-guard row, 2026-07-22, ~645 paragraphs). Fix: warm
+   the table up (intern one throwaway string no real input can ever
+   produce, e.g. `SRC/TASM/SYM.MOD`'s `WarmStrTab*`) *before* the
+   leak-guard baseline is captured, not after.
+
+---
+
 ## Strength reduction & peephole optimizations  ← codegen
 
 The 8086 has no barrel shifter and a very slow `IMUL`/`IDIV` (70–90 cycles).
@@ -817,6 +954,56 @@ once before serializing.  Do not reintroduce the per-byte limit check.
 Call `RdfInit(obj, err)` to open temp files (`err` is set if a temp can't be
 created); call `RdfFree(obj)` when done.
 
+### `Rdoff.MergeRdf` — self-targeting reloc addends must shift too  ← STRONG RULE (2026-07-24)
+
+`$L` extras and the `/ENTRY=` entry stub are merged directly into the compiling
+module's own `.rdf` (never kept as a separate `.om` archive member — see
+DOCS/RDOFF2.MD §6.8 for the full merge algorithm).  When merging donor bytes
+after host's, two DIFFERENT things move and must be shifted **separately**:
+
+1. **The patch site** (a RELOC/SEGRELOC's own `offset` field — where in
+   code/data the fixup bytes live) — shifted whenever the reloc's *physical
+   segment* (code or data) moved.
+2. **The addend** (the byte value already sitting at that patch site) — but
+   ONLY for a RELOC whose `rseg` (target) is already a plain `SegCode`/
+   `SegData`/`SegBss` reference to the DONOR'S OWN content (never an
+   unresolved import id, never SEGRELOC — SEGRELOC's value is a paragraph
+   number computed entirely at final link time, nothing is ever baked into
+   its addend).  If that target's own bytes moved by `codeBase`/`dataBase`/
+   `bssBase` during the merge, the stored addend must gain the same amount,
+   because the real linker's `OnReloc` (LINK.MOD) only ever adds
+   `GroupOfs(module)`/`dataFinalOfs`/`bssFinalOfs` **on top of** whatever
+   addend is already in the bytes (RDOFF2.MD §6.4) — it has no way to know
+   the addend needs correcting for a merge that happened before it ever saw
+   the object.
+
+Confusing these two is an easy, silent mistake: forgetting step 2 while doing
+step 1 correctly still produces a structurally valid, byte-comparable-looking
+merged `.rdf` — every unit-level check on the merged object in isolation can
+look correct — but the compiled program crashes at runtime because the wrong
+byte gets patched at final link time.  This is exactly how a `$L`-merge bug
+was found: `SYSTEM.RDF`'s `SYSTEM_Intr` self-patches its own `INT` opcode's
+interrupt-number byte (`mov [cs:int_ins+1], al`) — a self-targeting RELOC with
+zero imports involved anywhere.  `SYSTEM.MOD`'s `(*$L SYSTEM.RDF*)` merge
+shifted the patch site correctly but left the addend at its stale pre-merge
+value, so after linking, `int_ins`'s actual code offset no longer matched
+where the self-modifying write landed — the interrupt number patch silently
+wrote to the wrong address, `INT 0` executed instead of `INT 21h`, and EVERY
+program (even one with zero imports) crashed at its very first
+`SYSTEM.Intr` call.  Symptom pattern to recognize: `Unhandled interrupt 00`
+with `AX` holding whatever value was meant for a DOS call, or (under `xt
+trace`) a `CS:IP` at the BIOS reset vector (`F000:FF00`) right after an
+`INT xx` where `xx` should never have been 0.
+
+Regression coverage: `TESTS/TRDOF.MOD`'s `TMergeSelfTargetAddendShifts` /
+`Rdoff/merge-self-target-addend-shifts` builds a host+donor pair with exactly
+this shape (a donor RELOC whose `rseg` already targets the donor's own code)
+and asserts the merged addend equals the shift amount. Kept alongside the
+similarly-shaped import-resolution tests (`TMergeResolvedImportSurvives`,
+`TMergeSurvivingImportRenumbered`, `TMergeCodeAlignment`) so a future edit to
+`AppendShiftedRelocs`/`ResolveImports`/`PatchTargetShift` in `RDOFF.MOD` can't
+silently regress either code path without a unit test catching it.
+
 ### Fixed arrays — use linked lists for variable-length data
 
 For variable-length collections (symbol tables, import lists, relocation tables,
@@ -1083,19 +1270,53 @@ the EMS/xt notes).
 
 ---
 
+## Per-module segment model  ← CRITICAL
+
+The `Link`/`LinkMZ` linker (embedded in `toc.exe`) links a program under a **per-module
+segment model**:
+
+- **Each module gets its OWN code segment** (`ModRec.codePara`).
+- **Each module gets its OWN data segment** (`ModRec.dataPara`), holding its globals and its
+  string literals.
+- **BSS is ONE segment shared across all modules** (`State.bssPara`); each module owns a byte
+  offset within it (`ModRec.bssOfs`).
+- **The stack is ONE segment for the whole program** (SS).
+- **CS ≠ DS ≠ SS ≠ the shared BSS segment**, always, for every module.
+
+Image layout in the `.exe` file body:
+`[mod1 CODE][mod1 DATA] … [modN CODE][modN DATA][shared BSS][stack]`.  BSS and stack carry no
+file bytes — DOS zero-fills them at load via the MZ header `min_alloc`; that only works because
+they are the trailing region with no file bytes after them.  The entry module is moved to the
+front of the module list so its CODE lands first.  (This replaced an earlier "grouping" model in
+which all `.rdf` members of one `.om` shared one code segment and the whole program shared one
+combined DATA+BSS segment.  `Link.CalculateLayout` now assigns `codePara` for every module, then
+`dataPara` after all code, then per-module `bssOfs` within the shared BSS; the MZ header math in
+`LinkMZ.WriteExe` is `fileImageLen = totalCodeLen + totalDataLen`,
+`ssPara = (totalCodeLen+totalDataLen+totalBssLen) DIV 16`,
+`minAlloc = (totalBssLen DIV 16) + stackPara`.)
+
+**Consequence — DS reload on every FAR proc.** Because each module has its own DS, a FAR call
+into another module leaves DS pointing at the caller's data.  Every FAR (exported) procedure
+therefore reloads DS on entry / restores it on exit; NEAR procs skip it (they never cross a
+module boundary — the compiler enforces exported ⇒ FAR).  The exact prologue/epilogue bytes and
+the `__init` / `SYSTEM_REQUIRE87` variants live in [OBERLANG.MD](OBERLANG.MD) §"Per-module DS
+reload".  A module whose DS-reload count ≠ its `RETF` count was built from a stale pre-reload
+`.OM` — fix by clean rebuild, never by editing codegen.
+
 ## Large memory model — codegen segment register rules  ← CRITICAL
 
-The **compiled Oberon program** runs in large model (CS≠DS≠SS).
+The **compiled Oberon program** runs in large model (CS≠DS≠SS≠BSS — see the per-module segment
+model above).
 
 ### Segment register values at Oberon program runtime
 
 ```
-CS  = this module's code segment paragraph   (unique per module)
-DS  = combined data segment                  (same for all modules; set by SYSTEM_INIT)
-SS  = stack segment                          (separate from DS; set by MZ header)
+CS  = this module's OWN code segment paragraph   (unique per module)
+DS  = this module's OWN data segment paragraph   (unique per module; reloaded on every FAR entry)
+SS  = the one shared stack segment               (separate from DS; set by MZ header)
 ```
 
-**CS ≠ DS ≠ SS at all times.**
+**CS ≠ DS ≠ SS at all times**, and a module's DS is only valid while executing inside that module.
 
 ### Codegen rules (enforced in Parser / PExpr)
 

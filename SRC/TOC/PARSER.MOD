@@ -629,7 +629,7 @@ PROCEDURE ParseProcDecl;
       skipNested: Cgen.Backpatch;
       inlNode, inlTail: Syms.InlineNode;
       idx: INTEGER; fp: Syms.Symbol; found: BOOLEAN;
-      wordA: ARRAY 16 OF CHAR; wid: WORD;
+      wordA: ARRAY 16 OF CHAR; wid: StrTab.TStrTabId;
       rtmp: Syms.TypeDesc; nInl: INTEGER;
 BEGIN
   Scan.Next(PExpr.sc);  (* consume PROCEDURE *)
@@ -750,7 +750,7 @@ BEGIN
   TDbg.AddSym("P", "C", WORD(Cgen.CgPc()), name);
   prologuePatch := Cgen.CgPc() + LONGINT(5);
   PStmt.curProloguePatch := prologuePatch;
-  Cgen.CgPrologue(0);
+  Cgen.CgPrologue(0, pt.isFar);
 
   Cgen.CgJmpNear(skipNested);
   ParseDeclSeq();
@@ -767,8 +767,7 @@ BEGIN
   END;
 
   PStmt.BpPatchFree(PStmt.retPatchList);
-  IF pt.isFar THEN Cgen.CgEpilogueFar(INTEGER(pt.lenOrDescOrArg))
-  ELSE Cgen.CgEpilogue(INTEGER(pt.lenOrDescOrArg)) END;
+  Cgen.CgEpilogue(INTEGER(pt.lenOrDescOrArg), pt.isFar);
   WarnUnusedInScope;
   (* debug info: this procedure's params + locals (class AUTO), then close
      its scope with the proc's own code length.  Emitted here (into the same
@@ -1011,15 +1010,15 @@ PROCEDURE ParseModule*(VAR s: Scan.Scanner);
       initOfs, guardOfs: LONGINT;
       rdfName, defName, libName, dbgName: ARRAY 40 OF CHAR;
       srcBase: ARRAY 40 OF CHAR;
-      rf, df, lf, sf, dg: Files.File;
+      rf, df, lf, sf, dg, mf: Files.File;
       dgOpen: BOOLEAN;
+      mergeOk: BOOLEAN;
       ip, ipNext: InitImpNode;
       er, erNext: ExtraRdf;
       sym: Syms.Symbol;
       req87Id, depImportId: INTEGER;
-      addrField: LONGINT;
+      addrField, dsImmAt: LONGINT;
       i, j: INTEGER; badName: BOOLEAN;
-      upName: ARRAY 48 OF CHAR;
       baseStart: INTEGER;
       rfOpen, dfOpen: BOOLEAN;
 BEGIN
@@ -1121,6 +1120,16 @@ BEGIN
     END;
     PExpr.Expect(Scan.TSemi)
   END;
+  (* The import-dedup list (Import.AlreadyLoaded's LoadedRecs) is only read
+     while the IMPORT clause is being processed — nothing below references it.
+     Free it HERE, right after its last use, rather than at the ParseModule
+     tail: freed late, each LoadedRec is a small block that ends up pinned in
+     the middle of the heap by the far larger parse/codegen allocations made
+     after it, so its paragraph cannot coalesce back on release — a
+     fragmentation "leak" the per-module LeakGuard flags (~1 block per real
+     import).  Freeing it now, before those allocations, keeps the arena
+     contiguous. *)
+  Import.ResetLoaded();
 
   (* parse declarations *)
   ParseDeclSeq();
@@ -1174,6 +1183,16 @@ BEGIN
     Cgen.Emit1(02EH); Cgen.Emit2(0FFH, 006H);
     addrField := Cgen.CgPc(); Cgen.EmitW(INTEGER(guardOfs));
     Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegCode, FALSE);
+    (* __init is FAR-called (from TOC.MOD's entry stub and from every
+       dependent module's own __init), and its own dep-init calls / module
+       body below may reference THIS module's globals via DS — same DS
+       save+reload as any other FAR procedure (see Cgen.CgPrologue), placed
+       AFTER the early-return guard above so that early RETF never needs a
+       matching POP DS (DS hasn't been touched yet at that point). *)
+    Cgen.Emit1(01EH);                             (* PUSH DS *)
+    Cgen.Emit1(0B8H); dsImmAt := Cgen.CgPc(); Cgen.EmitW(0);  (* MOV AX,imm16 *)
+    Rdoff.RdfAddSegReloc(Cgen.CgObj, Rdoff.SegCode, dsImmAt, Rdoff.SegData);
+    Cgen.Emit2(08EH, 0D8H);                       (* MOV DS, AX *)
     IF PExpr.modUsesFpu THEN
       req87Id := PExpr.GetSystemImport("SYSTEM_REQUIRE87");
       Cgen.CgCallFar(req87Id)
@@ -1186,6 +1205,7 @@ BEGIN
       ip := ip^.next
     END;
     IF IsLex(Scan.TBegin) THEN ParseStatSeq(Syms.TypeNotype) END;
+    Cgen.Emit1(01FH);                             (* POP DS *)
     Cgen.Emit1(BYTE(Cgen.OpRetf))
   END;
 
@@ -1220,6 +1240,35 @@ BEGIN
     rfOpen := Files.ReWriteTemp(rf);
     IF ~rfOpen THEN LogErr.Error("oc: cannot create .rdf temp")
     ELSE Rdoff.RdfWriteTo(Cgen.CgObj, rf) END;
+    (* Fold every $L extra directly into rf via Rdoff.MergeRdf: code/data/bss
+       2-byte aligned, relocations/segrelocs offset-corrected, imports
+       resolved against the other side's globals where possible (and
+       removed once resolved — never left dangling), remaining imports
+       renumbered to avoid id collisions, both sides' globals re-exposed
+       with corrected offsets.  The extra is folded into MODNAME.RDF itself
+       — it is NEVER packed as its own MODNAME/UPNAME.RDF archive member
+       anymore. *)
+    IF rfOpen & ~LogErr.HaveErr() THEN
+      er := extraRdfsHead;
+      WHILE (er # NIL) & ~LogErr.HaveErr() DO
+        IF Files.Reset(sf, er^.path^) THEN
+          IF ~Files.ReWriteTemp(mf) THEN
+            LogErr.Error("oc: cannot create merge temp"); Files.Close(sf)
+          ELSE
+            Files.Seek(rf, LONGINT(0));
+            mergeOk := Rdoff.MergeRdf(rf, sf, mf);
+            Files.Close(sf); Files.Close(rf);
+            IF ~mergeOk THEN
+              LogErr.Error2("oc: failed to merge $L extra ", er^.path^)
+            END;
+            rf := mf (* mf becomes the new accumulator; auto-deleted like rf *)
+          END
+        ELSE
+          LogErr.Error2("oc: cannot open extra rdf ", er^.path^)
+        END;
+        er := er^.next
+      END
+    END;
     IF LogErr.HaveErr() THEN
       IF rfOpen THEN Files.Close(rf) END
     ELSE
@@ -1265,40 +1314,6 @@ BEGIN
         Files.Seek(dg, LONGINT(0));
         Tar.TarAddFromFile(lf, dbgName, dg, Files.Size(dg))
       END;
-      (* extra .rdf files from $L directives — stream under MODNAME/<UPNAME>.
-         Using the module name prefix avoids member-name collisions when multiple
-         .om files are merged into OBERON.OM. *)
-      er := extraRdfsHead;
-      WHILE er # NIL DO
-        IF Files.Reset(sf, er^.path^) THEN
-          IF Files.Size(sf) > LONGINT(0) THEN
-            (* build "MODNAME/" prefix — uppercased module name + "/" *)
-            i := 0;
-            WHILE parserModName[i] # 0X DO
-              upName[i] := SYSTEM.UCASE(parserModName[i]);
-              INC(i)
-            END;
-            upName[i] := "/"; INC(i); upName[i] := 0X;
-            (* append uppercased basename of the extra rdf path *)
-            baseStart := 0; j := 0;
-            WHILE er^.path^[j] # 0X DO
-              IF (er^.path^[j] = "/") OR (er^.path^[j] = "\") OR (er^.path^[j] = ":") THEN baseStart := j + 1 END;
-              INC(j)
-            END;
-            j := baseStart;
-            WHILE er^.path^[j] # 0X DO
-              upName[i] := SYSTEM.UCASE(er^.path^[j]);
-              INC(i); INC(j)
-            END;
-            upName[i] := 0X;
-            Tar.TarAddFromFile(lf, upName, sf, Files.Size(sf))
-          END;
-          Files.Close(sf)
-        ELSE
-          LogErr.Error2("oc: cannot open extra rdf ", er^.path^)
-        END;
-        er := er^.next
-      END;
       Tar.TarEnd(lf);
       Files.Close(lf);
       (* Disk-full / write errors are latched inside Files (wrErr survives
@@ -1332,7 +1347,9 @@ BEGIN
   (* Free per-module driver lists so nothing leaks across an in-process compile.
      (SymsFree already released the symbol/type/scope arena; these lists are
      owned by Parser/Import, not Syms.) *)
-  Import.ResetLoaded();   (* free the per-compile import-dedup list now *)
+  Import.ResetLoaded();   (* idempotent safety: the list was already freed
+                             right after the IMPORT clause; harmless no-op on
+                             the normal path, covers early-return error paths *)
   WHILE extraRdfsHead # NIL DO
     erNext := extraRdfsHead^.next;
     DISPOSE(extraRdfsHead^.path); DISPOSE(extraRdfsHead);

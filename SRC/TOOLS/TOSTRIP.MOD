@@ -50,9 +50,11 @@ VAR
 
 PROCEDURE Usage;
 BEGIN
-  Out.String("usage: tostrip FILE"); Out.Ln;
+  Out.String("ToStrip (c) 2026 DosWorld, Public domain (unlicense)"); Out.Ln;
+  Out.Ln;
+  Out.String("usage: TOSTRIP file"); Out.Ln;
   Out.String("  Strip debug info from a linked .EXE (TDS/TDINFO block)"); Out.Ln;
-  Out.String("  or a compiler .OM archive (zero the .DBG member)."); Out.Ln
+  Out.String("  or a compiler .OM library."); Out.Ln
 END Usage;
 
 PROCEDURE FreeList;

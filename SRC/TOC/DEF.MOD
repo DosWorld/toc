@@ -39,7 +39,7 @@ BEGIN
 END WInt;
 
 (* Write the text of a StrTab name id. *)
-PROCEDURE WName(VAR f: Files.File; id: WORD);
+PROCEDURE WName(VAR f: Files.File; id: StrTab.TStrTabId);
   VAR nm: ARRAY NameLen OF CHAR;
 BEGIN
   StrTab.Get(id, nm);
@@ -47,13 +47,13 @@ BEGIN
 END WName;
 
 (* Write "modName_id" (qualified name), e.g. for CONST/VAR/PROC/INLINE lines. *)
-PROCEDURE WQualName(VAR f: Files.File; modName: ARRAY OF CHAR; id: WORD);
+PROCEDURE WQualName(VAR f: Files.File; modName: ARRAY OF CHAR; id: StrTab.TStrTabId);
 BEGIN
   Files.Write(f, modName); Files.WriteByte(f, ORD('_')); WName(f, id)
 END WQualName;
 
 (* Write "TYPE modName_id" — the header common to every WriteOneType branch. *)
-PROCEDURE WTypeHdr(VAR f: Files.File; modName: ARRAY OF CHAR; id: WORD);
+PROCEDURE WTypeHdr(VAR f: Files.File; modName: ARRAY OF CHAR; id: StrTab.TStrTabId);
 BEGIN
   Files.Write(f, "TYPE "); WQualName(f, modName, id)
 END WTypeHdr;
@@ -122,7 +122,7 @@ BEGIN
   RETURN FALSE
 END HasDot;
 
-PROCEDURE HasDotId(id: WORD): BOOLEAN;
+PROCEDURE HasDotId(id: StrTab.TStrTabId): BOOLEAN;
   VAR nm: ARRAY NameLen OF CHAR;
 BEGIN
   StrTab.Get(id, nm);
@@ -718,6 +718,24 @@ BEGIN
             s.exported := TRUE; s.modId := StrTab.Intern(alias)
           END;
           s.type := base
+        ELSIF Strings.Equal(tok, "PROC") THEN
+          (* TYPE name PROC — a named FAR proc-typed alias (e.g. TYPE
+             RelocProc = PROCEDURE(...)).  Signature is not serialised (only
+             the 4-byte FAR-proc slot size matters at import boundaries —
+             see WriteType's TFProc case); without this branch a proc-typed
+             TYPE alias silently fell through to the opaque-INTEGER ELSE
+             below, so every cross-module use of the alias (as a VAR/param/
+             local type) type-checked as TFInteger instead of TFProc. *)
+          s := Syms.SymFind(qname);
+          IF (s # Syms.NoSym) & (s.kind = Syms.KType) THEN
+            s.type := Syms.TypeNewProc(Syms.TypeNotype);
+            s.type.isFar := TRUE; s.type.size := Syms.SzPointer
+          ELSE
+            s := Syms.SymNew(qname, Syms.KType);
+            s.type := Syms.TypeNewProc(Syms.TypeNotype);
+            s.type.isFar := TRUE; s.type.size := Syms.SzPointer;
+            s.exported := TRUE; s.modId := StrTab.Intern(alias)
+          END
         ELSE
           s := Syms.SymFind(qname);
           IF s = Syms.NoSym THEN

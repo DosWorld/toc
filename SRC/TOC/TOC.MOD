@@ -22,7 +22,7 @@ MODULE TOC;
   docs/implementation-rules.md §".DBG file format").
 *)
 IMPORT Dos, Files, Strings, Scan, Syms, Cgen, Rdoff, Tar,
-       Import, Parser, PExpr, Link, LogErr, Time, Out, StrTab;
+       Import, Parser, PExpr, Link, LinkMZ, LogErr, Time, Out, StrTab;
 
 CONST
   NameLen  = 33;
@@ -579,44 +579,70 @@ BEGIN
   dst[i] := 0AX; INC(i); dst[i] := 0X; len := i
 END FormatStackSize;
 
-(* Stream the entry-stub temp `mainRdf` (built by GenEntryStub) into the .om as
-   member "MAIN.RDF".  The caller (CompileModule) owns Close of `mainRdf`. *)
+(* Merge the entry-stub temp `mainRdf` (built by GenEntryStub) directly into
+   the root module's own MODNAME.RDF — no separate "MAIN.RDF" archive member
+   is written anymore.  Since ustar has no in-place member replacement, the
+   whole .om is rebuilt: MODNAME.RDF is extracted, folded together with
+   mainRdf via Rdoff.MergeRdf, and the archive is rewritten with the merged
+   .rdf plus the existing .def/.dbg members.  The caller (CompileModule)
+   owns Close of `mainRdf`. *)
 PROCEDURE RepackOm(modName: ARRAY OF CHAR; stackSize: LONGINT;
                    VAR mainRdf: Files.File): BOOLEAN;
-  VAR libName: ARRAY 40 OF CHAR;
-      lf: Files.File;
+  VAR libName, rdfName, defName, dbgName: ARRAY 40 OF CHAR;
+      origRdf, mergedRdf, defTmp, dbgTmp, lf: Files.File;
       stackTxt: ARRAY 24 OF CHAR; stackLen: INTEGER;
-      endBuf: ARRAY 512 OF BYTE;
-      omSize: LONGINT; k: INTEGER; endOk: BOOLEAN;
+      haveDef, haveDbg, ok: BOOLEAN;
 BEGIN
   MakeOmName(modName, libName);
-  IF ~Files.Reset(lf, libName) THEN
-    LogErr.Error2("oc: /ENTRY=: cannot reopen ", libName);
+  Strings.Copy(modName, rdfName); Strings.Append(".RDF", rdfName); SYSTEM.UPSTR(rdfName);
+  Strings.Copy(modName, defName); Strings.Append(".DEF", defName); SYSTEM.UPSTR(defName);
+  Strings.Copy(modName, dbgName); Strings.Append(".DBG", dbgName); SYSTEM.UPSTR(dbgName);
+
+  IF ~Tar.TarExtract(libName, rdfName, origRdf) THEN
+    LogErr.Error2("oc: /ENTRY=: cannot extract .rdf member from ", libName);
     RETURN FALSE
   END;
-  (* Validate the archive tail before overwriting it: a well-formed .om ends
-     with TWO all-zero 512-byte end blocks.  Blind-seeking Size-1024 on a
-     truncated/corrupt archive would append MAIN.RDF over live member data
-     and silently produce a corrupt .om. *)
-  omSize := Files.Size(lf);
-  endOk := omSize >= LONGINT(1024);
-  IF endOk THEN
-    Files.Seek(lf, omSize - LONGINT(1024));
-    IF Files.BlockRead(lf, endBuf[0], 512) # WORD(512) THEN endOk := FALSE END;
-    k := 0;
-    WHILE endOk & (k < 512) DO
-      IF endBuf[k] # BYTE(0) THEN endOk := FALSE END;
-      INC(k)
-    END
+  haveDef := Tar.TarExtract(libName, defName, defTmp);
+  haveDbg := Tar.TarExtract(libName, dbgName, dbgTmp);
+
+  IF ~Files.ReWriteTemp(mergedRdf) THEN
+    Files.Close(origRdf);
+    IF haveDef THEN Files.Close(defTmp) END;
+    IF haveDbg THEN Files.Close(dbgTmp) END;
+    LogErr.Error("oc: /ENTRY=: cannot create merge temp"); RETURN FALSE
   END;
-  IF ~endOk THEN
-    Files.Close(lf);
-    LogErr.Error2("oc: /ENTRY=: malformed .om (missing end blocks): ", libName);
+  Files.Seek(origRdf, LONGINT(0)); Files.Seek(mainRdf, LONGINT(0));
+  ok := Rdoff.MergeRdf(origRdf, mainRdf, mergedRdf);
+  Files.Close(origRdf);
+  IF ~ok THEN
+    Files.Close(mergedRdf);
+    IF haveDef THEN Files.Close(defTmp) END;
+    IF haveDbg THEN Files.Close(dbgTmp) END;
+    LogErr.Error2("oc: /ENTRY=: failed to merge entry stub into ", rdfName);
     RETURN FALSE
   END;
-  Files.Seek(lf, omSize - LONGINT(1024));
-  Files.Seek(mainRdf, LONGINT(0));
-  Tar.TarAddFromFile(lf, "MAIN.RDF", mainRdf, Files.Size(mainRdf));
+
+  IF ~Files.ReWrite(lf, libName) THEN
+    Files.Close(mergedRdf);
+    IF haveDef THEN Files.Close(defTmp) END;
+    IF haveDbg THEN Files.Close(dbgTmp) END;
+    LogErr.Error2("oc: /ENTRY=: cannot rewrite ", libName);
+    RETURN FALSE
+  END;
+  Tar.TarBegin(lf);
+  Files.Seek(mergedRdf, LONGINT(0));
+  Tar.TarAddFromFile(lf, rdfName, mergedRdf, Files.Size(mergedRdf));
+  Files.Close(mergedRdf);
+  IF haveDef THEN
+    Files.Seek(defTmp, LONGINT(0));
+    Tar.TarAddFromFile(lf, defName, defTmp, Files.Size(defTmp));
+    Files.Close(defTmp)
+  END;
+  IF haveDbg THEN
+    Files.Seek(dbgTmp, LONGINT(0));
+    Tar.TarAddFromFile(lf, dbgName, dbgTmp, Files.Size(dbgTmp));
+    Files.Close(dbgTmp)
+  END;
   IF stackSize > LONGINT(0) THEN
     FormatStackSize(stackSize, stackTxt, stackLen);
     Tar.TarAddFile(lf, "META-INF/STACK.TXT", stackTxt, stackLen)
@@ -736,7 +762,7 @@ END CompileModule;
 (* ---- link phase ---- *)
 
 PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug: BOOLEAN);
-  VAR ls: Link.State; m: ModEntry; mr: ModRec;
+  VAR ls: Link.State; ms: LinkMZ.State; m: ModEntry; mr: ModRec;
       pos, dlen: INTEGER;
       omPath: ARRAY MaxPath OF CHAR;
       p: ARRAY 512 OF CHAR;
@@ -750,10 +776,13 @@ BEGIN
      fragments the arena so no 65000-byte hole survives. *)
   DbgMemSize("Linker, before init state.");
   NEW(ls);
+  NEW(ms);
   DbgMemSize("Linker, after init state.");
   IF ls = NIL THEN LogErr.Error("out of memory (link state)"); RETURN END;
+  IF ms = NIL THEN LogErr.Error("out of memory (MZ link state)"); RETURN END;
   Link.InitState(ls);
-  ls^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
+  LinkMZ.InitState(ms);
+  ms^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
   IF ~Link.ReserveBuffers(ls) THEN
     Link.LinkFree(ls); DISPOSE(ls); RETURN   (* LogErr latched by ReserveBuffers *)
   END;
@@ -809,13 +838,15 @@ BEGIN
   LeakGuard(memBefore, "link", " in CalculateLayout");
   DbgMemSize("Linker, after calculate layouts.");
   memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN Link.PerformLinking(ls) END;
+  IF ~LogErr.HaveErr() THEN LinkMZ.PerformLinking(ls, ms) END;
   DbgMemSize("Linker, after linking, before write .exe");
   memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN Link.WriteExe(ls, outExe) END;
+  IF ~LogErr.HaveErr() THEN LinkMZ.WriteExe(ls, ms, outExe) END;
   LeakGuard(memBefore, "link", " in WriteExe");
+  LinkMZ.LinkFree(ms);
   Link.LinkFree(ls);
   DISPOSE(ls);
+  DISPOSE(ms);
   IF LogErr.HaveErr() THEN
     Files.Delete(outExe)    (* never leave a half-written .exe behind *)
   END

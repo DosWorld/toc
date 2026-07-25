@@ -55,7 +55,7 @@ TYPE
 
   SymNode = POINTER TO SymNodeRec;
   SymNodeRec = RECORD
-    nameId: ARRAY SymChunk OF WORD;   (* StrTab id, not the string itself — matches SRC/TOC's Syms nameId convention *)
+    nameId: ARRAY SymChunk OF StrTab.TStrTabId;   (* StrTab id, not the string itself — matches SRC/TOC's Syms nameId convention *)
     owner:  ARRAY SymChunk OF Module;
     segId:  ARRAY SymChunk OF INTEGER;
     offset: ARRAY SymChunk OF LONGINT;
@@ -202,7 +202,7 @@ END AddSymbol;
    name (StrTab id 0 matches nothing), so the id compare alone is exact —
    no fallback string compare needed, same as SRC/TOC/SYMS.MOD's SymFindId. *)
 PROCEDURE FindSymbol(name: ARRAY OF CHAR; VAR e: SymEntry);
-  VAR n: SymNode; i: INTEGER; id: WORD;
+  VAR n: SymNode; i: INTEGER; id: StrTab.TStrTabId;
 BEGIN
   id := StrTab.Find(name);
   n := symHead;

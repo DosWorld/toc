@@ -19,8 +19,9 @@ MODULE Syms;
   and returns the last valid record so no NIL deref occurs before the compile
   dies at the next boundary — fail-fast, single Halt in TOC.Run.
 
-  Names are NOT stored in records: nameId/modId are StrTab ids (Layer 1) —
-  name equality is id equality, so SymFind is a WORD compare per candidate.
+  Names are NOT stored in records: nameId/modId are StrTab.TStrTabId ids
+  (Layer 1) — name equality is id equality, so SymFind is a single id
+  compare per candidate.
 
   Scope records stay individual heap records: they are few (one per nesting
   level plus popped procedure scopes).
@@ -191,7 +192,7 @@ TYPE
 
   (* Names are StrTab ids (nameId/modId) — name equality is id equality. *)
   SymbolRec* = RECORD
-    nameId*:     WORD;    (* StrTab id of the symbol's name *)
+    nameId*:     StrTab.TStrTabId;    (* StrTab id of the symbol's name *)
     kind*:       INTEGER;
     exported*:   BOOLEAN;
     type*:       TypeDesc;
@@ -208,8 +209,8 @@ TYPE
     fwdDecl*:    BOOLEAN;
     fwdPatches*: FwdNode;
     typeless*:   BOOLEAN;
-    modId*:      WORD;    (* StrTab id: import's real module name / imported
-                             proc's full link name; 0 = none *)
+    modId*:      StrTab.TStrTabId;    (* StrTab id: import's real module name /
+                             imported proc's full link name; 0 = none *)
     sysId*:      BYTE;    (* SysProc id: max value 32 (SpSize), fits BYTE *)
     wasRead*:    BOOLEAN;
     declLine*:   INTEGER;
@@ -282,7 +283,7 @@ VAR
 
   (* interned ids of the predeclared type names (set in SymInit) *)
   idInteger, idBoolean, idChar, idByte, idWord, idLongint,
-  idReal, idLongreal, idSet, idAddress: WORD;
+  idReal, idLongreal, idSet, idAddress: StrTab.TStrTabId;
 
 (* Allocate + register a heap node so SymsFree frees it.  Callers use these
    instead of NEW for InlineNode / FwdNode. *)
@@ -442,7 +443,7 @@ BEGIN
   RETURN t
 END NewTypeDesc;
 
-PROCEDURE NewSymRec(nameId: WORD; kind: INTEGER): Symbol;
+PROCEDURE NewSymRec(nameId: StrTab.TStrTabId; kind: INTEGER): Symbol;
   VAR s: Symbol;
 BEGIN
   s := AllocSym();
@@ -759,7 +760,7 @@ BEGIN
 END SymCloseScope;
 
 (* SymNewId — declare a symbol whose name is already interned (id known). *)
-PROCEDURE SymNewId*(nameId: WORD; kind: INTEGER): Symbol;
+PROCEDURE SymNewId*(nameId: StrTab.TStrTabId; kind: INTEGER): Symbol;
   VAR s: Symbol;
 BEGIN
   s := NewSymRec(nameId, kind);
@@ -800,7 +801,7 @@ END SymLocalSize;
    symbol's name (id 0 matches nothing), and an id hit IS the symbol.
    The result pointer gives direct field access — there is no out-param. *)
 
-PROCEDURE SymFindLocalId*(id: WORD): Symbol;
+PROCEDURE SymFindLocalId*(id: StrTab.TStrTabId): Symbol;
   VAR s: Symbol;
 BEGIN
   IF id = 0 THEN RETURN NIL END;
@@ -817,7 +818,7 @@ BEGIN
   RETURN SymFindLocalId(StrTab.Find(name))
 END SymFindLocal;
 
-PROCEDURE SymFindId*(id: WORD): Symbol;
+PROCEDURE SymFindId*(id: StrTab.TStrTabId): Symbol;
   VAR sc: Scope; s: Symbol;
 BEGIN
   IF id = 0 THEN RETURN NIL END;
@@ -838,7 +839,7 @@ BEGIN
   RETURN SymFindId(StrTab.Find(name))
 END SymFind;
 
-PROCEDURE SymFindFieldId*(rec: TypeDesc; id: WORD): Symbol;
+PROCEDURE SymFindFieldId*(rec: TypeDesc; id: StrTab.TStrTabId): Symbol;
   VAR f: Symbol;
 BEGIN
   IF id = 0 THEN RETURN NIL END;
@@ -869,9 +870,10 @@ BEGIN
   RETURN t
 END PredefType;
 
-(* Predeclared-type resolution by interned id — pure WORD compares.  The id
-   VARs are captured in SymInit right after the universe names are interned. *)
-PROCEDURE PredeclTypeId*(id: WORD): TypeDesc;
+(* Predeclared-type resolution by interned id — pure StrTab.TStrTabId
+   compares.  The id VARs are captured in SymInit right after the universe
+   names are interned. *)
+PROCEDURE PredeclTypeId*(id: StrTab.TStrTabId): TypeDesc;
 BEGIN
   IF id = 0          THEN RETURN NIL          END;
   IF id = idInteger  THEN RETURN TypeInteger  END;

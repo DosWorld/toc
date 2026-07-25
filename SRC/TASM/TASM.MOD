@@ -99,22 +99,22 @@ BEGIN
 END MatchSwitchVal;
 
 (* LeakGuard: copy of TOC.MOD's private helper (not exported by TOC, so
-   duplicated here -- same ~15-line shape).  Reports via LogErr.Debug
-   (gated on LogErr.IsDebug(), silent unless /LOG=debug) whenever free
-   memory shrank across the guarded window. *)
+   duplicated here -- same ~15-line shape).  Reports via LogErr.Error
+   (ERROR-level, stderr, latches HaveErr()) whenever free memory shrank
+   across the guarded window -- a leak is a bug to fix, not an acceptable
+   warning, so it is always visible and fails the run fast, exactly like
+   any other fatal error (no longer gated behind /LOG=debug). *)
 PROCEDURE LeakGuard(memBefore: WORD; subPart: ARRAY OF CHAR);
   VAR memAfter: WORD; msg: ARRAY 256 OF CHAR;
 BEGIN
   memAfter := SYSTEM.MemAvail();
   IF memAfter < memBefore THEN
-    IF LogErr.IsDebug() THEN
-      Strings.Copy("Heap leak detected ", msg);
-      Strings.Append(subPart, msg);
-      Strings.Append(" (", msg);
-      Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
-      Strings.Append(" paragraphs)", msg);
-      LogErr.Debug(msg)
-    END
+    Strings.Copy("Heap leak detected ", msg);
+    Strings.Append(subPart, msg);
+    Strings.Append(" (", msg);
+    Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
+    Strings.Append(" paragraphs)", msg);
+    LogErr.Error(msg)
   END
 END LeakGuard;
 
@@ -334,6 +334,10 @@ BEGIN
 
   Files.ReplaceExt(srcPath, ".RDF", outPath);
 
+  (* Force StrTab's one-time first-chunk bootstrap cost (~10 KB) to
+     happen BEFORE the leak-guard baseline is captured -- see
+     Sym.WarmStrTab's comment. *)
+  Sym.WarmStrTab;
   memBefore := SYSTEM.MemAvail();
 
   NEW(obj);

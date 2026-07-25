@@ -592,3 +592,80 @@ memory models, plus two real bugs found and fixed along the way:**
   [DOCS/TESTS.MD](TESTS.MD) §"TLINK linker regression test".
 - `DOCS/BUILD.MD`, `DOCS/PORTING.MD`, and `CLAUDE.md`'s directory layout
   updated for the new mode/module/test.
+
+---
+
+## 2026-07-24 — `$L`/`MAIN.RDF` folded into a single merged `.rdf`; `Rdoff.MergeRdf` addend bug found and fixed
+
+- **`.om` archive layout simplified**: a `$L` extra `.rdf` and the `/ENTRY=`
+  entry stub are no longer kept as separate archive members (formerly
+  `MODNAME/<BASENAME>.RDF` and `MAIN.RDF`). Both are now merged directly
+  into the compiling module's own `.rdf` via a new `Rdoff.MergeRdf(host,
+  donor, dst)` in `SRC/TRUBO/RDOFF.MOD`: code/data/bss are 2-byte-aligned
+  and concatenated, relocations/globals are offset-corrected, imports one
+  side can resolve from the other's globals are folded away, and any
+  genuinely-external import that survives is renumbered to avoid colliding
+  with the host's own import ids. Every `.om` now contains exactly one
+  `.rdf` member per module. Merge order is significant and fixed: the
+  module's own generated code first, then each `$L` extra in source order,
+  then (for `/ENTRY=`) the entry stub last — keeps debug-info offsets
+  predictable. Wired into `PARSER.MOD`'s `ParseModule` (for `$L` extras)
+  and `TOC.MOD`'s `RepackOm` (for the entry stub, which now extracts the
+  module's existing `.rdf` member, merges in the stub, and rebuilds the
+  whole `.om` archive since ustar has no in-place member replacement).
+  The now-redundant `MODNAME.LNK` per-`.rdf` manifest file (briefly added
+  earlier this same work, listing which `.rdf` files made up a module) was
+  removed once every `.om` had exactly one `.rdf` member, making the
+  listing pointless.
+- **Real bug found and fixed while implementing the merge** — twice, in
+  fact, both in `AppendShiftedRelocs`/`ResolveImports`:
+  1. An early version of `ResolveImports` patched a resolved import's
+     RELOC addend to an *absolute* value and dropped the reloc record
+     entirely. Wrong: the real linker's `OnReloc` still adds the owning
+     module's `GroupOfs` on top of whatever's in the bytes at final link
+     time (DOCS/RDOFF2.MD §6.4); dropping the record skips that addition
+     and only worked by accident when the merged object happened to sit at
+     group-offset 0. Fixed by keeping the record alive, rewritten to a
+     plain `SegCode`/`SegData`/`SegBss` target with the addend set to the
+     resolved target's offset *within the merged object* (not an absolute
+     address) — `OnReloc`'s normal same-object math then finishes the job.
+  2. A *second*, more insidious bug survived the first fix: a RELOC that
+     was never an import at all — `rseg` already a plain segment id,
+     targeting the donor's own code/data/bss (e.g. self-modifying code
+     patching one of its own instructions) — had its patch-site *offset*
+     correctly shifted when the donor's bytes moved, but the byte *addend*
+     already sitting at that site was left untouched, still encoding the
+     target's stale pre-merge offset. Found via `SYSTEM.RDF`'s
+     `SYSTEM_Intr`, which self-patches its own `INT` opcode's
+     interrupt-number byte (`mov [cs:int_ins+1], al`) — after `SYSTEM.MOD`'s
+     `(*$L SYSTEM.RDF*)` merge, the patch silently wrote to the wrong
+     address, `INT 0` executed instead of `INT 21h`, and every program
+     (even one with zero imports) crashed with `Unhandled interrupt 00` at
+     its very first `SYSTEM.Intr` call. Fixed by a new `PatchTargetShift`
+     procedure, run on the donor's own bytes before they're copied into
+     the host, that adds the matching code/data/bss base to the addend of
+     every self-targeting (non-import) RELOC. See
+     [DOCS/IMPLRULE.MD](IMPLRULE.MD) §"`Rdoff.MergeRdf` — self-targeting
+     reloc addends must shift too" and [DOCS/RDOFF2.MD](RDOFF2.MD) §6.8.
+  A chicken-and-egg wrinkle during diagnosis: `SRC/LIB`'s stdlib modules
+  (including `SYSTEM.MOD` itself) are compiled in the *first* build pass
+  using the immutable `BOOT/TOC.EXE`, before any self-hosted `TOC.EXE`
+  exists — so a merge-logic fix landing only in `SRC/TRUBO/RDOFF.MOD`
+  cannot affect `SYSTEM.OM` until `BOOT/TOC.EXE` itself is refreshed with
+  the fix baked in (the maintainer's job, never done by `make`).
+- New regression coverage in `TESTS/TRDOF.MOD`: `TMergeResolvedImportSurvives`,
+  `TMergeSurvivingImportRenumbered`, `TMergeCodeAlignment`, and
+  `TMergeSelfTargetAddendShifts` (the last pins bug 2 above exactly — a
+  donor RELOC whose target is already its own code, asserting the merged
+  addend equals the shift amount). `make test` (288 manifest + 109 TASM +
+  3 TLINK), the full `T*.MOD` unit suite (22/22 including the four above),
+  and 3-generation self-hosting (`toc1.exe == toc2.exe`, plus an
+  independently-verified `gen2 == gen3`) all pass against the maintainer's
+  refreshed `BOOT/TOC.EXE`.
+- `CLAUDE.md`, `DOCS/BUILD.MD`, `DOCS/OBERLANG.MD`, `DOCS/TESTS.MD`,
+  `DOCS/RDOFF2.MD`, and `DOCS/OVL.MD` updated to describe the merged
+  single-`.rdf` archive layout; all now-stale `MAIN.RDF`-as-separate-member
+  and `MODNAME/<BASENAME>.RDF` wording removed. `TESTS/MANIFEST.TSV` rows
+  that asserted the old separate-member layout (`naming/53d-main-imports-
+  mod-init`, `entry/6a`–`6e`, `syscom/41a`–`41c`) updated to check the
+  merged behavior instead.

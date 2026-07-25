@@ -223,11 +223,15 @@ the `.om` archive alongside the compiled module's own `.rdf` and `.def`:
 //$L helper.rdf         (* line-comment form  *)
 ```
 
-The directive is processed during scanning and may appear anywhere in the source.  The file
-is stored in the archive under `MODNAME/<BASENAME>.RDF` where `MODNAME` is the uppercased
-module name and `BASENAME` is the uppercased filename (directory part stripped).  This
-prefix prevents member-name collisions when multiple `.om` files are merged into `OBERON.OM`.
-Up to 128 extra `.rdf` files total.
+The directive is processed during scanning and may appear anywhere in the source.  Each
+`$L` file is merged (via `Rdoff.MergeRdf`) directly into the module's own compiled `.rdf`
+— code/data/bss are 2-byte-aligned and concatenated, relocations/globals/imports are
+offset-corrected, and any import one side can resolve from the other's globals is folded
+away.  The `.om` archive still contains exactly one `.rdf` member per module (named
+`MODNAME.RDF`); there is no separate `MODNAME/<BASENAME>.RDF` archive entry.  Merge order:
+the module's own generated code first, then each `$L` extra in source order, then (for
+`/ENTRY=`) the entry stub last — this keeps debug-info offsets predictable.  Up to 128
+extra `.rdf` files total.
 
 If a `$L` path cannot be opened or read, the compiler reports an error and compilation fails.
 
@@ -246,10 +250,11 @@ Syntax: `$M stack_bytes, min_heap_bytes, max_heap_bytes` — three comma-separat
   written as `META-INF/STACK.TXT` inside the `.om`, and the linker sets the MZ SP field
   to `stack_bytes - 2`.
 - `min_heap_bytes`, `max_heap_bytes`: 0..640*1024 (655360).  The compiler rounds each
-  UP to 16-byte paragraphs (4 bytes → 1 paragraph; 0 → 0).  When generating MAIN.RDF
-  for `/ENTRY=`, it emits `MOV AX,min_para; MOV BX,max_para` before the `CALL FAR
-  SYSTEM_INIT`; the runtime then asks DOS to allocate at least `min_para` paragraphs,
-  clamps to the actually-available amount but no more than `max_para` paragraphs.
+  UP to 16-byte paragraphs (4 bytes → 1 paragraph; 0 → 0).  When generating the
+  entry stub for `/ENTRY=`, it emits `MOV AX,min_para; MOV BX,max_para` before the
+  `CALL FAR SYSTEM_INIT`; the runtime then asks DOS to allocate at least `min_para`
+  paragraphs, clamps to the actually-available amount but no more than `max_para`
+  paragraphs.
 
 Constraints:
 - `min_heap_bytes <= max_heap_bytes`.
@@ -278,14 +283,17 @@ xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=ProcName File.Mod
 # → File.exe (compiled + linked in one step)
 ```
 
-Also generates `MAIN.RDF` (packed into `File.om`) containing:
+Also generates an entry-stub RDOFF object containing:
 ```asm
 CALL FAR SYSTEM_INIT        ; runtime init   (import seg 3)
 CALL FAR ModName__init      ; module init    (import seg 5)
 CALL FAR ModName_ProcName   ; entry proc     (import seg 6)
 CALL FAR SYSTEM_DONE        ; DOS exit       (import seg 4)
 ```
-`MAIN.RDF` exports GLOBAL `start` at offset 0 (linker entry point).
+which exports GLOBAL `start` at offset 0 (linker entry point).  This stub is merged
+(via `Rdoff.MergeRdf`, last in merge order — after the module's own code and any
+`$L` extras) into `ModName`'s own `.rdf` inside `File.om`; there is no separate
+`MAIN.RDF` archive member.
 
 ---
 

@@ -30,12 +30,12 @@ TYPE
   TextChunkDesc = RECORD
     ch: ARRAY TextSize OF CHAR
   END;
-
+  TStrTabId* = WORD;
   EntRec = RECORD
     hash:   WORD;     (* Strings.HashCode of the name *)
     tchunk: INTEGER;  (* index into textDir *)
     tofs:   WORD;     (* offset of the 0X-terminated text in that chunk *)
-    hnext:  WORD      (* next id in the same hash bucket; 0 = end *)
+    hnext:  TStrTabId  (* next id in the same hash bucket; 0 = end *)
   END;
 
   EntChunk = POINTER TO EntChunkDesc;
@@ -48,11 +48,11 @@ VAR
   entDir:   ARRAY MaxEnt OF EntChunk;
   nText:    INTEGER;   (* text chunks allocated *)
   textUsed: WORD;      (* used chars in textDir[nText-1] *)
-  count:    WORD;      (* ids issued: 1..count *)
+  count:    TStrTabId;  (* ids issued: 1..count *)
   buckets:  ARRAY Buckets OF WORD;
   bi:       INTEGER;   (* module-body init loop counter *)
 
-PROCEDURE Count*(): WORD;
+PROCEDURE Count*(): TStrTabId;
 BEGIN
   RETURN count
 END Count;
@@ -67,25 +67,29 @@ BEGIN
          LONGINT(nEnt) * LONGINT(SIZE(EntChunkDesc))
 END MemBytes;
 
-(* Copy the text of id into dst (id 0 or out of range -> empty string). *)
-PROCEDURE Get*(id: WORD; VAR dst: ARRAY OF CHAR);
-  VAR ec: EntChunk; tc: TextChunk; k, o: WORD; i: INTEGER;
+(* Copy the text of id into dst (id 0 or out of range -> empty string).
+   The 0X terminator's offset is found via a single SYSTEM.FINDBYTE scan
+   (REPNE SCASB) instead of a manual char-by-char WHILE loop, then the
+   whole run is copied in one SYSTEM.MOVE (REP MOVSB) — same "scan once,
+   bulk-copy once" idiom as Strings.MOD's own single-char Pos fast path. *)
+PROCEDURE Get*(id: TStrTabId; VAR dst: ARRAY OF CHAR);
+  VAR ec: EntChunk; tc: TextChunk; o, k, n: WORD;
 BEGIN
   IF (id = 0) OR (id > count) THEN dst[0] := 0X; RETURN END;
   ec := entDir[SYSTEM.LSR(id - 1, EntBits)];
   k  := SYSTEM.AND(id - 1, EntPer - 1);
   tc := textDir[ec^.e[k].tchunk];
   o  := ec^.e[k].tofs;
-  i  := 0;
-  WHILE (tc^.ch[o] # 0X) & (i < LEN(dst) - 1) DO
-    dst[i] := tc^.ch[o]; INC(i); INC(o)
-  END;
-  dst[i] := 0X
+  n := SYSTEM.FINDBYTE(tc^.ch[o], 0, WORD(TextSize) - o);
+  n := SYSTEM.UMIN(n, WORD(LEN(dst) - 1));
+  IF n > 0 THEN SYSTEM.MOVE(tc^.ch[o], dst[0], n) END;
+  dst[n] := 0X
 END Get;
 
 (* Bucket-chain lookup with the hash already computed. *)
-PROCEDURE FindH(VAR name: ARRAY OF CHAR; h: WORD): WORD;
-  VAR lenh, id, k: WORD; ec: EntChunk; tc: TextChunk;
+PROCEDURE FindH(VAR name: ARRAY OF CHAR; h: WORD): TStrTabId;
+  VAR lenh, k: WORD; ec: EntChunk; tc: TextChunk;
+      id : TStrTabId;
 BEGIN
   id := buckets[SYSTEM.AND(h, Buckets - 1)];
   lenh := SYSTEM.LENGTH(name) + 1;
@@ -106,14 +110,14 @@ END FindH;
 
 (* Id of name, or 0 when the name was never interned (=> cannot be any
    symbol's name).  Never allocates. *)
-PROCEDURE Find*(VAR name: ARRAY OF CHAR): WORD;
+PROCEDURE Find*(VAR name: ARRAY OF CHAR): TStrTabId;
 BEGIN
   RETURN FindH(name, Strings.HashCode(name))
 END Find;
 
 (* Id of name, interning it on first sight.  `name` is BY VALUE on purpose:
    Intern is called with string LITERALS ("SYSTEM", "INTEGER", ...). *)
-PROCEDURE Intern*(name: ARRAY OF CHAR): WORD;
+PROCEDURE Intern*(name: ARRAY OF CHAR): TStrTabId;
   VAR h, id, k, b: WORD; len: INTEGER; tc: TextChunk; ec: EntChunk;
 BEGIN
   h  := Strings.HashCode(name);

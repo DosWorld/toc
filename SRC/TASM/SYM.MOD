@@ -11,7 +11,7 @@ MODULE Sym;
   operand needs a label's value, Lookup always succeeds.  Undefined-at-
   end-of-pass-1 is the only "forward ref never resolved" error case.
 *)
-IMPORT Strings, LogErr, Scan;
+IMPORT Strings, LogErr, Scan, StrTab;
 
 CONST
   Chunk = 32;
@@ -31,17 +31,14 @@ TYPE
 
   LabelNode = POINTER TO LabelNodeDesc;
   LabelNodeDesc = RECORD
-    name*:    ARRAY Chunk OF ARRAY MaxName OF CHAR;
-    hash*:    ARRAY Chunk OF WORD;   (* E1 fix: Strings.HashCode(name[i]),
-                                         cached exactly like DefineNodeDesc's
-                                         hash field -- every operand of every
-                                         line in both passes calls FindNode
-                                         (via Lookup + ReserveLabel + IsExtern
-                                         + IsDefined, often 3-4x on the same
-                                         operand); comparing the 2-byte hash
-                                         before Strings.Equal turns most scans
-                                         into a cheap WORD compare instead of a
-                                         full string compare. *)
+    nameId*:  ARRAY Chunk OF StrTab.TStrTabId;   (* StrTab id, not the string itself --
+                                         E1's cached-hash trick is superseded
+                                         by StrTab: FindNode now compares a
+                                         single WORD id (StrTab.Find's own
+                                         internal hash chaining already did
+                                         the expensive part once), so no
+                                         separate hash field or Strings.Equal
+                                         call is needed on the hot path. *)
     seg*:     ARRAY Chunk OF INTEGER;    (* SegCode/SegData *)
     offset*:  ARRAY Chunk OF LONGINT;
     defined*: ARRAY Chunk OF BOOLEAN;
@@ -91,27 +88,23 @@ TYPE
      that caller's case discipline exactly. *)
   DefineNode = POINTER TO DefineNodeDesc;
   DefineNodeDesc = RECORD
-    name*:  ARRAY Chunk OF ARRAY MaxName OF CHAR;
-    hash*:  ARRAY Chunk OF WORD;    (* Strings.HashCode(name[i]), cached to
-                                       speed FindDefine's scan -- compare the
-                                       2-byte hash before Strings.Equal *)
+    nameId*: ARRAY Chunk OF StrTab.TStrTabId;   (* StrTab id -- see LabelNodeDesc.nameId *)
     value*: ARRAY Chunk OF ARRAY 128 OF CHAR;
     count*: INTEGER;
     next*:  DefineNode
   END;
 
-  (* MacroNode: §I.4's %macro storage -- same uppercase-name-plus-cached-
-     hash shape as DefineNode (convention 1 of the E9 case-discipline
-     note above: %macro names, like %define names, are looked up via the
-     always-uppercased scanned token). body is a heap-allocated exact-
+  (* MacroNode: §I.4's %macro storage -- same StrTab-interned-name shape
+     as DefineNode (convention 1 of the E9 case-discipline note above:
+     %macro names, like %define names, are looked up via the always-
+     uppercased scanned token). body is a heap-allocated exact-
      size NUL-terminated buffer (Scan.MemText, the same pointer type
      Scan.InitMem consumes directly -- no copy needed at invocation
      time), captured verbatim by Parse.MOD's %macro recorder; freed here
      in Free since Sym owns the table that holds the pointers. *)
   MacroNode = POINTER TO MacroNodeDesc;
   MacroNodeDesc = RECORD
-    name*:    ARRAY Chunk OF ARRAY MaxName OF CHAR;
-    hash*:    ARRAY Chunk OF WORD;
+    nameId*:  ARRAY Chunk OF StrTab.TStrTabId;   (* StrTab id -- see LabelNodeDesc.nameId *)
     nParams*: ARRAY Chunk OF INTEGER;
     body*:    ARRAY Chunk OF Scan.MemText;
     count*:   INTEGER;
@@ -134,6 +127,23 @@ BEGIN
   macroHead := NIL; macroTail := NIL;
   lastLabel[0] := 0X; nextDefOrder := LONGINT(0)
 END Init;
+
+(* WarmStrTab: force StrTab's first text/entry chunk allocation (~10 KB)
+   right now, before the caller captures its own "before" MemAvail
+   baseline for a leak-guard window.  StrTab never Resets mid-process
+   here (TASM assembles exactly one file per invocation, see the module
+   header), so the first-ever Intern call anywhere pays a one-time
+   chunk-bootstrap cost that is NOT a leak — without this warm-up call,
+   whichever file happens to intern the first label/define/macro name in
+   a fresh tasm.exe process absorbs that cost into its own leak-guard
+   window and reports a false leak. Interning a name already guaranteed
+   never to appear as a real label/define/macro (a token no NASM-subset
+   source can produce) keeps this warm-up itself side-effect-free for
+   every real lookup. *)
+PROCEDURE WarmStrTab*;
+BEGIN
+  StrTab.Intern(" $tasm-warmup$ ")
+END WarmStrTab;
 
 PROCEDURE Free*;
   VAR l, ln: LabelNode; d, dn: DefineNode; m, mn: MacroNode; i: INTEGER;
@@ -180,15 +190,17 @@ BEGIN
   IF name[0] # "." THEN Strings.Copy(name, lastLabel) END
 END SetLastLabel;
 
+(* A name never interned (StrTab.Find returns 0) cannot be any label's
+   name (StrTab id 0 matches nothing), so the id compare alone is exact. *)
 PROCEDURE FindNode(full: ARRAY OF CHAR; VAR node: LabelNode; VAR idx: INTEGER): BOOLEAN;
-  VAR l: LabelNode; i: INTEGER; hc: WORD;
+  VAR l: LabelNode; i: INTEGER; id: StrTab.TStrTabId;
 BEGIN
-  hc := Strings.HashCode(full);   (* E1 fix: see LabelNodeDesc.hash *)
+  id := StrTab.Find(full);
   l := labelHead;
   WHILE l # NIL DO
     i := 0;
     WHILE i < l^.count DO
-      IF (l^.hash[i] = hc) & Strings.Equal(l^.name[i], full) THEN
+      IF l^.nameId[i] = id THEN
         node := l; idx := i; RETURN TRUE
       END;
       INC(i)
@@ -216,8 +228,7 @@ BEGIN
     labelTail := last
   END;
   idx := labelTail^.count;
-  Strings.Copy(full, labelTail^.name[idx]);
-  labelTail^.hash[idx] := Strings.HashCode(full);
+  labelTail^.nameId[idx] := StrTab.Intern(full);
   node := labelTail;
   RETURN TRUE
 END AppendLabelSlot;
@@ -378,7 +389,7 @@ PROCEDURE EnumGlobals*(visit: GlobalVisitProc);
   VAR l: LabelNode; i: INTEGER;
       lastVisited, bestOrder: LONGINT;
       bestL: LabelNode; bestI: INTEGER;
-      more: BOOLEAN;
+      more: BOOLEAN; nameBuf: ARRAY MaxName OF CHAR;
 BEGIN
   lastVisited := LONGINT(-1);
   more := TRUE;
@@ -400,7 +411,8 @@ BEGIN
     IF bestL = NIL THEN
       more := FALSE
     ELSE
-      visit(bestL^.name[bestI], bestL^.seg[bestI], bestL^.offset[bestI]);
+      StrTab.Get(bestL^.nameId[bestI], nameBuf);
+      visit(nameBuf, bestL^.seg[bestI], bestL^.offset[bestI]);
       lastVisited := bestOrder
     END
   END
@@ -420,7 +432,7 @@ BEGIN
     i := 0;
     WHILE i < l^.count DO
       IF ~l^.defined[i] & ~l^.isExtern[i] THEN
-        Strings.Copy(l^.name[i], name); RETURN TRUE
+        StrTab.Get(l^.nameId[i], name); RETURN TRUE
       END;
       INC(i)
     END;
@@ -432,14 +444,14 @@ END CheckAllDefined;
 (* ---- %define text-substitution (whole-token only, no parameters) ---- *)
 
 PROCEDURE FindDefine(name: ARRAY OF CHAR; VAR node: DefineNode; VAR idx: INTEGER): BOOLEAN;
-  VAR d: DefineNode; i: INTEGER; hc: WORD;
+  VAR d: DefineNode; i: INTEGER; id: StrTab.TStrTabId;
 BEGIN
-  hc := Strings.HashCode(name);
+  id := StrTab.Find(name);
   d := defineHead;
   WHILE d # NIL DO
     i := 0;
     WHILE i < d^.count DO
-      IF (d^.hash[i] = hc) & Strings.Equal(d^.name[i], name) THEN
+      IF d^.nameId[i] = id THEN
         node := d; idx := i; RETURN TRUE
       END;
       INC(i)
@@ -463,8 +475,7 @@ BEGIN
     defineTail := last
   END;
   idx := defineTail^.count;
-  Strings.Copy(name, defineTail^.name[idx]);
-  defineTail^.hash[idx] := Strings.HashCode(name);
+  defineTail^.nameId[idx] := StrTab.Intern(name);
   Strings.Copy(value, defineTail^.value[idx]);
   INC(defineTail^.count); INC(nDefines)
 END Define;
@@ -475,8 +486,7 @@ BEGIN
   IF FindDefine(name, node, idx) THEN
     last := node^.count - 1;
     IF idx # last THEN
-      Strings.Copy(node^.name[last], node^.name[idx]);
-      node^.hash[idx] := node^.hash[last];
+      node^.nameId[idx] := node^.nameId[last];
       Strings.Copy(node^.value[last], node^.value[idx])
     END;
     DEC(node^.count); DEC(nDefines)
@@ -506,14 +516,14 @@ END Expand;
 (* ---- %macro storage (§I.4) ---- *)
 
 PROCEDURE FindMacro(name: ARRAY OF CHAR; VAR node: MacroNode; VAR idx: INTEGER): BOOLEAN;
-  VAR m: MacroNode; i: INTEGER; hc: WORD;
+  VAR m: MacroNode; i: INTEGER; id: StrTab.TStrTabId;
 BEGIN
-  hc := Strings.HashCode(name);
+  id := StrTab.Find(name);
   m := macroHead;
   WHILE m # NIL DO
     i := 0;
     WHILE i < m^.count DO
-      IF (m^.hash[i] = hc) & Strings.Equal(m^.name[i], name) THEN
+      IF m^.nameId[i] = id THEN
         node := m; idx := i; RETURN TRUE
       END;
       INC(i)
@@ -580,8 +590,7 @@ BEGIN
     macroTail := last
   END;
   idx := macroTail^.count;
-  Strings.Copy(name, macroTail^.name[idx]);
-  macroTail^.hash[idx] := Strings.HashCode(name);
+  macroTail^.nameId[idx] := StrTab.Intern(name);
   macroTail^.nParams[idx] := nParams;
   macroTail^.body[idx] := body;
   INC(macroTail^.count)

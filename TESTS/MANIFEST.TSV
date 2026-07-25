@@ -74,7 +74,7 @@ naming/53b-output-uses-module-name	casemod53.mod		has-global	CaseMod53__init
 naming/53c-rdf-uppercase	casemod53.mod		om-has-file	CASEMOD53.RDF
 naming/53c-def-uppercase	casemod53.mod		om-has-file	CASEMOD53.DEF
 naming/53d-entry-lowercase-filename	entcas53.mod	/ENTRY=Run	file-in-workdir	EntCas53.om
-naming/53d-main-imports-mod-init	entcas53.mod	/ENTRY=Run	has-import	EntCas53__init	MAIN.RDF
+naming/53d-main-imports-mod-init	entcas53.mod	/ENTRY=Run	no-import	EntCas53__init
 qual/4a-hello-main-import	QUALTEST.MOD+HELLO.OM		has-import	Hello_Main
 qual/4b-hello-init-import	QUALTEST.MOD+HELLO.OM		has-import	Hello__init
 qual/4c-no-system-init	QUALTEST.MOD+HELLO.OM		no-import	SYSTEM__init
@@ -96,11 +96,11 @@ local-far/13b-no-far-call	LOCALFAR.MOD		no-code-contains	9A
 local-far/13c-no-segreloc	LOCALFAR.MOD		no-segreloc
 local-far/13d-internal-near	NEAR13.MOD		code-contains	E8
 local-far/13e-no-pushcs	NEAR13.MOD		no-code-contains	0EE8
-entry/6a-system-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_INIT	MAIN.RDF
-entry/6b-system-done	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_DONE	MAIN.RDF
-entry/6c-entrymod-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	Entrymod__init	MAIN.RDF
-entry/6d-entrymod-main	ENTRYMOD.MOD	/ENTRY=Main	has-import	Entrymod_Main	MAIN.RDF
-entry/6e-start-global	ENTRYMOD.MOD	/ENTRY=Main	has-global	start	MAIN.RDF
+entry/6a-system-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_INIT
+entry/6b-system-done	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_DONE
+entry/6c-entrymod-init	ENTRYMOD.MOD	/ENTRY=Main	no-import	Entrymod__init
+entry/6d-entrymod-main	ENTRYMOD.MOD	/ENTRY=Main	no-import	Entrymod_Main
+entry/6e-start-global	ENTRYMOD.MOD	/ENTRY=Main	has-global	start
 entry/6f-missing-proc-rejected	ENTRYM2.MOD	/ENTRY=Missing	stderr-contains	procedure not found
 entry/6g-private-proc-rejected	ENTRYM3.MOD	/ENTRY=Hidden	stderr-contains	not exported
 system/12a-fzero-compiles	TSTCONST.MOD		has-global	Tstconst__init
@@ -239,9 +239,9 @@ mz/max-alloc-32768-stack	STK55G.MOD	/ENTRY=Run	mz-max-alloc	2048
 dos/paramstr0-not-truncated	DOSARG.MOD	/ENTRY=Run	errorlevel	0
 constexp/40a-pub-in-def	CSTEXP.MOD		om-member-contains	CSTEXP.DEF Cstexp_Pub
 constexp/40b-priv-not-in-def	CSTEXP.MOD		om-member-no-contains	CSTEXP.DEF Priv
-syscom/41a-paren-form	SYSCOML.MOD+EXTRA1.RDF		om-has-file	SYSCOML/EXTRA1.RDF
-syscom/41b-slash-form	SYSCOMLL.MOD+EXTRA1.RDF		om-has-file	SYSCOMLL/EXTRA1.RDF
-syscom/41c-spaces-trimmed	SYSCOMLT.MOD+EXTRA1.RDF		om-has-file	SYSCOMLT/EXTRA1.RDF
+syscom/41a-paren-form	SYSCOML.MOD+EXTRA1.RDF		has-global	ExtNear_Run
+syscom/41b-slash-form	SYSCOMLL.MOD+EXTRA1.RDF		has-global	ExtNear_Run
+syscom/41c-spaces-trimmed	SYSCOMLT.MOD+EXTRA1.RDF		has-global	ExtNear_Run
 syscom/41d-unknown-directive-warns	SYSCOMUN.MOD		stderr-contains	unknown
 stack/54a-65536-compiles	STK54A.MOD	/ENTRY=Run	has-global	Stk54a__init	STK54A.RDF
 stack/54b-stack-txt-present	STK54A.MOD	/ENTRY=Run	om-has-file	META-INF/STACK.TXT

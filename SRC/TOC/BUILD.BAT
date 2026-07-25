@@ -1,4 +1,5 @@
-set OBERON_LIB=..\..\BIN\TRUBO.OM
-..\..\boot\toc /entry=Run toc.mod /m
-del *.om
-copy TOC.EXE ..\..\BIN\
+SET OBERON_LIB=..\..\BIN\TRUBO.OM
+..\..\BOOT\TOC /Entry=Run TOC.MOD /M
+DEL *.OM
+COPY TOC.EXE ..\..\BIN\
+

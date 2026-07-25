@@ -9,10 +9,19 @@
 #   make install  — copy TOC.exe to BIN/TOC.EXE
 #   make clean    — remove .om files, TOC.exe, and local setup files
 
-BOOT_TOC  = ../../BOOT/TOC.EXE
-BIN_OM   = ../../BIN/OBERON.OM
+PDIR         = ../..
+BIN_DIR      = $(PDIR)/BIN
+BOOT_DIR     = $(PDIR)/BOOT
+BOOT_TOC     = ../../BOOT/TOC.EXE
+BIN_TOC      = ../../BIN/TOC.EXE
+BIN_TASM     = ../../BOOT/TASM.EXE
+BIN_OM       = ../../BIN/OBERON.OM
 BIN_TRUBO_OM = ../../BIN/TRUBO.OM
-XT       = xt
+XT           = xt
+OBERON_ON    = OBERON.OM
+TRUBO_OM     = TRUBO.OM
+TASM         = TASM.EXE
+TOC          = _TOC.EXE
 
 # No -c: xt uses process CWD (SRC/TOC/) as the C:\ mount root, so the stdlib
 # OBERON.OM (which lives OUTSIDE this dir, in BIN/) is not reachable via a DOS
@@ -24,7 +33,6 @@ XT       = xt
 # 2026-07-16, see SRC/TASM/TASM.MD §K -- so an OBERON_LIB env var is never a
 # working option here regardless of quoting/slash convention.)
 XTRUN  = $(XT) run --max=40000000000 --memkb=544
-TOC = _TOC.EXE
 
 # Every compiler source — the single-process build scans, compiles and links the
 # whole image in ONE call, so TOC.exe depends on the sources directly (no
@@ -43,7 +51,7 @@ TOC = _TOC.EXE
 # path every other stdlib import already takes during self-host).
 OC_SRCS = \
     SCAN.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
-    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD TOC.MOD
+    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD LINKMZ.MOD TOC.MOD
 # STRTAB.MOD
 
 all: TOC.EXE
@@ -51,22 +59,28 @@ all: TOC.EXE
 $(TOC): $(BOOT_TOC)
 	cp $(BOOT_TOC) $(TOC)
 
-OBERON.OM: $(BIN_OM)
-	cp $(BIN_OM) OBERON.OM
+$(OBERON_ON): $(BIN_OM)
+	cp $(BIN_OM) $(OBERON_ON)
 
-TRUBO.OM: $(BIN_TRUBO_OM)
-	cp $(BIN_TRUBO_OM) TRUBO.OM
+$(TASM): $(BIN_TASM)
+	cp $(BIN_TASM) $(TASM)
+
+$(TRUBO_OM): $(BIN_TRUBO_OM)
+	cp $(BIN_TRUBO_OM) $(TRUBO_OM)
+
+STUB.RDF: STUB.BIN $(TASM)
+	$(XTRUN) $(TASM) /BIN=code /NAME=StubMZ STUB.BIN
 
 # Single-command self-host: toc /ENTRY=Run TOC.MOD scans deps, compiles every
 # stale module and links TOC.exe in one process.
-TOC.EXE: $(OC_SRCS) $(TOC) OBERON.OM TRUBO.OM
-	time $(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TOC.MOD /M
+TOC.EXE: $(OC_SRCS) $(TOC) $(OBERON_ON) $(TRUBO_OM) STUB.RDF
+	time $(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) /LOG=debug /ENTRY=Run TOC.MOD /M
 
 install: TOC.EXE
 	mkdir -p ../../BIN
-	cp TOC.EXE ../../BIN/TOC.EXE
+	cp TOC.EXE $(BIN_TOC)
 
 clean:
-	rm -f *.OM *.EXE OUTPUT.LOG
+	rm -f *.OM *.EXE
 
 .PHONY: all install clean

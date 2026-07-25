@@ -360,6 +360,27 @@ For byte-exact binary comparison, use `cmp -s` on the extracted `.rdf` files.
   since been fixed, the latter turned out to be a move-descriptor field-layout
   bug in `EMS.MOD`'s `DoMove` (conventional-memory segment was written into
   the wrong struct field), now fixed there.
+  **2026-07-22 regression found + fixed:** AH=45h (Deallocate Handle) was
+  rejecting a handle its own AH=43h had just issued moments earlier (LIM EMS
+  error 131/83h, "handle not found"), with no other EMS call in between —
+  confirmed via `xt trace` at the instruction level (the handle value passed
+  to AH=45h matched exactly what AH=43h had returned; this project's own
+  `SRC/LIB/EMS.ASM`/`EMS.MOD`/`FILES.MOD` were inspected and are correct, no
+  calling-convention or stack-frame bug on this side). Effect: every
+  `Files.ReWriteTemp` past the FIRST one in a process silently fell back to
+  the disk backend instead of EMS, since the handle pool became unusable
+  after exactly one alloc/free cycle. **Fixed upstream in `xt` (2026-07-22).**
+- **`-c DIR` when the host process's own CWD equals `DIR` — 2026-07-22
+  regression found + fixed:** running `xt` with `cd DIR && xt run -c DIR ...`
+  (host CWD and the `-c` mount point identical) silently dropped the
+  program's own diagnostic output (stdout/stderr messages, e.g. compiler
+  `WARN:`/`DEBUG:` lines) even though the program itself completed and
+  produced correct output files — `xt run -c DIR ...` from a DIFFERENT host
+  CWD (the normal, documented pattern) was unaffected. This exact
+  `cd $wd && xt run -c $wd` pattern is what `TESTS/Makefile.man` uses per
+  manifest row, so it intermittently broke `stderr-contains`-style manifest
+  checks (e.g. `dead/var-global-unused`) depending on load/timing.
+  **Fixed upstream in `xt` (2026-07-22).**
 
 ## Recent xt changes (2026-06-28)
 
