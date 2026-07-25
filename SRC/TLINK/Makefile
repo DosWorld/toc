@@ -12,10 +12,10 @@
 #   make          — compile + link tlink.exe (auto-named TLINK.exe)
 #   make install  — copy TLINK.exe to BIN/TLINK.EXE
 #   make clean    — remove .om files, TLINK.exe, and local setup files
-
-BIN_TOC = ../../BIN/TOC.EXE
-BIN_OM  = ../../BIN/OBERON.OM
-BIN_TRUBO_OM = ../../BIN/TRUBO.OM
+BIN_DIR = ../../BIN
+BIN_TOC = $(BIN_DIR)/TOC.EXE
+BIN_OM  = $(BIN_DIR)/OBERON.OM
+BIN_TRUBO_OM = $(BIN_DIR)/TRUBO.OM
 XT      = xt
 
 # No -c: xt uses process CWD (SRC/TLINK/) as the C:\ mount root, same
@@ -39,8 +39,8 @@ TLINK.EXE: TLINK.MOD TEXE.MOD $(TOC) OBERON.OM TRUBO.OM
 	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TLINK.MOD /M
 
 install: TLINK.EXE
-	mkdir -p ../../BIN
-	cp TLINK.EXE ../../BIN/TLINK.EXE
+	mkdir -p $(BIN_DIR)
+	cp TLINK.EXE $(BIN_DIR)/TLINK.EXE
 
 clean:
 	rm -f *.OM *.EXE OUTPUT.LOG

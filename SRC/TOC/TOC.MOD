@@ -1,4 +1,4 @@
-(*$M 26000, 256000, 650000*)
+(*$M 26000, 160000, 650000*)
 (*$D-*)
 MODULE TOC;
 (*
@@ -22,7 +22,7 @@ MODULE TOC;
   docs/implementation-rules.md §".DBG file format").
 *)
 IMPORT Dos, Files, Strings, Scan, Syms, Cgen, Rdoff, Tar,
-       Import, Parser, PExpr, Link, LinkMZ, LogErr, Time, Out, StrTab;
+       Import, Parser, PExpr, Link, LinkMZ, LinkNE, LogErr, Time, Out, StrTab;
 
 CONST
   NameLen  = 33;
@@ -761,8 +761,8 @@ END CompileModule;
 
 (* ---- link phase ---- *)
 
-PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug: BOOLEAN);
-  VAR ls: Link.State; ms: LinkMZ.State; m: ModEntry; mr: ModRec;
+PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug, targetCP: BOOLEAN);
+  VAR ls: Link.State; ms: LinkMZ.State; ns: LinkNE.State; m: ModEntry; mr: ModRec;
       pos, dlen: INTEGER;
       omPath: ARRAY MaxPath OF CHAR;
       p: ARRAY 512 OF CHAR;
@@ -776,13 +776,22 @@ BEGIN
      fragments the arena so no 65000-byte hole survives. *)
   DbgMemSize("Linker, before init state.");
   NEW(ls);
-  NEW(ms);
+  IF targetCP THEN NEW(ns); ms := NIL ELSE NEW(ms); ns := NIL END;
   DbgMemSize("Linker, after init state.");
   IF ls = NIL THEN LogErr.Error("out of memory (link state)"); RETURN END;
-  IF ms = NIL THEN LogErr.Error("out of memory (MZ link state)"); RETURN END;
+  IF targetCP THEN
+    IF ns = NIL THEN LogErr.Error("out of memory (NE link state)"); RETURN END
+  ELSE
+    IF ms = NIL THEN LogErr.Error("out of memory (MZ link state)"); RETURN END
+  END;
   Link.InitState(ls);
-  LinkMZ.InitState(ms);
-  ms^.genDebug := genDebug;   (* /G: emit the TDS debug block into the .exe *)
+  IF targetCP THEN
+    LinkNE.InitState(ns);
+    LinkNE.SetModName(ns, outExe)
+  ELSE
+    LinkMZ.InitState(ms);
+    ms^.genDebug := genDebug   (* /G: emit the TDS debug block into the .exe *)
+  END;
   IF ~Link.ReserveBuffers(ls) THEN
     Link.LinkFree(ls); DISPOSE(ls); RETURN   (* LogErr latched by ReserveBuffers *)
   END;
@@ -838,15 +847,25 @@ BEGIN
   LeakGuard(memBefore, "link", " in CalculateLayout");
   DbgMemSize("Linker, after calculate layouts.");
   memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN LinkMZ.PerformLinking(ls, ms) END;
-  DbgMemSize("Linker, after linking, before write .exe");
-  memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN LinkMZ.WriteExe(ls, ms, outExe) END;
-  LeakGuard(memBefore, "link", " in WriteExe");
-  LinkMZ.LinkFree(ms);
+  IF targetCP THEN
+    IF ~LogErr.HaveErr() THEN LinkNE.BuildSegTable(ls, ns) END;
+    IF ~LogErr.HaveErr() THEN LinkNE.PerformLinking(ls, ns) END;
+    DbgMemSize("Linker, after linking, before write .exe");
+    memBefore := SYSTEM.MemAvail();
+    IF ~LogErr.HaveErr() THEN LinkNE.WriteExe(ls, ns, outExe) END;
+    LeakGuard(memBefore, "link", " in WriteExe");
+    LinkNE.LinkFree(ns)
+  ELSE
+    IF ~LogErr.HaveErr() THEN LinkMZ.PerformLinking(ls, ms) END;
+    DbgMemSize("Linker, after linking, before write .exe");
+    memBefore := SYSTEM.MemAvail();
+    IF ~LogErr.HaveErr() THEN LinkMZ.WriteExe(ls, ms, outExe) END;
+    LeakGuard(memBefore, "link", " in WriteExe");
+    LinkMZ.LinkFree(ms)
+  END;
   Link.LinkFree(ls);
   DISPOSE(ls);
-  DISPOSE(ms);
+  IF targetCP THEN DISPOSE(ns) ELSE DISPOSE(ms) END;
   IF LogErr.HaveErr() THEN
     Files.Delete(outExe)    (* never leave a half-written .exe behind *)
   END
@@ -892,7 +911,7 @@ PROCEDURE RunBody(): INTEGER;
       outExe:  ARRAY 128 OF CHAR;
       entryProc: ARRAY NameLen OF CHAR;
       logLevel: ARRAY NameLen OF CHAR;
-      hasEntry, hasSystem, force, genDbg: BOOLEAN;
+      hasEntry, hasSystem, force, genDbg, targetCP: BOOLEAN;
       stem: ARRAY NameLen OF CHAR;
       omPath: ARRAY MaxPath OF CHAR;
       memBefore, k: WORD;
@@ -902,7 +921,7 @@ BEGIN
   IF argc < 1 THEN
     Out.String("Trubo Oberon (c) 2026 DosWorld, Public domain (unlicense)"); Out.Ln;
     Out.Ln;
-    Out.String("usage: TOC [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <file.Mod>"); Out.Ln;
+    Out.String("usage: TOC [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] [/LOG=level] <file.Mod>"); Out.Ln;
     Out.String("  /ENTRY=Proc  compile + link: build <file.Mod> and all its"); Out.Ln;
     Out.String("               imports, then link an .EXE whose entry point"); Out.Ln;
     Out.String("               calls the exported procedure Proc. Without"); Out.Ln;
@@ -917,6 +936,8 @@ BEGIN
     Out.String("  /G           append a Turbo-Debugger (TDS/TDINFO) debug-info"); Out.Ln;
     Out.String("               block to the linked .EXE, merged from every"); Out.Ln;
     Out.String("               module compiled with (*$D+*). Requires /ENTRY=."); Out.Ln;
+    Out.String("  /CD          DOS real-mode MZ .EXE output (default)."); Out.Ln;
+    Out.String("  /CP          protected-mode New Executable (NE) output."); Out.Ln;
     Out.String("  /LOG=level   set diagnostic verbosity: debug, info (default),"); Out.Ln;
     Out.String("               warn, or error. Case-insensitive."); Out.Ln;
     LogErr.Error("missing <file.Mod> argument");
@@ -925,6 +946,7 @@ BEGIN
 
   srcFile[0] := 0X; outExe[0] := 0X; entryProc[0] := 0X;
   hasEntry := FALSE; hasSystem := FALSE; force := FALSE; genDbg := FALSE;
+  targetCP := FALSE;
   i := 1;
   WHILE i <= argc DO
     Dos.ParamStr(i, arg);
@@ -945,6 +967,10 @@ BEGIN
       force := TRUE
     ELSIF Strings.EqualICase(arg, "/G") THEN
       genDbg := TRUE
+    ELSIF Strings.EqualICase(arg, "/CD") THEN
+      targetCP := FALSE
+    ELSIF Strings.EqualICase(arg, "/CP") THEN
+      targetCP := TRUE
     ELSIF (arg[0] # "/") & (arg[0] # "-") THEN
       IF srcFile[0] = 0X THEN Strings.Copy(arg, srcFile) END
     ELSE
@@ -1030,8 +1056,12 @@ BEGIN
      gModFile (never in the heap), so the arena is contiguous for the linker's
      code-group buffer — no defrag round-trip is needed. *)
   IF hasEntry THEN
+    IF targetCP & genDbg THEN
+      LogErr.Error("oc: /G (debug info) is not supported with /CP (NE target)");
+      RETURN 1
+    END;
     memBefore := SYSTEM.MemAvail();
-    LinkAll(outExe, genDbg);
+    LinkAll(outExe, genDbg, targetCP);
     FreeMods;             (* close + delete the module-graph temp after linking *)
     (* LinkAll's own symbol table now interns names via StrTab (LINK.MOD's
        SymRec.nameId refactor) — those names are never referenced again once

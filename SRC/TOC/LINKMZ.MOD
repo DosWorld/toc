@@ -654,24 +654,10 @@ END WriteDebugInfo;
 (* Copy n bytes of the linked code image from the spill file into fout, then
    close (and so delete) the spill file.  The spill file is the one opened in
    Link.PerformLinking and left open + rewound; it is never reopened by name.
-   Uses a fixed 512-byte stack buffer — no large heap. *)
+   The chunked copy itself lives in Link.CopySpan (shared with LinkNE). *)
 PROCEDURE CopyCodeImage(ls: Link.State; VAR fout: Files.File; n: LONGINT);
-  VAR buf: ARRAY 512 OF BYTE;
-      left: LONGINT; chunk, got, i: WORD;
 BEGIN
-  IF n <= LONGINT(0) THEN Files.Close(ls^.spillFile); RETURN END;
-  left := n;
-  WHILE left > LONGINT(0) DO
-    IF left > LONGINT(512) THEN chunk := 512 ELSE chunk := WORD(left) END;
-    got := Files.BlockRead(ls^.spillFile, buf[0], chunk);
-    (* The spill file may be a few bytes short of the 16-aligned code image
-       (final group's trailing alignment).  Zero-fill any tail beyond EOF. *)
-    i := got; WHILE i < chunk DO buf[i] := BYTE(0); INC(i) END;
-    IF Files.BlockWrite(fout, buf[0], chunk) # chunk THEN
-      Files.Close(ls^.spillFile); LogErr.Error("Write error (code)")
-    END;
-    left := left - LONGINT(chunk)
-  END;
+  IF n > LONGINT(0) THEN Link.CopySpan(ls^.spillFile, fout, n) END;
   Files.Close(ls^.spillFile)   (* delete-on-close removes LNKCODE.TMP *)
 END CopyCodeImage;
 

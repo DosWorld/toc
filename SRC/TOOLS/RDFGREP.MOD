@@ -108,6 +108,12 @@ BEGIN
   Out.String("  mz-min-alloc      FILE.EXE VALUE       MZ min_alloc word at offset 10 == VALUE"); Out.Ln;
   Out.String("  mz-max-alloc      FILE.EXE VALUE       MZ max_alloc word at offset 12 == VALUE"); Out.Ln;
   Out.Ln;
+  Out.String("NE EXE inspection (offsets relative to e_lfanew):"); Out.Ln;
+  Out.String("  ne-signature      FILE.EXE            'NE' signature at e_lfanew"); Out.Ln;
+  Out.String("  ne-seg-count      FILE.EXE VALUE      NE segment count (ofs 1Ch) == VALUE"); Out.Ln;
+  Out.String("  ne-entry-seg      FILE.EXE VALUE      NE entry CS seg idx (ofs 16h) == VALUE"); Out.Ln;
+  Out.String("  ne-word-at        FILE.EXE OFS VALUE  NE WORD at NE+OFS (decimal) == VALUE"); Out.Ln;
+  Out.Ln;
   Out.String("Exit codes: 0=match  1=no-match  2=usage  3=I/O"); Out.Ln;
   Halt(ExitUsage)
 END Usage;
@@ -490,6 +496,39 @@ PROCEDURE mzMaxAlloc(path: ARRAY OF CHAR; VAR v: INTEGER): BOOLEAN;
 BEGIN RETURN mzWordAt(path, LONGINT(12), v)
 END mzMaxAlloc;
 
+(* ---- NE (New Executable) inspection ----
+   An NE file's outer envelope is an MZ; e_lfanew (MZ offset 3Ch, a DWORD)
+   points at the NE header.  neBase reads that pointer. *)
+PROCEDURE neBase(path: ARRAY OF CHAR; VAR base: LONGINT): BOOLEAN;
+  VAR f: Files.File; b: ARRAY 4 OF BYTE; n: INTEGER;
+BEGIN
+  IF ~Files.Reset(f, path) THEN RETURN FALSE END;
+  Files.Seek(f, LONGINT(3CH));
+  n := Files.BlockRead(f, b[0], 4);
+  Files.Close(f);
+  IF n # 4 THEN RETURN FALSE END;
+  base := SYSTEM.IOR(SYSTEM.IOR(LONGINT(b[0]), SYSTEM.LSL(LONGINT(b[1]), 8)),
+                     SYSTEM.IOR(SYSTEM.LSL(LONGINT(b[2]), 16), SYSTEM.LSL(LONGINT(b[3]), 24)));
+  RETURN TRUE
+END neBase;
+
+(* TRUE if the two bytes at e_lfanew are "NE". *)
+PROCEDURE neSignature(path: ARRAY OF CHAR): BOOLEAN;
+  VAR base: LONGINT; sig: INTEGER;
+BEGIN
+  IF ~neBase(path, base) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base, sig) THEN RETURN FALSE END;
+  RETURN sig = 454EH   (* 'N'(4E) low, 'E'(45) high *)
+END neSignature;
+
+(* Read a WORD at NE-header-relative offset `ofs`. *)
+PROCEDURE neWordAt(path: ARRAY OF CHAR; ofs: LONGINT; VAR v: INTEGER): BOOLEAN;
+  VAR base: LONGINT;
+BEGIN
+  IF ~neBase(path, base) THEN RETURN FALSE END;
+  RETURN mzWordAt(path, base + ofs, v)
+END neWordAt;
+
 (* ---- make-stub: write a tiny .om containing one .DEF member ---- *)
 
 (* Slurp up to LEN(bytes) bytes from `path` into `bytes`.  Returns the byte
@@ -737,6 +776,31 @@ BEGIN
     (* file = OUT.OM, a1 = MODNAME, a2 = optional DEFTEXT *)
     makeStub(file, a1, a2);
     Halt(ExitMatch)
+
+  ELSIF Strings.Equal(cmd, "ne-signature") THEN
+    IF neSignature(file) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-seg-count") THEN
+    (* segment count is a WORD at NE header offset 1Ch *)
+    IF ~getArg(3, a1) THEN Usage END;
+    IF ~neWordAt(file, LONGINT(1CH), spVal) THEN Halt(ExitIo) END;
+    lval := SYSTEM.AND(LONGINT(spVal), LONGINT(0FFFFH));
+    IF lval = parseInt(a1) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-entry-seg") THEN
+    (* entry-point CS (1-based NE segment index) is a WORD at NE offset 16h *)
+    IF ~getArg(3, a1) THEN Usage END;
+    IF ~neWordAt(file, LONGINT(16H), spVal) THEN Halt(ExitIo) END;
+    lval := SYSTEM.AND(LONGINT(spVal), LONGINT(0FFFFH));
+    IF lval = parseInt(a1) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-word-at") THEN
+    (* generic: a1 = NE-relative byte offset (decimal), a2 = expected WORD *)
+    IF ~getArg(3, a1) THEN Usage END;
+    IF ~getArg(4, a2) THEN Usage END;
+    IF ~neWordAt(file, parseInt(a1), spVal) THEN Halt(ExitIo) END;
+    lval := SYSTEM.AND(LONGINT(spVal), LONGINT(0FFFFH));
+    IF lval = parseInt(a2) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
 
   ELSE
     Out.String("rdfgrep: unknown subcommand: "); Out.String(cmd); Out.Ln;

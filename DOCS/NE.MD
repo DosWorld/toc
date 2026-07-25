@@ -1,5 +1,14 @@
 ### New Executable (NE) File Format Specification
 
+> **Toolchain scope note.** `SRC/TOC/LINKNE.MOD` (the `/CP` target) implements
+> only the subset needed to emit a runnable single-module NE: entry point,
+> per-segment relocations, and heap/stack settings.  Import/export symbol
+> tables (Module Reference / Imported Names / exported Entry-Table bits /
+> nonresident names) and the Resource Table are **out of scope** — the linker
+> resolves every Oberon `IMPORT` into one flat image well before the NE header
+> is written, exactly as the MZ (`/CD`) target does.  See
+> [NE-PLAN.MD](NE-PLAN.MD) for the full design and rationale.
+
 #### 1. Overview
 
 The New Executable (NE) format is a segmented executable file format used by 16-bit Windows, OS/2 1.x, and other environments. An NE file is embedded within a standard DOS MZ executable. The MZ header's `e_lfanew` field (offset 3Ch) points to the start of the NE header. The MZ stub typically displays a message like "This program requires Microsoft Windows." when run under DOS.

@@ -13,10 +13,10 @@
 #   make          — compile all modules + link tasm.exe (auto-named TASM.exe)
 #   make install  — copy TASM.exe to BIN/TASM.EXE
 #   make clean    — remove .om files, TASM.exe, and local setup files
-
-BIN_TOC  = ../../BIN/TOC.EXE
-BIN_OM   = ../../BIN/OBERON.OM
-BIN_TRUBO_OM = ../../BIN/TRUBO.OM
+BIN_DIR  = ../../BIN
+BIN_TOC  = $(BIN_DIR)/TOC.EXE
+BIN_OM   = $(BIN_DIR)/OBERON.OM
+BIN_TRUBO_OM = $(BIN_DIR)/TRUBO.OM
 XT       = xt
 
 # No -c: xt uses process CWD (SRC/TASM/) as the C:\ mount root, matching
@@ -46,8 +46,8 @@ TASM.EXE: $(TASM_SRCS) $(TOC) OBERON.OM TRUBO.OM
 	time $(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /ENTRY=Run TASM.MOD /M
 
 install: TASM.EXE
-	mkdir -p ../../BIN
-	cp TASM.EXE ../../BIN/TASM.EXE
+	mkdir -p $(BIN_DIR)
+	cp TASM.EXE $(BIN_DIR)/TASM.EXE
 
 clean:
 	rm -f *.OM *.EXE OUTPUT.LOG

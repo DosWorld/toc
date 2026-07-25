@@ -910,6 +910,24 @@ self-host 13/0 byte-identical + 0 leaks.
 > mis-addressing failure is specific to `SYSTEM.FILL` on a far/heap
 > destination, not to `SYSTEM.FILL` in general.
 
+**Free the 65 KB code buffer the moment module streaming ends (before the .exe
+write).**  `ls^.codeBuf` (`Rdoff.SegBuf`, 65000 bytes) is used only inside
+`Link.PerformLinking`'s per-module streaming loop — `LinkMZ.WriteExe` /
+`LinkNE.WriteExe` copy from the spill file and never touch `codeBuf`.  So
+`PerformLinking` `DISPOSE`s it (and nulls it — `LinkFree`'s NIL guard makes the
+later dispose a no-op) right after the loop, **before** the .exe write.  The
+.exe write is the link's tightest memory point (spill + data temp still open,
+symbol table + module graph still resident), so releasing 65 KB there is a
+material peak-memory win (measured: TASM's build min-free rose from 131 KB to
+159 KB at the tightest point).  This is what lets the ~10 KB-larger
+NE-capable compiler still self-host and build the tool chain at the same DOS
+budget.  A companion lever: a build-driver main (`TOC.MOD`) sets `$M`'s
+**min-heap** field only as high as its real peak needs — the min is a load-time
+*floor gate* (`SYSTEM_INIT` rejects a load with less free), NOT the heap size
+(the heap is always `min(free, max)`), so an over-high min needlessly refuses
+otherwise-workable low-memory loads.  `TOC.MOD` uses `(*$M 26000, 160000,
+650000*)`.
+
 **Dead ends (reverted — do not retry blindly):**
 - *Rdoff alloc-chain* (`allocNext` on `RelocNode`/`ImportNode` so `RdfFree` could
   free `SanitizeImports` orphans without mid-compile `DISPOSE`): +4 bytes/node ×

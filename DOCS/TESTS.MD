@@ -177,6 +177,10 @@ Supported EXPECT predicates:
 | `errorlevel` | compile + link (via `toc.exe /ENTRY=`) + run; `.exe` must exit with value `arg` |
 | `mz-sp` | linked `.exe` must have SP field = `arg` in MZ header |
 | `mz-min-alloc` / `mz-max-alloc` | linked `.exe` must have min/max\_alloc = `arg` paragraphs |
+| `ne-signature` | `/CP`-linked `.exe` must carry the `NE` signature at `e_lfanew` |
+| `ne-seg-count` | NE segment count (header offset 1Ch) must equal `arg` |
+| `ne-entry-seg` | NE entry-point CS segment index (header offset 16h) must equal `arg` |
+| `ne-word-at` | NE header WORD at offset `OFS` (decimal) must equal `VALUE` (arg = `OFS VALUE`) |
 | `compile-fails` | (when `oc-flags` column is `fails`) — compile must exit non-zero |
 
 Test categories currently covered (selection):

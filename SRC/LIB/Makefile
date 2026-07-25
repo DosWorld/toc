@@ -1,5 +1,7 @@
-BOOT_OC = ../../BOOT/TOC.EXE
-BOOT_TASM = ../../BOOT/TASM.EXE
+BOOT_DIR = ../../BOOT
+BIN_DIR = ../../BIN
+BOOT_OC = $(BOOT_DIR)/TOC.EXE
+BOOT_TASM = $(BOOT_DIR)/TASM.EXE
 OC = TOC.EXE
 OCFLAGS = /LOG=debug
 XT      = xt
@@ -19,11 +21,11 @@ STDLIB_OMS = SYSTEM.OM OUT.OM OUT87.OM IN.OM STRINGS.OM FILES.OM \
 all: $(STDLIB_OMS)
 
 install: all
-	cp ../../BOOT/TOLIB.EXE TOLIB.EXE
+	cp $(BOOT_DIR)/TOLIB.EXE TOLIB.EXE
 	ls *.OM 2>/dev/null | grep -iv "OBERON\|TOLIB\|TOC\.EXE" > oberon.lst
 	$(XTRUN) TOLIB.EXE merge OBERON.OM @oberon.lst
-	mkdir -p ../../BIN
-	cp OBERON.OM ../../BIN/OBERON.OM
+	mkdir -p $(BIN_DIR)
+	cp OBERON.OM $(BIN_DIR)/OBERON.OM
 	rm -f oberon.lst
 
 $(OC): $(BOOT_OC)

@@ -37,7 +37,7 @@ tlink: lib toc trubo
 # ── Auxiliary tools → BIN/ ───────────────────────────────────────────────
 # RDFGREP.EXE, TESTALL.EXE, TDINFO.EXE, TOSTRIP.EXE and TOLIB.EXE are all
 # compiled by BIN/TOC.EXE.
-tools: toc trubo
+tools: lib toc trubo
 	$(MAKE) -C SRC/TOOLS clean
 	$(MAKE) -C SRC/TOOLS install
 
@@ -64,5 +64,3 @@ clean:
 	$(MAKE) -C SRC/TASM clean
 	$(MAKE) -C SRC/TLINK clean
 	$(MAKE) -C SRC/TOOLS clean
-	rm -f BIN/OBERON.OM
-	rm -f BIN/TOC.EXE BIN/TOLIB.EXE BIN/RDFGREP.EXE BIN/TESTALL.EXE BIN/TDINFO.EXE BIN/TOSTRIP.EXE

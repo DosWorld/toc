@@ -51,7 +51,7 @@ XTRUN  = $(XT) run --max=40000000000 --memkb=544
 # path every other stdlib import already takes during self-host).
 OC_SRCS = \
     SCAN.MOD SYMS.MOD CGEN.MOD DEF.MOD IMPORT.MOD \
-    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD LINKMZ.MOD TOC.MOD
+    PEXPR.MOD PSTMT.MOD PARSER.MOD LINK.MOD LINKMZ.MOD LINKNE.MOD TOC.MOD
 # STRTAB.MOD
 
 all: TOC.EXE
@@ -77,7 +77,7 @@ TOC.EXE: $(OC_SRCS) $(TOC) $(OBERON_ON) $(TRUBO_OM) STUB.RDF
 	time $(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) /LOG=debug /ENTRY=Run TOC.MOD /M
 
 install: TOC.EXE
-	mkdir -p ../../BIN
+	mkdir -p $(BIN_DIR)
 	cp TOC.EXE $(BIN_TOC)
 
 clean:

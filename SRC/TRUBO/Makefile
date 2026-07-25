@@ -8,12 +8,13 @@
 #   make          — compile all modules + link toc.exe (auto-named TOC.exe)
 #   make install  — copy TOC.exe to BIN/TOC.EXE
 #   make clean    — remove .om files, TOC.exe, and local setup files
+BIN_DIR  = ../../BIN
+BOOT_DIR = ../../BOOT
+BOOT_TOC = $(BOOT_DIR)/TOC.EXE
+BIN_OM   = $(BIN_DIR)/OBERON.OM
+BOOT_TOLIB  = $(BOOT_DIR)/TOLIB.EXE
 
-BOOT_TOC  = ../../BOOT/TOC.EXE
-BIN_OM   = ../../BIN/OBERON.OM
 XT       = xt
-
-BOOT_TOLIB  = ../../BOOT/TOLIB.EXE
 
 # No -c: xt uses process CWD (SRC/TOC/) as the C:\ mount root, so the stdlib
 # OBERON.OM (which lives OUTSIDE this dir, in BIN/) is not reachable via a DOS
@@ -68,8 +69,8 @@ TRUBO.OM: $(TRUBO_SRCS) $(TOC) $(TOLIB) OBERON.OM
 	$(XTRUN) $(TOLIB) merge TRUBO.OM LOGERR.OM STRTAB.OM RDOFF.OM TAR.OM
 
 install: TRUBO.OM
-	mkdir -p ../../BIN
-	cp TRUBO.OM ../../BIN/TRUBO.OM
+	mkdir -p $(BIN_DIR)
+	cp TRUBO.OM $(BIN_DIR)/TRUBO.OM
 
 clean:
 	rm -f *.OM *.EXE OUTPUT.LOG

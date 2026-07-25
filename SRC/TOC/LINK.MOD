@@ -871,6 +871,27 @@ BEGIN
   END
 END WriteZeros;
 
+(* Copy n bytes from src (positioned/seekable) into dst via a fixed 512-byte
+   stack buffer (no large heap).  Zero-fills any tail beyond src EOF — a spill
+   file may be a few bytes short of the 16-aligned image (final segment's
+   trailing alignment).  Shared by LinkMZ (code-image copy) and LinkNE
+   (per-segment code/data copy). *)
+PROCEDURE CopySpan*(VAR src, dst: Files.File; n: LONGINT);
+  VAR buf: ARRAY 512 OF BYTE;
+      left: LONGINT; chunk, got, i: WORD;
+BEGIN
+  left := n;
+  WHILE left > LONGINT(0) DO
+    IF left > LONGINT(512) THEN chunk := 512 ELSE chunk := WORD(left) END;
+    got := Files.BlockRead(src, buf[0], chunk);
+    i := got; WHILE i < chunk DO buf[i] := BYTE(0); INC(i) END;
+    IF Files.BlockWrite(dst, buf[0], chunk) # chunk THEN
+      LogErr.Error("Write error (segment)")
+    END;
+    left := left - LONGINT(chunk)
+  END
+END CopySpan;
+
 (* Process one module's own CODE segment: load its code into the reusable
    scratch buffer, apply its relocations (RELOC + SEGRELOC, via the
    target-specific segRelocProc callback), spill the relocated bytes to the
@@ -966,6 +987,13 @@ BEGIN
   (* Rewind for reading — keep the file open; closing now would destroy its
      content (delete-on-close) before CopyCodeImage can read it. *)
   Files.Seek(ls^.spillFile, LONGINT(0));
+
+  (* The 65000-byte per-module code buffer is finished the moment the streaming
+     loop above ends — WriteExe/CopyCodeImage read only the spill file, never
+     codeBuf.  Release it NOW (not in LinkFree) so its 65 KB is free during the
+     .exe write, which is the link's tightest memory point (LinkFree's NIL
+     guard makes the later dispose a no-op). *)
+  IF ls^.codeBuf # NIL THEN DISPOSE(ls^.codeBuf); ls^.codeBuf := NIL END;
 
   (* Resolve entry point: "start" lives at offset SymOffset within its own
      module's own CODE segment (codePara), no group-relative math needed. *)
