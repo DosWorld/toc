@@ -1831,12 +1831,31 @@ Rules applied at each call (`parse_actual_params` → `check_param_compat`):
   with CHAR / BYTE formals, ARRAY OF CHAR string literals are compatible
   with `ARRAY OF CHAR` / `ARRAY OF BYTE` formals, REAL widens to
   LONGREAL at the call boundary.
+- Cross-module **`POINTER TO ARRAY`** (2026-07-29): a `POINTER TO ARRAY N OF T`
+  used as a parameter (VAR **or** by-value) across a `.def` boundary now binds
+  via structural equality of the pointer base, exactly like `POINTER TO RECORD`
+  already did — each module re-elaborates the imported type into its own
+  `TypeDesc`, so pointer-identity alone spuriously rejected them.
+  (`TypeStructEq` now recurses through array/pointer bases and is consulted by
+  both `TypeParamCompat`'s VAR path and `TypeAssignCompat`'s by-value pointer
+  path.)  This removed a former workaround where a bare `POINTER TO ARRAY` had
+  to be wrapped in a one-field record to pass across three modules.
 - Skipped: typeless VAR formal accepts any actual by design.
 
 Without this check the compiler would silently push the wrong byte
 count onto the stack (e.g. pushing a 4-byte REAL where the callee
 reads 2 bytes as INTEGER), corrupting subsequent params and any frame
 above.  Same risk for VAR-by-alias mismatches.
+
+**VAR named-fixed-array-alias forwarding (2026-07-29).** A `VAR` parameter typed
+via a *named* fixed-size array alias (`TYPE Str33 = ARRAY 33 OF CHAR;
+PROCEDURE P(VAR s: Str33)`) that is re-passed to an **open-array** formal (e.g.
+`Out.String(s)`) previously pushed the *address of the parameter's far-pointer
+slot* instead of dereferencing it — prepending garbage bytes before the real
+data.  Fixed in `PEXPR.MOD`: the "local fixed array by value" push branch is now
+gated on `~arg.isRef`, so a VAR-param reference forwards its far pointer
+correctly.  Both the named-alias and the inline `VAR s: ARRAY OF CHAR` spellings
+now behave identically.
 
 ### Cross-family numeric assignment (int ↔ float)
 

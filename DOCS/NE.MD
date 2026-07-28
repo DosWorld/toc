@@ -1,13 +1,8 @@
 ### New Executable (NE) File Format Specification
 
-> **Toolchain scope note.** `SRC/TOC/LINKNE.MOD` (the `/CP` target) implements
-> only the subset needed to emit a runnable single-module NE: entry point,
-> per-segment relocations, and heap/stack settings.  Import/export symbol
-> tables (Module Reference / Imported Names / exported Entry-Table bits /
-> nonresident names) and the Resource Table are **out of scope** — the linker
-> resolves every Oberon `IMPORT` into one flat image well before the NE header
-> is written, exactly as the MZ (`/CD`) target does.  See
-> [NE-PLAN.MD](NE-PLAN.MD) for the full design and rationale.
+> **STRONG RULE: DOCS/NE.MD IS A READ-ONLY FILE.** This is an authoritative
+> format specification. Do NOT edit, rewrite, or "align" it to any
+> implementation or reference file. It is reference material only.
 
 #### 1. Overview
 

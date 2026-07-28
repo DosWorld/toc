@@ -519,6 +519,12 @@ PROCEDURE MarkModule(m: Module); FORWARD;
 PROCEDURE OnImportForMark(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
   VAR sym: Symbol; n: MarkNode;
 BEGIN
+  (* KERNEL_INITTASK is the /CP entry stub's genuine OS/2 external import (the
+     kernel task-init far call); it is resolved by the OS/2 loader via the NE
+     module-reference table, NOT by us — LinkNE emits an external NE reloc for
+     it (see LINKNE.OnSegReloc).  It has no linked symbol, so it is not an
+     "unresolved external" error and pulls in no dependency module. *)
+  IF Strings.Equal(name, "KERNEL_INITTASK") THEN RETURN END;
   sym := FindSymbol(markLs, name);
   IF sym = NoSym THEN
     Strings.Copy("Unresolved external: ", markErrbuf);
@@ -780,6 +786,42 @@ BEGIN RETURN WORD(rofs) END PatchCodeAddrOf;
 PROCEDURE DataFileOffsetOf*(ls: State; m: Module; rofs: LONGINT): LONGINT;
 BEGIN RETURN DataFileBase(ls, m) + rofs END DataFileOffsetOf;
 
+(* Read the WORD currently at a reloc site (rseg, rofs).  For a self-CODE/DATA
+   reference the compiler already baked the real in-segment offset into the
+   operand; LinkNE reads it (for the NE reloc's target-offset) before stamping
+   the FFFF placeholder over it (see LINKNE / NE-PLAN.MD §4). *)
+PROCEDURE ReadSiteWord*(rseg: INTEGER; rofs: LONGINT): WORD;
+  VAR o: WORD; lo, hi: BYTE; addr: LONGINT;
+BEGIN
+  IF rseg = Rdoff.SegCode THEN
+    o := WORD(rofs);
+    RETURN WORD(INTEGER(lnkCodeBuf^[o]) + SYSTEM.LSL(INTEGER(lnkCodeBuf^[o+1]), 8))
+  ELSE
+    addr := DataFileOffsetOf(lnkLs, lnkMod, rofs);
+    Files.Seek(lnkLs^.dataFile, addr);
+    Files.ReadByte(lnkLs^.dataFile, lo); Files.ReadByte(lnkLs^.dataFile, hi);
+    RETURN WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8))
+  END
+END ReadSiteWord;
+
+(* Force-write a WORD at a reloc site (rseg, rofs), REPLACING (not adding).
+   LinkNE stamps the BPC-reference FFFF / 0000 reloc placeholder for /CP so the
+   loader writes the real value at load time (NE-PLAN.MD §4). *)
+PROCEDURE WriteSiteWord*(rseg: INTEGER; rofs: LONGINT; val: WORD);
+  VAR o: WORD; addr: LONGINT;
+BEGIN
+  IF rseg = Rdoff.SegCode THEN
+    o := WORD(rofs);
+    lnkCodeBuf^[o]   := BYTE(SYSTEM.AND(val, 0FFH));
+    lnkCodeBuf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(val, 8), 0FFH))
+  ELSE
+    addr := DataFileOffsetOf(lnkLs, lnkMod, rofs);
+    Files.Seek(lnkLs^.dataFile, addr);
+    Files.WriteByte(lnkLs^.dataFile, BYTE(SYSTEM.AND(val, 0FFH)));
+    Files.WriteByte(lnkLs^.dataFile, BYTE(SYSTEM.AND(SYSTEM.LSR(val, 8), 0FFH)))
+  END
+END WriteSiteWord;
+
 (* RDOFF2's RELOC record carries only the PATCH SITE's own offset (rofs) —
    the target's location is never a second field; the assembler/codegen
    pre-bakes the addend (target's own in-segment offset, or a negative
@@ -807,7 +849,13 @@ BEGIN RETURN DataFileBase(ls, m) + rofs END DataFileOffsetOf;
        reference (an exported, cross-module-callable proc is always FAR =
        absolute), never an import — so the import branch below is always
        absolute. *)
-PROCEDURE OnReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
+(* Compute the in-segment fixup value a RELOC resolves to (the value OnReloc
+   bakes into the site), WITHOUT patching anything.  LinkNE uses this to obtain
+   the real target offset for an NE OFFS/PTR reloc record while leaving the file
+   site as its placeholder (the NE loader writes the value at load time — see
+   NE-PLAN.MD §4).  Absolute fixups (rrel = 0) return the target's in-segment
+   offset; IP-relative fixups (rrel # 0) return the PC-relative displacement. *)
+PROCEDURE OnReloc*(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                   rrefSeg: INTEGER; rrel: INTEGER); FAR;
   VAR sym: Symbol; so: Module;
       fixup: WORD;      (* an absolute in-segment offset: 0..65535 -> WORD, not INTEGER *)
@@ -871,27 +919,6 @@ BEGIN
   END
 END WriteZeros;
 
-(* Copy n bytes from src (positioned/seekable) into dst via a fixed 512-byte
-   stack buffer (no large heap).  Zero-fills any tail beyond src EOF — a spill
-   file may be a few bytes short of the 16-aligned image (final segment's
-   trailing alignment).  Shared by LinkMZ (code-image copy) and LinkNE
-   (per-segment code/data copy). *)
-PROCEDURE CopySpan*(VAR src, dst: Files.File; n: LONGINT);
-  VAR buf: ARRAY 512 OF BYTE;
-      left: LONGINT; chunk, got, i: WORD;
-BEGIN
-  left := n;
-  WHILE left > LONGINT(0) DO
-    IF left > LONGINT(512) THEN chunk := 512 ELSE chunk := WORD(left) END;
-    got := Files.BlockRead(src, buf[0], chunk);
-    i := got; WHILE i < chunk DO buf[i] := BYTE(0); INC(i) END;
-    IF Files.BlockWrite(dst, buf[0], chunk) # chunk THEN
-      LogErr.Error("Write error (segment)")
-    END;
-    left := left - LONGINT(chunk)
-  END
-END CopySpan;
-
 (* Process one module's own CODE segment: load its code into the reusable
    scratch buffer, apply its relocations (RELOC + SEGRELOC, via the
    target-specific segRelocProc callback), spill the relocated bytes to the
@@ -905,7 +932,7 @@ END CopySpan;
    seek-past-EOF zero-filling (which xt's DOS does not do).  pos is advanced
    past the module afterward. *)
 PROCEDURE ProcessModule(ls: State; m: Module; VAR ftmp: Files.File;
-                        VAR pos: LONGINT; segRelocProc: Rdoff.RelocProc);
+                        VAR pos: LONGINT; onRelocProc, segRelocProc: Rdoff.RelocProc);
   VAR sz, k: WORD; codeStart: LONGINT;
       padBuf: ARRAY 16 OF BYTE; padLen: WORD;
 BEGIN
@@ -936,8 +963,10 @@ BEGIN
   FreeImports;
   (* Pass 1: collect IMPORT records first (RELOCs may precede them). *)
   Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, OnImportForLink, NIL, NIL);
-  (* Pass 2: apply RELOC and SEGRELOC records. *)
-  Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, NIL, OnReloc, segRelocProc);
+  (* Pass 2: apply RELOC and SEGRELOC records.  onRelocProc handles RELOC
+     (offset) fixups — LinkMZ passes Link.OnReloc (pre-bake only); LinkNE
+     passes its own (pre-bake + record an NE OFFS/PTR reloc). *)
+  Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, NIL, onRelocProc, segRelocProc);
   FreeImports;   (* release this module's IMPORT chain *)
 
   (* spill the relocated module sequentially *)
@@ -947,7 +976,7 @@ BEGIN
   pos := pos + LONGINT(sz)
 END ProcessModule;
 
-PROCEDURE PerformLinking*(ls: State; segRelocProc: Rdoff.RelocProc);
+PROCEDURE PerformLinking*(ls: State; onRelocProc, segRelocProc: Rdoff.RelocProc);
   VAR m, eso: Module; esym: Symbol; sz, pos: LONGINT;
 BEGIN
   (* Combined DATA image (every used module's own DATA segment, back-to-
@@ -981,9 +1010,17 @@ BEGIN
   pos := LONGINT(0);
   m := ls^.modHead;
   WHILE (m # NIL) & ~LogErr.HaveErr() DO
-    IF m^.used THEN ProcessModule(ls, m, ls^.spillFile, pos, segRelocProc) END;
+    IF m^.used THEN ProcessModule(ls, m, ls^.spillFile, pos, onRelocProc, segRelocProc) END;
     m := m^.next
   END;
+  (* Pad the spill up to totalCodeLen: the last module's code ends at `pos`
+     (its own bytes, NOT rounded up), but totalCodeLen = Align16(codeBase)
+     includes the final 16-alignment gap.  CopyCodeImage copies exactly
+     totalCodeLen bytes, and the MZ header (pageCnt/partPage) is computed from
+     totalCodeLen+totalDataLen — so without this pad the file is up to 15 bytes
+     SHORT of the size the header declares, and the program reads past its own
+     loaded image at startup (xt "arraycopy out of bounds"). *)
+  IF pos < ls^.totalCodeLen THEN WriteZeros(ls^.spillFile, ls^.totalCodeLen - pos) END;
   (* Rewind for reading — keep the file open; closing now would destroy its
      content (delete-on-close) before CopyCodeImage can read it. *)
   Files.Seek(ls^.spillFile, LONGINT(0));

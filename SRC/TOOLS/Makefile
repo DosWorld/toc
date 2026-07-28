@@ -1,54 +1,54 @@
-BINDIR  = ../../BIN
-BIN_TOC = $(BINDIR)/TOC.EXE
-TESTDIR = ../../TESTS
-BIN_TRUBO_OM = $(BINDIR)/TRUBO.OM
-
-TOC = TOC.EXE
-XT  = xt
-
-XTRUN = $(XT) run --max=200000000
+PDIR      = ../..
+BIN_DIR   = $(PDIR)/BIN
+TESTDIR   = $(PDIR)/TESTS
+OBERON_OM = OBERON.OM
+TRUBO_OM  = TRUBO.OM
+TOC       = TOC.EXE
+TOC_OPTS  = /CD /LOG=debug
+XT        = xt
+XTRUN     = $(XT) run --max=200000000
 
 all: TOLIB.EXE TOSTRIP.EXE TDINFO.EXE TESTALL.EXE RDFGREP.EXE
 
-TRUBO.OM: $(BIN_TRUBO_OM)
-	cp $(BIN_TRUBO_OM) TRUBO.OM
+$(TRUBO_OM): $(BIN_DIR)/$(TRUBO_OM)
+	cp $(BIN_DIR)/$(TRUBO_OM) $(TRUBO_OM)
 
-OBERON.OM: $(BINDIR)/OBERON.OM
-	cp $(BINDIR)/OBERON.OM OBERON.OM
+$(OBERON_OM): $(BIN_DIR)/$(OBERON_OM)
+	cp $(BIN_DIR)/$(OBERON_OM) $(OBERON_OM)
 
-$(TOC): $(BIN_TOC)
-	cp $(BIN_TOC) $(TOC)
+$(TOC): $(BIN_DIR)/$(TOC)
+	cp $(BIN_DIR)/$(TOC) $(TOC)
 
 # ── rdfgrep ────────────────────────────────────────────────────────────
 # toc.exe auto-names the output from the module name: RDFGREP.MOD → RDFGREP.exe
 # With -c ../../, the file lands in the repo root; we then install it to BIN/.
-RDFGREP.EXE: RDFGREP.MOD $(TOC) OBERON.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /ENTRY=Run RDFGREP.MOD
+RDFGREP.EXE: RDFGREP.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) $(TOC_OPTS) /ENTRY=Run RDFGREP.MOD
 
 # ── testall ────────────────────────────────────────────────────────────
-TESTALL.EXE: TESTALL.MOD $(TOC) OBERON.OM TRUBO.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /ENTRY=Run TESTALL.MOD
+TESTALL.EXE: TESTALL.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) $(TOC_OPTS) /ENTRY=Run TESTALL.MOD
 
 # ── tdinfo ─────────────────────────────────────────────────────────────
 # TDS/TDINFO debug-block inspector (oracle for the /g debug-info feature).
-TDINFO.EXE: TDINFO.MOD $(TOC) OBERON.OM TRUBO.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TDINFO.MOD
+TDINFO.EXE: TDINFO.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) $(TOC_OPTS) /ENTRY=Run TDINFO.MOD
 
 # ── tostrip ────────────────────────────────────────────────────────────
 # Strips debug info from a linked .EXE (TDS/TDINFO block) or a compiler
 # .OM archive (zeros the .DBG member); format auto-detected from content.
-TOSTRIP.EXE: TOSTRIP.MOD $(TOC) OBERON.OM TRUBO.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TOSTRIP.MOD
+TOSTRIP.EXE: TOSTRIP.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) $(TOC_OPTS) /ENTRY=Run TOSTRIP.MOD
 
 # ── tolib ──────────────────────────────────────────────────────────────
 # .OM archive manager: list/extract/create/merge. Uses the shared Tar module.
-TOLIB.EXE: TOLIB.MOD $(TOC) OBERON.OM TRUBO.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TOLIB.MOD
+TOLIB.EXE: TOLIB.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) $(TOC_OPTS) /ENTRY=Run TOLIB.MOD
 
 install: TOLIB.EXE TOSTRIP.EXE TDINFO.EXE TESTALL.EXE RDFGREP.EXE
-	cp TOLIB.EXE TOSTRIP.EXE TDINFO.EXE TESTALL.EXE RDFGREP.EXE $(BINDIR)/
+	cp TOLIB.EXE TOSTRIP.EXE TDINFO.EXE TESTALL.EXE RDFGREP.EXE $(BIN_DIR)/
 
 clean:
-	rm -f *.EXE *.OM OUTPUT.LOG
+	rm -f *.EXE *.OM
 
 .PHONY: all clean

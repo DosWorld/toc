@@ -594,19 +594,16 @@ macro-recursion bombs are both fatal errors. `-Dname[=value]` CLI
 predefines apply once per `Assemble`, before Pass 1, via the same
 `Sym.Define` path a source-level `%define` uses.
 
-**Compiler limitation found while implementing `%macro`** (not fixed,
-worked around — see TASM.MD §I for the full writeup): `SRC/TOC/SYMS.MOD`'s
-`TypeParamCompat` (VAR-parameter type compatibility) has a structural-
-equality fallback for `POINTER TO RECORD` types re-elaborated
-independently by each importing module's own compile, but no equivalent
-fallback for `POINTER TO ARRAY` — passing a bare `POINTER TO ARRAY OF T`
-as a VAR parameter across a THREE-module chain (type declared in module
-A, used as a VAR param type in a procedure in module B, called from
-module C) fails with a spurious "type mismatch in actual parameter" even
-on a clean, non-stale build. Worked around in `Scan.MemText` by wrapping
-the array in a one-field `RECORD`. Real fix would be a `TFArray`-base
-branch in `TypeParamCompat`, left undone as out of scope for TASM
-feature work.
+**Compiler limitation found while implementing `%macro` — FIXED 2026-07-29.**
+`SRC/TOC/SYMS.MOD` had a structural-equality fallback for `POINTER TO RECORD`
+types re-elaborated independently by each importing module's own compile, but
+none for `POINTER TO ARRAY` — passing a bare `POINTER TO ARRAY OF T` as a
+parameter across a three-module chain failed with a spurious "type mismatch in
+actual parameter".  `TypeStructEq` now recurses through array/pointer bases and
+is consulted by BOTH `TypeParamCompat` (VAR path) and `TypeAssignCompat`
+(by-value pointer path), so both spellings work.  The former workaround —
+`Scan.MemText` wrapped in a one-field `RECORD` — was reverted: `Scan.MemText` is
+now a bare `POINTER TO ARRAY MaxMemText OF CHAR` again.
 
 **Full 8086 base instruction-set coverage is complete** (91 mnemonic IDs
 in `Lex.MOD`, including `SECTION .bss`/`RESB`/`RESW`/`RESD`, the full
@@ -672,6 +669,37 @@ code 0. Fixed by adding the `+0x100` bias in `OnReloc` for absolute
 fixups, gated on `mode = ModeCom OR mode = ModeTExe` (never `ModeSys`,
 which has no PSP — a device driver's `CS` is its own load segment, not
 PSP-relative).
+
+**Bugs found and features added (2026-07-29):**
+- **`TLINK.MOD` `Align16` was wrong** — it computed `v - Align2(v AND 15) + 16`
+  instead of `v - (v AND 15) + 16`, so e.g. `Align16(17)` gave 31 not 32.  Used
+  by `CalculateLayoutSmall`, this corrupted the base offset of every module
+  after the first with a non-16-aligned code/data size in a **multi-module
+  `/T=exe`** link (never exercised — the regression tests only linked one
+  module).  Fixed, and a two-module `/T=exe` fixture (`TESTS/FIX/TLKMAIN.ASM` +
+  `TLKMOD2.ASM`) added to `test_tlink.sh`.
+- **`TLINK.MOD` `/T=exe` never set up `DS`** — the small-model layout math
+  assumes `DS=SS=DGROUP`, but nothing established it (DOS enters an `.EXE` with
+  `DS=PSP`).  Establishing `DS` is the *linker's* job for small model, so
+  `WriteOutputExe` now prepends a 7-byte startup stub `mov ax,ss / mov ds,ax /
+  jmp start` at code offset 0 (`CalculateLayoutSmall` reserves it via
+  `headerSize`) and the MZ entry `IP` points at it.  The program no longer sets
+  `DS` itself.
+- **TASM: `EQU` added.** `NAME EQU expr` (constant integer expression) is stored
+  in the label table as a `Sym.SegConst` entry — NOT the `%define`
+  text-substitution table — so an `EQU` name never self-expands on its own
+  definition line (the pass-2 self-expansion trap that a `%define`-backed
+  implementation hits).  The operand parser resolves a `SegConst` symbol to a
+  plain absolute immediate (no relocation); a branch to one is a "target must be
+  a label" error.
+- **TASM: wild-jump hardening.** `Sym.Lookup` returns TRUE with a placeholder
+  offset 0 for a reserved-but-never-defined label (needed for the pass-1
+  forward-reference data path), so a branch emitter that trusted it would jump
+  to code offset 0 — a "jump into nowhere".  The undefined case was already
+  caught by `CheckAllDefined` between passes, but as defense-in-depth
+  `Sym.LookupDefined` (returns FALSE unless `defined`) was added and the four
+  branch/call target emitters (`EncJmpShort`/`EncNearRel`/`EncJmpAuto`) switched
+  to it, so an undefined branch target is a clean error on every path.
 
 ---
 
@@ -1312,6 +1340,19 @@ combined DATA+BSS segment.  `Link.CalculateLayout` now assigns `codePara` for ev
 `LinkMZ.WriteExe` is `fileImageLen = totalCodeLen + totalDataLen`,
 `ssPara = (totalCodeLen+totalDataLen+totalBssLen) DIV 16`,
 `minAlloc = (totalBssLen DIV 16) + stackPara`.)
+
+**STRONG RULE — pad the code spill to `totalCodeLen`.** `Link.PerformLinking`
+streams each module's code into the spill file sequentially, ending at the last
+module's own code end (`pos`), which is NOT the final 16-aligned `totalCodeLen`.
+`CopyCodeImage` copies exactly `totalCodeLen` bytes, and the MZ header's
+`pageCnt`/`partPage` are computed from `totalCodeLen + totalDataLen` — so the
+spill MUST be zero-padded up to `totalCodeLen` after the streaming loop
+(`IF pos < ls^.totalCodeLen THEN WriteZeros(ls^.spillFile, ls^.totalCodeLen - pos)`).
+Without it the file is up to 15 bytes SHORT of the size the header declares, and
+every `/CD` program reads past its own loaded image at startup — `xt` reports
+`arraycopy: last source index <fileSize+N> out of bounds for byte[<fileSize>]`
+(fixed 2026-07-29; the header-vs-file size mismatch is the diagnostic signature —
+compare MZ `pages`/`lastpage` against the actual file length).
 
 **Consequence — DS reload on every FAR proc.** Because each module has its own DS, a FAR call
 into another module leaves DS pointing at the caller's data.  Every FAR (exported) procedure

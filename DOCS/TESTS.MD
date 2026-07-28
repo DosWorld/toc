@@ -12,7 +12,7 @@
 objects will produce false results. `make test` enforces this automatically.
 
 ```bash
-make test      # clean, full rebuild, run 281 manifest rows + TASM regression (host-side, fast)
+make test      # clean, full rebuild, run 301 manifest rows + TASM regression (host-side, fast)
 make testall   # full DOS-side suite via xt: manifest + Section 17/18 + SYSTEM.DEF checks (~9 min)
 ```
 
@@ -136,7 +136,7 @@ and `testall.exe` (T5/T6 — SYSTEM.DEF absent checks).  The old
 
 A TSV-driven test runner — one row per test, no shell heredocs.  Each row
 names a fixture in `TESTS/FIX/`, optional compiler flags, an EXPECT
-predicate, and an argument.  **281 rows, all passing.**
+predicate, and an argument.  **301 rows, all passing.**
 
 Driven by two runners:
 - **Host-side (POSIX):** `make -f TESTS/Makefile.man test` — GNU make, calls xt per row.  Per-row scratch dirs are created under the project `TMP/` (not the system tmpfs); see `TMPROOT` in `TESTS/Makefile.man`.
@@ -210,7 +210,7 @@ form and survives all codegen reshuffles.
 
 ## Integration tests
 
-All integration tests are now in `TESTS/MANIFEST.TSV` (281 rows) or run by
+All integration tests are now in `TESTS/MANIFEST.TSV` (301 rows) or run by
 `BIN/TESTALL.EXE` (Section 17/18 executables + SYSTEM.DEF artefact checks).
 The old bash drivers (`test_src.sh`, `test_system_intrinsics.sh`) have been deleted —
 their content is fully covered by the manifest and testall.
@@ -381,7 +381,7 @@ Regressions of historical compiler bugs are preserved in the corresponding modul
   codegen (G7, `DOCS/IMPLRULE.MD` §"CASE jump-table dispatch"); it caught a
   real out-of-range-dispatch bug (values outside the label range fell into
   arm 1's body instead of the `ELSE`/fall-through target) that `make test`'s
-  281-row manifest cannot catch, since the manifest only checks compile-time
+  301-row manifest cannot catch, since the manifest only checks compile-time
   byte/symbol patterns, not runtime dispatch correctness. Also runnable
   standalone, bypassing `make testall`'s harness bugs:
   `toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe`.
@@ -468,18 +468,22 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
    comment and `TLINK.MOD`'s `OnReloc`).
 4. Links `TLINKDRV.RDF` with `/T=sys` and checks the device-driver header's
    first bytes (`next=-1`, `attr=0`).
-
-`/T=exe` (small model) is not exercised by this test: a bare hand-assembled
-fixture has no small-model startup stub (`mov ax,ss / mov ds,ax`) to set DS
-correctly at runtime — that stub is normally emitted by the compiler for
-real small-model programs, not something a raw `.ASM` fixture should
-hand-roll for a linker test.
+5. Links a **two-module `/T=exe`** (small model): `TESTS/FIX/TLKMAIN.ASM`
+   (entry `start`, calls the external `getmsg`) + `TLKMOD2.ASM` (exports
+   `getmsg`, returns its own message offset), runs the `.EXE` under `xt`, and
+   checks stdout is exactly `tlink-multi-ok`.  This exercises what a
+   single-module link never does: `CalculateLayoutSmall`'s `Align16` (module 2
+   lands after module 1's non-paragraph-aligned code), a cross-module `OFFS`
+   relocation into module 2's data, and TLINK's own **DS-setup startup stub**
+   (`mov ax,ss / mov ds,ax / jmp start`) — the program does NOT set `DS`; the
+   linker does (see PORTING.MD §1.8 / IMPLRULE.MD).  Regression for the
+   `Align16` bug and the missing DS-setup stub (both 2026-07-29).
 
 Run as part of `make test`, or standalone:
 
 ```bash
 bash TESTS/test_tlink.sh
-# Results: 3 passed, 0 failed
+# Results: 4 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
@@ -497,16 +501,19 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
 `TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
 `.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7) by byte-diffing
-its output against expected `.rdf` files. 83 checks total as of
-2026-07-16 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
+its output against expected `.rdf` files. 110 checks total as of
+2026-07-29 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
 behind each batch — the four categories below cover the original 16;
 everything added since is a per-bug or per-feature regression row, not
 worth re-narrating here row-by-row): the original 16 (below), plus
 regression rows for every bug found in the 2026-07-15/16 review passes
 (§A–§H's undefined-symbol/hang/garbage-encoding/EXTERN-reloc/etc. fixes,
 §C's minor-bug batch, §D's 8086-coverage additions), `§J` bin2obj-mode
-rows, and `§I`'s `-D`/`%include`/`%macro` rows (15 rows: 3 `-D`, 5
-`%include`, 7 `%macro`).
+rows, `§I`'s `-D`/`%include`/`%macro` rows (15 rows: 3 `-D`, 5
+`%include`, 7 `%macro`), the `TEQU.ASM` `EQU`-constant fixture
+(2026-07-29), and the `TUNDEFJMP.ASM` `check_fails` row (a branch to an
+undefined label must be a fatal "undefined symbol" error, never a wild
+jump to code offset 0).
 
 1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
    compiler's own self-host).
@@ -550,7 +557,7 @@ Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
 
 ```bash
 bash TESTS/test_tasm.sh
-# Results: 83 passed, 0 failed
+# Results: 110 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).

@@ -13,19 +13,35 @@ MODULE LinkNE;
   assigned by walking ls^.modHead in order (CODE then DATA per module), then the
   shared BSS last.
 
-  Relocation model (§4): only SEGRELOC (segment-VALUE) fixups produce NE
-  relocation records — one NE BASE (02h) reloc per SEGRELOC, appended to the
-  reloc list of the OUTPUT segment the patch site lives in (the current
-  module's CODE or DATA NE segment).  Pure in-segment OFFSET fixups (Link's own
-  OnReloc) need no NE reloc: each module's own segment starts at offset 0, so
-  a self-reference offset is already final and the loader never touches it.
-  Cross-module imports are out of scope and rejected at link time (§1/§4).
+  Relocation model (DOCS/NE-PLAN.MD §4, DOCS/NE-BP.MD §4) — the Borland-Pascal
+  /CP PLACEHOLDER model: the file word at every reloc site is a placeholder and
+  the NE LOADER writes the real value from the reloc record (LinkNE does NOT bake
+  for /CP, unlike LinkMZ).
+    - an absolute RELOC (offset fixup, rrel = 0) → NE OFFS (05h) reloc
+      {targetSegIdx, targetOffset}, flags = INTERNALREF (0); the site word is
+      stamped FFFF;
+    - a SEGRELOC (segment-VALUE fixup) → NE BASE (02h) reloc {segIdx, offset},
+      flags = 0; the site word is stamped FFFF;
+    - a far-pointer site (an OFFS at X immediately followed by a SEGRELOC at
+      X+2) is COALESCED into one NE PTR (03h) reloc; the offset word keeps FFFF
+      and the segment word is stamped 0000;
+    - an IP-relative RELOC (rrel # 0: near call/branch) is position-independent,
+      stays BAKED (via Link.OnReloc), and gets NO NE reloc (BPC omits these too).
+  Each reloc is appended to the OUTPUT segment the patch site lives in.
 
-  Scope (§1): entry point, relocations, heap/stack only.  No imports/exports
-  (Module Reference Table / Imported Names Table empty), no resources.
+  KERNEL.INITTASK (the one external import): the /CP entry stub's first
+  instruction is a far call to KERNEL.INITTASK (ordinal 91), emitted by
+  TOC.GenEntryStub as an unresolvable import "KERNEL_INITTASK".  It surfaces here
+  as the only import FindImport can't resolve (IsExternalImport); OnSegReloc
+  emits ONE external PTR (03h) reloc with flags = IMPORTORDINAL (01h), target-seg
+  = the KERNEL module-ref index (1), target-offset = the ordinal (91).  Every
+  other reloc is internal.
+
+  Scope (§1): entry point, relocations, heap/stack, the fixed KERNEL module
+  reference + name tables.  No general imports/exports, no resources.
 
   NE output cannot be run under xt (MZ-only); it is validated by structural
-  byte inspection only (§6).
+  byte inspection only against the BPC reference (§6, DOCS/NE-BP.MD).
 *)
 IMPORT Files, LogErr, Rdoff, Strings, Link;
 
@@ -33,33 +49,56 @@ CONST
   NeHdrBytes  = 64;      (* fixed NE header size *)
   SegChunk    = 32;      (* NE segments per mapping/reloc chunk node *)
   NeRelChunk  = 128;     (* NE relocs per chunk node (small-record rule) *)
-  StubBytes   = 64;      (* the MZ stub LinkNE writes (matches STUB.BIN) *)
+  StubBytes   = 3646;    (* size of NESTUB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
+  KernelLen   = 6;       (* length of the imported module name "KERNEL" *)
 
-  SegAttrData = 0001H;   (* bit 0: data segment *)
-  SegAttrReal = 0004H;   (* bit 2: real-mode accessible *)
-  SegAttrHasRel = 0100H; (* bit 8: has relocations *)
+  (* Segment attributes (Table 6) — measured from the reference NE
+     (DOCS/NE-PLAN.MD §0): every segment carries the 80286 DPL bits (0C00H,
+     bits 10-11).  CODE = MOVEABLE + DISCARD + DPL (no PRELOAD, matching the
+     reference user-code segment); DATA/BSS = DATA + PRELOAD + DPL.  Either kind
+     adds HASRELOC when it owns a non-empty reloc block. *)
+  SegAttrData     = 0001H;  (* bit 0: data segment *)
+  SegAttrMoveable = 0010H;  (* bit 4: loader may move the segment *)
+  SegAttrPreload  = 0040H;  (* bit 6: load immediately, not demand-loaded *)
+  SegAttrHasRel   = 0100H;  (* bit 8: relocation block follows the segment *)
+  SegAttrDiscard  = 1000H;  (* bit 12: discardable (reloadable from disk) *)
+  SegAttrDpl      = 0C00H;  (* bits 10-11: 80286 DPL = 3 (matches reference) *)
 
-  RelBASE = 02H;         (* NE reloc type: 16-bit segment (BASE) *)
+  (* NE relocation-item types (Table 10) *)
+  RelBASE = 02H;         (* 16-bit segment value (segment-only fixup) *)
+  RelPTR  = 03H;         (* 16:16 far pointer (offset word THEN segment word) *)
+  RelOFFS = 05H;         (* 16-bit offset within a target segment *)
 
-  (* Program Flags (NE header offset 0Ch) *)
-  PfDGroupNone   = 00H;  (* bits 0-1 = 00: no automatic-data group — this
-                            toolchain never addresses data DGROUP-relative
-                            (every module reloads DS to its OWN data segment),
-                            so there is no single shared automatic-data group *)
-  Pf8086         = 10H;  (* bit 4: contains 8086 instructions *)
-  PfProtMode     = 08H;  (* bit 3: protected-mode only (the /CP target) *)
-  Pf8087         = 80H;  (* bit 7: contains 80x87 (FPU) instructions *)
+  (* Relocation flag byte (Table 10) — target-type bits 0-1: internal fixups use
+     INTERNALREF (0); the single KERNEL.INITTASK entry-stub call uses
+     IMPORTORDINAL (target-seg = module-ref index, target-offset = ordinal). *)
+  RelTypeImportOrd = 01H;
 
-  (* Application Flags (NE header offset 0Dh) *)
-  AfFullScreen   = 01H;  (* bits 0-2 = 001: full-screen, NOT a Windows/P.M.-API
-                            (GUI) app — i.e. a plain console application *)
+  (* The one external import this toolchain emits: KERNEL.INITTASK (the OS/2
+     kernel task-init the program's first far call targets under /CP).  The
+     KERNEL module reference is modref index 1 (see WriteExe).
+     TODO(ordinal): set to the real KERNEL/DOSCALLS INITTASK ordinal. *)
+  KernelModRefIdx  = 1;
+  InitTaskOrdinal  = 91;   (* KERNEL.INITTASK ordinal (0x5B) — measured in the
+                              BPC /CP reference H/T/NEBIG.EXE, see DOCS/NE-BP.MD *)
 
+  (* Program Flags (NE header offset 0Ch) — matches the reference NE (0Ah). *)
+  PfDGroupMultiple = 02H; (* bits 0-1 = 10: multiple (unshared) automatic-data
+                             groups — each module has its OWN data segment
+                             (per-module DS reload), so groups are not shared *)
+  PfProtMode       = 08H; (* bit 3: protected-mode only (the /CP target) *)
+
+  (* Application Flags (NE header offset 0Dh) — matches the reference NE (03h). *)
+  AfPmApi          = 03H; (* bits 0-2 = 011: uses the Windows/P.M. API *)
+
+(*$A-*)
 TYPE
   (* Chunked per-segment NE relocation list (small-record rule): each record is
      8 bytes; the on-disk block is <count WORD><8*count bytes>. *)
   NeReloc = POINTER TO NeRelocRec;
   NeRelocRec = RECORD
-    typ:    ARRAY NeRelChunk OF BYTE;    (* reloc type (RelBASE) *)
+    typ:    ARRAY NeRelChunk OF BYTE;    (* reloc source type (RelBASE/PTR/OFFS) *)
+    flg:    ARRAY NeRelChunk OF BYTE;    (* reloc flag byte (0 internal / RelTypeImportOrd) *)
     ofs:    ARRAY NeRelChunk OF WORD;    (* offset within segment to patch *)
     tgtSeg: ARRAY NeRelChunk OF WORD;    (* target 1-based NE segment index *)
     tgtOfs: ARRAY NeRelChunk OF WORD;    (* target offset (0 for a pure BASE) *)
@@ -92,6 +131,9 @@ TYPE
     bssIdx:   INTEGER;   (* 1-based NE index of the shared BSS segment *)
     modName:  ARRAY 10 OF CHAR   (* resident-names-table module name (upper) *)
   END;
+
+(*$L NESTUB.RDF*)
+PROCEDURE NESTUB;FAR;EXTERNAL;
 
 PROCEDURE InitState*(ns: State);
 BEGIN
@@ -173,7 +215,7 @@ END BuildSegTable;
 
 (* ---- per-segment reloc list ---- *)
 
-PROCEDURE AddReloc(sn: SegNode; k: INTEGER; typ: BYTE; ofs, tgtSeg, tgtOfs: WORD);
+PROCEDURE AddReloc(sn: SegNode; k: INTEGER; typ, flg: BYTE; ofs, tgtSeg, tgtOfs: WORD);
   VAR r: NeReloc; j: INTEGER;
 BEGIN
   IF (sn^.e[k].relTail = NIL) OR (sn^.e[k].relTail^.count >= NeRelChunk) THEN
@@ -185,11 +227,39 @@ BEGIN
     sn^.e[k].relTail := r
   END;
   r := sn^.e[k].relTail; j := r^.count;
-  r^.typ[j] := typ; r^.ofs[j] := ofs;
+  r^.typ[j] := typ; r^.flg[j] := flg; r^.ofs[j] := ofs;
   r^.tgtSeg[j] := tgtSeg; r^.tgtOfs[j] := tgtOfs;
   INC(r^.count);
   INC(sn^.e[k].relCnt)
 END AddReloc;
+
+(* Coalesce a far-pointer pair: a preceding OFFS reloc at `ofs` (the offset
+   word of an offset:segment far pointer) plus this segment fixup at `ofs`+2
+   become a single PTR reloc covering both words.  Searches segment (sn,k)'s
+   reloc list for an OFFS at exactly `ofs`; if found, upgrades it in place to
+   PTR with the segment target and returns TRUE (caller then emits nothing
+   more).  Returns FALSE if there is no such OFFS (a standalone segment fixup
+   → caller emits BASE). *)
+PROCEDURE CoalesceToPtr(sn: SegNode; k: INTEGER; ofs, tgtSeg: WORD): BOOLEAN;
+  VAR r: NeReloc; j: INTEGER;
+BEGIN
+  r := sn^.e[k].relHead;
+  WHILE r # NIL DO
+    j := 0;
+    WHILE j < r^.count DO
+      IF (r^.typ[j] = RelOFFS) & (r^.ofs[j] = ofs) THEN
+        r^.typ[j] := RelPTR;
+        r^.tgtSeg[j] := tgtSeg;   (* segment part of the far pointer *)
+        (* tgtOfs already holds the offset part (from the OFFS record) *)
+        r^.flg[j] := BYTE(0);     (* internal fixup (INTERNALREF) *)
+        RETURN TRUE
+      END;
+      INC(j)
+    END;
+    r := r^.next
+  END;
+  RETURN FALSE
+END CoalesceToPtr;
 
 (* ---- SEGRELOC callback ---- *)
 
@@ -215,82 +285,169 @@ BEGIN
   END
 END TargetSegIndex;
 
-(* segRelocProc for Link.PerformLinking.  A SEGRELOC patches a segment-VALUE
-   into the image (the NE loader replaces the patched WORD with the target
-   segment's real load address); we bake the 1-based NE segment INDEX at the
-   patch site (BASE reloc, non-additive, so the loader overwrites it) and
-   record one NE BASE reloc on the OUTPUT segment the patch site lives in. *)
+(* Resolve a RELOC's target OFFSET within its own segment (mirrors the fixup
+   math in Link.OnReloc): self-CODE/DATA references start at 0; a BSS reference
+   adds the module's BSS slice; an import adds the symbol's own in-segment
+   offset (+ its BSS slice for a BSS symbol). *)
+PROCEDURE TargetOffset(ls: Link.State; m: Link.Module; rrefSeg: INTEGER): WORD;
+  VAR sym: Link.Symbol; so: Link.Module;
+BEGIN
+  IF (rrefSeg = Rdoff.SegCode) OR (rrefSeg = Rdoff.SegData) THEN RETURN 0
+  ELSIF rrefSeg = Rdoff.SegBss THEN RETURN WORD(m^.bssOfs)
+  ELSE
+    sym := Link.FindImport(rrefSeg);
+    IF sym = Link.NoSym THEN RETURN 0 END;
+    IF Link.SymSegId(ls, sym) = 2 THEN
+      so := Link.SymOwner(ls, sym);
+      RETURN WORD(Link.SymOffset(ls, sym)) + WORD(so^.bssOfs)
+    END;
+    RETURN WORD(Link.SymOffset(ls, sym))
+  END
+END TargetOffset;
+
+(* Locate the output NE segment (index + chunk-node/slot) that a patch site in
+   rseg of the current module belongs to. *)
+PROCEDURE OutSeg(m: Link.Module; rseg: INTEGER; VAR sn: SegNode; VAR k: INTEGER): INTEGER;
+  VAR outIdx: INTEGER;
+BEGIN
+  IF rseg = Rdoff.SegCode THEN outIdx := SegIndexOf(curNs, m, Rdoff.SegCode)
+  ELSE outIdx := SegIndexOf(curNs, m, Rdoff.SegData) END;
+  sn := SegOf(curNs, outIdx); k := (outIdx - 1) MOD SegChunk;
+  RETURN outIdx
+END OutSeg;
+
+(* TRUE when rrefSeg names an import that does NOT resolve to any linked symbol.
+   In this no-import model the only such import is the entry stub's
+   KERNEL.INITTASK sentinel — a genuine OS/2 external fixup (see GenEntryStub /
+   NE-PLAN.MD §4).  Every real IMPORT resolves; anything unresolved here is
+   INITTASK. *)
+PROCEDURE IsExternalImport(rrefSeg: INTEGER): BOOLEAN;
+BEGIN
+  RETURN (rrefSeg # Rdoff.SegCode) & (rrefSeg # Rdoff.SegData) &
+         (rrefSeg # Rdoff.SegBss) & (Link.FindImport(rrefSeg) = Link.NoSym)
+END IsExternalImport;
+
+(* onRelocProc for Link.PerformLinking (BPC-reference placeholder model,
+   NE-PLAN.MD §4).  A real NE loader WRITES each reloc'd site from the reloc
+   record at load time; the file word is an FFFF placeholder.  So for an ABSOLUTE
+   offset fixup (rrel = 0) we do NOT bake — we compute the target offset, stamp
+   the site with FFFF, and record an NE OFFS reloc (flags = INTERNALREF 0) for
+   the loader.  IP-relative fixups (rrel # 0, near call/branch) are
+   position-independent, get NO NE reloc, and DO need the byte patch — those
+   still go through Link.OnReloc. *)
+PROCEDURE OnReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
+                  rrefSeg: INTEGER; rrel: INTEGER); FAR;
+  VAR ls: Link.State; m: Link.Module;
+      tgtIdx: INTEGER; tgtOfs: WORD;
+      sn: SegNode; k, dummy: INTEGER;
+BEGIN
+  (* The KERNEL.INITTASK external far call: its offset word carries no internal
+     reloc — the paired SEGRELOC (segment word) emits ONE external PTR covering
+     both words.  Leave this word to OnSegReloc. *)
+  IF IsExternalImport(rrefSeg) THEN RETURN END;
+
+  IF rrel # 0 THEN
+    (* IP-relative near call/branch: bake it, no NE reloc (BPC omits these). *)
+    Link.OnReloc(rseg, rofs, rwidth, rrefSeg, rrel);
+    RETURN
+  END;
+
+  ls := Link.CurrentState();
+  m  := Link.CurrentModule();
+  tgtIdx := TargetSegIndex(ls, m, rrefSeg);
+  IF LogErr.HaveErr() THEN RETURN END;
+
+  (* target offset the loader will write.  For a SELF CODE/DATA reference the
+     compiler already baked the real in-segment offset into the operand — read it
+     before overwriting.  For an import/BSS reference use TargetOffset. *)
+  IF (rrefSeg = Rdoff.SegCode) OR (rrefSeg = Rdoff.SegData) THEN
+    tgtOfs := Link.ReadSiteWord(rseg, rofs)
+  ELSE
+    tgtOfs := TargetOffset(ls, m, rrefSeg)
+  END;
+
+  (* stamp the FFFF placeholder (the loader writes tgtOfs) *)
+  Link.WriteSiteWord(rseg, rofs, WORD(0FFFFH));
+
+  dummy := OutSeg(m, rseg, sn, k);
+  (* internal fixup: flags = INTERNALREF (0).  The import-ordinal bit (01H) is
+     reserved for the KERNEL.INITTASK external reloc — using it here would make a
+     real NE loader mis-read an internal OFFS as an external import. *)
+  AddReloc(sn, k, RelOFFS, BYTE(0), WORD(rofs), WORD(tgtIdx), tgtOfs)
+END OnReloc;
+
+(* segRelocProc for Link.PerformLinking (BPC-reference placeholder model,
+   NE-PLAN.MD §4).  A SEGRELOC targets a segment VALUE.  The loader writes the
+   selector from the reloc record; the file word is a placeholder we do NOT bake.
+   If the immediately-preceding word (rofs-2) already carries an OFFS reloc, the
+   two are one far pointer → coalesce into a single PTR and stamp the SEGMENT word
+   0000 (the paired offset word already holds FFFF).  Otherwise emit a standalone
+   BASE (segment-only) reloc and stamp the word FFFF; a self-segment BASE keeps
+   the compiler-baked offset as the reloc's target-offset. *)
 PROCEDURE OnSegReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                      rrefSeg: INTEGER; rrel: INTEGER); FAR;
   VAR ls: Link.State; m: Link.Module;
-      tgtIdx, outIdx: INTEGER;
-      patchAddr: LONGINT;
-      sn: SegNode; k: INTEGER;
+      tgtIdx, k, dummy: INTEGER;
+      sn: SegNode; baseOfs: WORD;
 BEGIN
   ls := Link.CurrentState();
   m  := Link.CurrentModule();
 
+  (* KERNEL.INITTASK external far call: emit ONE external-import PTR covering the
+     whole far pointer (offset word at rofs-2, segment word at rofs).  The loader
+     resolves it via the module-reference table — flags = IMPORTORDINAL,
+     target-seg = KERNEL module-ref index, target-offset = INITTASK ordinal.
+     Stamp the BPC placeholder: offset word FFFF, segment word 0000. *)
+  IF IsExternalImport(rrefSeg) THEN
+    Link.WriteSiteWord(rseg, rofs - LONGINT(2), WORD(0FFFFH));
+    Link.WriteSiteWord(rseg, rofs, WORD(0));
+    dummy := OutSeg(m, rseg, sn, k);
+    AddReloc(sn, k, RelPTR, RelTypeImportOrd, WORD(rofs - LONGINT(2)),
+             WORD(KernelModRefIdx), WORD(InitTaskOrdinal));
+    RETURN
+  END;
+
   tgtIdx := TargetSegIndex(ls, m, rrefSeg);
   IF LogErr.HaveErr() THEN RETURN END;
 
-  (* bake the NE segment index at the patch site (loader replaces it) *)
-  IF rseg = Rdoff.SegCode THEN
-    patchAddr := rofs;
-    Link.PatchBuf(patchAddr, WORD(tgtIdx), 2);
-    outIdx := SegIndexOf(curNs, m, Rdoff.SegCode)
-  ELSE
-    patchAddr := Link.DataFileOffsetOf(ls, m, rofs);
-    Link.PatchDataFile(patchAddr, WORD(tgtIdx), 2);
-    outIdx := SegIndexOf(curNs, m, Rdoff.SegData)
-  END;
+  (* a standalone self-segment site may hold a compiler-baked offset (e.g.
+     `mov ax, offset X`) — capture it before stamping the placeholder *)
+  baseOfs := Link.ReadSiteWord(rseg, rofs);
 
-  (* the reloc's offset is WITHIN the output segment: for CODE/DATA that is
-     rofs (each module = one segment, base 0) *)
-  sn := SegOf(curNs, outIdx);
-  k  := (outIdx - 1) MOD SegChunk;
-  AddReloc(sn, k, RelBASE, WORD(rofs), WORD(tgtIdx), 0)
+  dummy := OutSeg(m, rseg, sn, k);
+  (* far pointer?  the offset word sits at rofs-2 in the SAME output segment. *)
+  IF (rofs >= LONGINT(2)) &
+     CoalesceToPtr(sn, k, WORD(rofs - LONGINT(2)), WORD(tgtIdx)) THEN
+    (* upgraded the preceding OFFS to PTR — stamp the segment word 0000 *)
+    Link.WriteSiteWord(rseg, rofs, WORD(0))
+  ELSE
+    (* standalone segment value — placeholder FFFF, keep the baked offset *)
+    Link.WriteSiteWord(rseg, rofs, WORD(0FFFFH));
+    AddReloc(sn, k, RelBASE, BYTE(0), WORD(rofs), WORD(tgtIdx), baseOfs)
+  END
 END OnSegReloc;
 
-(* Drives the generic core with NE's segRelocProc.  BuildSegTable must have
-   run first (OnSegReloc resolves target indices through curNs). *)
+(* Drives the generic core with NE's onReloc + segRelocProc.  BuildSegTable
+   must have run first (both callbacks resolve target indices through curNs). *)
 PROCEDURE PerformLinking*(ls: Link.State; ns: State);
 BEGIN
   curNs := ns;
-  Link.PerformLinking(ls, OnSegReloc)
+  Link.PerformLinking(ls, OnReloc, OnSegReloc)
 END PerformLinking;
 
 (* ---- write NE EXE ---- *)
 
-(* MZ stub: minimal real-mode shell that prints a message and exits.  An NE
-   file's outer envelope IS an MZ file (DOCS/NE.MD §1); e_lfanew (offset 3Ch)
-   points at the NE header, which we place right after this StubBytes stub. *)
-PROCEDURE WriteStub(VAR fout: Files.File; neOfs: LONGINT);
-  VAR w, i: INTEGER;
+(* MZ stub: the verbatim 3646-byte Borland-Pascal /CP DOS stub, embedded in the
+   linker binary via `(*$L NESTUB.RDF*)` (assembled from SRC/TOC/NESTUB.BIN by
+   TASM) and written byte-for-byte (DOCS/NE-BP.MD §1).  Its own e_lfanew field
+   (at MZ offset 3Ch) already reads 0E3EH = StubBytes, so the NE header lands
+   exactly after it — no field synthesis needed.  Embedding it (vs reading a file
+   at link time) means /CP needs no external NESTUB.BIN on the search path. *)
+PROCEDURE WriteStub(VAR fout: Files.File);
+  VAR p: SYSTEM.ADDRESS;
 BEGIN
-  (* 28-byte MZ header + a tiny code/message body, padded to StubBytes. *)
-  w := Files.WriteWord(fout, 5A4DH);        (* "MZ" *)
-  w := Files.WriteWord(fout, StubBytes MOD 512);   (* bytes on last page *)
-  w := Files.WriteWord(fout, 1);            (* page count *)
-  w := Files.WriteWord(fout, 0);            (* reloc count *)
-  w := Files.WriteWord(fout, 4);            (* header paragraphs (64 bytes) *)
-  w := Files.WriteWord(fout, 0);            (* min alloc *)
-  w := Files.WriteWord(fout, 0);            (* max alloc *)
-  w := Files.WriteWord(fout, 0);            (* SS *)
-  w := Files.WriteWord(fout, 0);            (* SP *)
-  w := Files.WriteWord(fout, 0);            (* checksum *)
-  w := Files.WriteWord(fout, 0);            (* IP *)
-  w := Files.WriteWord(fout, 0);            (* CS *)
-  w := Files.WriteWord(fout, 40H);          (* reloc table offset (none) *)
-  w := Files.WriteWord(fout, 0);            (* overlay *)
-  (* The 14-word MZ header above ends at offset 1Ch (28).  e_lfanew is a fixed
-     field at offset 3Ch (60) — pad the gap (28..60) with zeros first, THEN
-     write the DWORD so it lands exactly at 3Ch. *)
-  i := Files.Position(fout);
-  WHILE i < 3CH DO w := Files.WriteByte(fout, BYTE(0)); INC(i) END;
-  w := Files.WriteDWord(fout, neOfs);       (* e_lfanew (at MZ offset 3Ch) *)
-  (* pad remainder of the stub with zeros *)
-  i := Files.Position(fout);
-  WHILE i < StubBytes DO w := Files.WriteByte(fout, BYTE(0)); INC(i) END
+  p := SYSTEM.ADR(NESTUB);
+  Files.BlockWrite(fout, p^, StubBytes)
 END WriteStub;
 
 (* Write one segment's reloc block (count WORD + 8*count bytes) after its data. *)
@@ -304,7 +461,7 @@ BEGIN
     j := 0;
     WHILE j < r^.count DO
       w := Files.WriteByte(fout, r^.typ[j]);        (* reloc type *)
-      w := Files.WriteByte(fout, BYTE(0));           (* flags (not additive) *)
+      w := Files.WriteByte(fout, r^.flg[j]);         (* flag byte (additive?) *)
       w := Files.WriteWord(fout, INTEGER(r^.ofs[j]));    (* offset in seg *)
       w := Files.WriteWord(fout, INTEGER(r^.tgtSeg[j])); (* target NE seg idx *)
       w := Files.WriteWord(fout, INTEGER(r^.tgtOfs[j])); (* target offset *)
@@ -321,10 +478,22 @@ BEGIN
   RETURN LONGINT(2) + LONGINT(sn^.e[k].relCnt) * LONGINT(8)
 END RelocBlockLen;
 
+(* Build the nonresident-names entry: the .exe filename (stem + ".EXE",
+   uppercase), matching the reference NE (its nonresident name is "H.EXE"). *)
+PROCEDURE BuildNonresName(ns: State; VAR out: ARRAY OF CHAR);
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE ns^.modName[i] # 0X DO out[i] := ns^.modName[i]; INC(i) END;
+  out[i] := "."; INC(i);
+  out[i] := "E"; INC(i); out[i] := "X"; INC(i); out[i] := "E"; INC(i);
+  out[i] := 0X
+END BuildNonresName;
+
 PROCEDURE WriteExe*(ls: Link.State; ns: State; outPath: ARRAY OF CHAR);
   VAR fout: Files.File;
       neOfs: LONGINT;
-      i, k, w, nlen: INTEGER;
+      i, k, w, nlen, attr: INTEGER;
       sn: SegNode;
       entryIdx: INTEGER;      (* NE seg idx of entry proc's CODE segment *)
       entrySeg: Link.Module;
@@ -333,16 +502,17 @@ PROCEDURE WriteExe*(ls: Link.State; ns: State; outPath: ARRAY OF CHAR);
       segTblOfs, resTblOfs, resNamesOfs, modRefOfs, impNamesOfs, entryTblOfs: INTEGER;
       nonresOfs: LONGINT;
       entryTblLen, resNamesLen: INTEGER;
+      nrName: ARRAY 16 OF CHAR;
+      nrLen, nrTabLen: INTEGER;
       alignShift, sectorSize: INTEGER;
       filePos, segFilePos: LONGINT;
-      heapSize: LONGINT;
       summary: ARRAY 128 OF CHAR;
       m: Link.Module;
 BEGIN
   IF ~Files.ReWrite(fout, outPath) THEN LogErr.Error2("Cannot write: ", outPath); RETURN END;
 
   neOfs := LONGINT(StubBytes);
-  alignShift := 9; sectorSize := 512;
+  alignShift := 8; sectorSize := 256;   (* 256-byte sectors (matches reference) *)
 
   (* resolve entry point: "start" symbol's own module CODE segment *)
   esym := Link.FindSymbol(ls, "start");
@@ -353,9 +523,10 @@ BEGIN
   END;
 
   (* ---- table layout (offsets from NE header start) ----
-     Order in the header area: [NE header 64B][segment table][resource table
-     (count 0)][resident names][module ref (empty)][imported names (empty)]
-     [entry table].  Nonresident names table is at a file offset. *)
+     Order in the header area (matches the reference NE, DOCS/NE-PLAN.MD §3):
+     [NE header 64B][segment table][resource table (empty)][resident names]
+     [module ref table (1 KERNEL entry)][imported names ("KERNEL")][entry table].
+     Nonresident names table is at a file offset after the entry table. *)
   segTblOfs := NeHdrBytes;
   resTblOfs := segTblOfs + ns^.segCount * 8;
   (* resource table present but empty: align shift WORD + terminating type 0 WORD *)
@@ -365,47 +536,55 @@ BEGIN
   nlen := 0; WHILE ns^.modName[nlen] # 0X DO INC(nlen) END;
   resNamesLen := (1 + nlen + 2) + 1;
   modRefOfs := resNamesOfs + resNamesLen;
-  (* module reference table: empty (0 entries) — no bytes *)
-  impNamesOfs := modRefOfs;
-  (* imported names table: one terminating length-0 byte *)
-  entryTblOfs := impNamesOfs + 1;
-  (* entry table: one bundle (count=1, seg=entryIdx, [flags,ofs WORD]) + terminator *)
-  entryTblLen := (2 + 3) + 1;
+  (* module reference table: 1 entry (2 bytes) -> imported-names offset of KERNEL *)
+  impNamesOfs := modRefOfs + 2;
+  (* imported names table: 00 06 "KERNEL"  = 8 bytes.  The leading length-0 byte
+     at offset 0 is the terminator convention; the counted "KERNEL" at offset 1
+     is what the module-ref entry names (matches the reference — no trailing 0). *)
+  entryTblOfs := impNamesOfs + (1 + 1 + KernelLen);
+  (* entry table: EMPTY, like the reference NE (Turbo).  The program entry
+     point is given solely by the NE header's CS:IP (a movable/exported entry
+     is not needed — no exports).  Turbo writes a 4-byte all-zero table (an
+     empty terminating bundle + padding); we match that width. *)
+  entryTblLen := 4;
 
-  (* nonresident names: empty (one terminating length-0 byte), placed right
-     after the header area, before segment data *)
+  (* nonresident names: one entry (the .exe filename, ord 0) then terminating
+     length-0, placed right after the header area, before segment data.
+     Length field = 1(len) + nrLen + 2(ord) + 1(term). *)
+  BuildNonresName(ns, nrName); nrLen := 0;
+  WHILE nrName[nrLen] # 0X DO INC(nrLen) END;
+  nrTabLen := 1 + nrLen + 2 + 1;
   nonresOfs := neOfs + LONGINT(entryTblOfs) + LONGINT(entryTblLen);
 
-  heapSize := ls^.totalBssLen + ls^.stackSize;
-  IF heapSize > LONGINT(0FFFFH) THEN heapSize := LONGINT(0FFFFH) END;
-
-  (* ---- MZ stub ---- *)
-  WriteStub(fout, neOfs);
+  (* ---- MZ stub (verbatim NESTUB.BIN; its own e_lfanew = StubBytes) ---- *)
+  WriteStub(fout);
+  IF LogErr.HaveErr() THEN Files.Close(fout); RETURN END;
 
   (* ---- NE header (64 bytes) ---- *)
   w := Files.WriteWord(fout, 454EH);                 (* "NE" *)
-  w := Files.WriteByte(fout, BYTE(2));               (* linker ver major *)
-  w := Files.WriteByte(fout, BYTE(8));               (* linker ver minor *)
+  w := Files.WriteByte(fout, BYTE(6));               (* linker ver major *)
+  w := Files.WriteByte(fout, BYTE(1));               (* linker ver minor *)
   w := Files.WriteWord(fout, entryTblOfs);           (* entry table offset *)
   w := Files.WriteWord(fout, entryTblLen);           (* entry table length *)
   w := Files.WriteDWord(fout, LONGINT(0));           (* file load CRC *)
-  (* program flags: DGROUP none + 8086 + protected-mode-only + 80x87.
-     The 80x87 bit is set because this toolchain's runtime and generated code
-     use the FPU (SYSTEM_REQUIRE87 / REAL/LONGREAL arithmetic). *)
-  w := Files.WriteByte(fout, BYTE(PfDGroupNone + Pf8086 + PfProtMode + Pf8087));
-  (* application flags: full-screen console app (001) — not a GUI/P.M.-API app *)
-  w := Files.WriteByte(fout, BYTE(AfFullScreen));
-  w := Files.WriteWord(fout, 0);                     (* auto data seg index = 0
-                                                        (no DGROUP — see flags) *)
-  w := Files.WriteWord(fout, INTEGER(heapSize));     (* initial local heap size *)
-  w := Files.WriteWord(fout, INTEGER(ls^.stackSize));(* initial stack size *)
+  (* program flags: DGROUP multiple (unshared) + protected-mode-only (0Ah),
+     matching the reference NE.  8086/8087 bits left clear as the reference
+     does. *)
+  w := Files.WriteByte(fout, BYTE(PfDGroupMultiple + PfProtMode));
+  (* application flags: uses the Windows/P.M. API (011), matching the reference. *)
+  w := Files.WriteByte(fout, BYTE(AfPmApi));
+  w := Files.WriteWord(fout, ns^.bssIdx);            (* auto data seg = shared BSS *)
+  w := Files.WriteWord(fout, 0);                     (* initial local heap = 0
+                                                        (matches reference) *)
+  w := Files.WriteWord(fout, 0);                     (* initial stack size = 0
+                                                        (SP set explicitly below) *)
   w := Files.WriteWord(fout, ls^.entryIp);           (* entry IP *)
   w := Files.WriteWord(fout, entryIdx);              (* entry CS = NE seg idx *)
   w := Files.WriteWord(fout, INTEGER(ls^.stackSize) - 2); (* SP *)
   w := Files.WriteWord(fout, ns^.bssIdx);            (* SS = shared BSS (DGROUP) *)
   w := Files.WriteWord(fout, ns^.segCount);          (* segment count *)
-  w := Files.WriteWord(fout, 0);                     (* module ref count *)
-  w := Files.WriteWord(fout, 1);                     (* nonresident names len *)
+  w := Files.WriteWord(fout, 1);                     (* module ref count (KERNEL) *)
+  w := Files.WriteWord(fout, nrTabLen);              (* nonresident names len *)
   w := Files.WriteWord(fout, segTblOfs);             (* segment table offset *)
   w := Files.WriteWord(fout, resTblOfs);             (* resource table offset *)
   w := Files.WriteWord(fout, resNamesOfs);           (* resident names offset *)
@@ -415,12 +594,12 @@ BEGIN
   w := Files.WriteWord(fout, 0);                     (* moveable entry count *)
   w := Files.WriteWord(fout, alignShift);            (* file align shift count *)
   w := Files.WriteWord(fout, 0);                     (* resource table entries *)
-  w := Files.WriteByte(fout, BYTE(2));               (* target OS = Windows *)
+  w := Files.WriteByte(fout, BYTE(1));               (* target OS = OS/2 (matches reference) *)
   w := Files.WriteByte(fout, BYTE(0));               (* other exe flags *)
   w := Files.WriteWord(fout, 0);                     (* return thunks *)
   w := Files.WriteWord(fout, 0);                     (* seg ref thunks *)
   w := Files.WriteWord(fout, 0);                     (* min code swap area *)
-  w := Files.WriteWord(fout, 0);                     (* expected Windows ver *)
+  w := Files.WriteWord(fout, 0300H);                 (* expected version 3.0 (matches reference) *)
 
   (* ---- segment table (filled after segment file offsets are known) ---- *)
   (* The segment table's File Offset field is in sectors; segment data starts
@@ -447,14 +626,18 @@ BEGIN
       w := Files.WriteWord(fout, 0)
     END;
     w := Files.WriteWord(fout, INTEGER(sn^.e[k].dataLen));   (* length in file *)
-    (* attributes *)
+    (* attributes (matches the reference NE, DOCS/NE-PLAN.MD §3): every segment
+       carries DPL bits (0C00H).  DATA/BSS = DATA + PRELOAD + DPL (0C41H); CODE
+       = MOVEABLE + DISCARD + DPL (1C10H, no PRELOAD, matching the reference
+       user-code segment).  Either kind gets the HASRELOC bit when it owns a
+       non-empty reloc block. *)
     IF sn^.e[k].isData THEN
-      IF sn^.e[k].relCnt > 0 THEN w := Files.WriteWord(fout, SegAttrData + SegAttrReal + SegAttrHasRel)
-      ELSE w := Files.WriteWord(fout, SegAttrData + SegAttrReal) END
+      attr := SegAttrData + SegAttrPreload + SegAttrDpl
     ELSE
-      IF sn^.e[k].relCnt > 0 THEN w := Files.WriteWord(fout, SegAttrReal + SegAttrHasRel)
-      ELSE w := Files.WriteWord(fout, SegAttrReal) END
+      attr := SegAttrMoveable + SegAttrDiscard + SegAttrDpl
     END;
+    IF sn^.e[k].relCnt > 0 THEN attr := attr + SegAttrHasRel END;
+    w := Files.WriteWord(fout, attr);
     (* min allocation *)
     w := Files.WriteWord(fout, INTEGER(sn^.e[k].allocLen));
     (* advance file offset past this segment's data + reloc block, sector-align *)
@@ -475,19 +658,27 @@ BEGIN
   w := Files.WriteWord(fout, 0);        (* ordinal (module name exports nothing) *)
   w := Files.WriteByte(fout, BYTE(0));  (* terminating length-0 *)
 
-  (* ---- module reference table: empty ---- *)
-  (* ---- imported names table: terminating length-0 ---- *)
-  w := Files.WriteByte(fout, BYTE(0));
+  (* ---- module reference table: 1 entry = imported-names offset of KERNEL ---- *)
+  w := Files.WriteWord(fout, 1);        (* offset 1 into imported names -> "KERNEL" *)
 
-  (* ---- entry table: one bundle for the entry segment ---- *)
-  w := Files.WriteByte(fout, BYTE(1));            (* entry count *)
-  w := Files.WriteByte(fout, BYTE(entryIdx));     (* segment number *)
-  w := Files.WriteByte(fout, BYTE(0));            (* flags (not exported) *)
-  w := Files.WriteWord(fout, INTEGER(ls^.entryIp)); (* offset *)
-  w := Files.WriteByte(fout, BYTE(0));            (* terminating bundle *)
+  (* ---- imported names table: 00 06 "KERNEL"  (matches reference; the leading
+     length-0 byte is the terminator convention, "KERNEL" at offset 1) ---- *)
+  w := Files.WriteByte(fout, BYTE(0));  (* offset 0: terminating length-0 *)
+  w := Files.WriteByte(fout, BYTE(KernelLen));
+  w := Files.WriteByte(fout, BYTE(ORD("K"))); w := Files.WriteByte(fout, BYTE(ORD("E")));
+  w := Files.WriteByte(fout, BYTE(ORD("R"))); w := Files.WriteByte(fout, BYTE(ORD("N")));
+  w := Files.WriteByte(fout, BYTE(ORD("E"))); w := Files.WriteByte(fout, BYTE(ORD("L")));
 
-  (* ---- nonresident names table: terminating length-0 ---- *)
-  w := Files.WriteByte(fout, BYTE(0));
+  (* ---- entry table: EMPTY (matches reference NE) — 4 zero bytes.  The entry
+     point is the NE header's CS:IP; no entry-table bundle is needed. ---- *)
+  w := Files.WriteByte(fout, BYTE(0)); w := Files.WriteByte(fout, BYTE(0));
+  w := Files.WriteByte(fout, BYTE(0)); w := Files.WriteByte(fout, BYTE(0));
+
+  (* ---- nonresident names table: .exe filename (ord 0) then terminator ---- *)
+  w := Files.WriteByte(fout, BYTE(nrLen));
+  i := 0; WHILE i < nrLen DO w := Files.WriteByte(fout, BYTE(ORD(nrName[i]))); INC(i) END;
+  w := Files.WriteWord(fout, 0);        (* ordinal *)
+  w := Files.WriteByte(fout, BYTE(0));  (* terminating length-0 *)
 
   (* pad to first segment's sector boundary *)
   Link.WriteZeros(fout, filePos - Files.Position(fout));
@@ -504,10 +695,10 @@ BEGIN
       m := sn^.e[k].owner;
       IF sn^.e[k].seg = Rdoff.SegCode THEN
         Files.Seek(ls^.spillFile, LONGINT(m^.codePara) * LONGINT(16));
-        Link.CopySpan(ls^.spillFile, fout, sn^.e[k].dataLen)
+        Files.BlockCopy(ls^.spillFile, fout, sn^.e[k].dataLen)
       ELSE
         Files.Seek(ls^.dataFile, Link.DataFileOffsetOf(ls, m, LONGINT(0)));
-        Link.CopySpan(ls^.dataFile, fout, sn^.e[k].dataLen)
+        Files.BlockCopy(ls^.dataFile, fout, sn^.e[k].dataLen)
       END;
       WriteRelocBlock(fout, sn, k);
       (* sector-align to the next segment's start *)

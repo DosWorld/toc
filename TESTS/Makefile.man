@@ -58,6 +58,7 @@ T.$(subst /,.,$(1)):
 	cp $(RDFGREP) $$$$wd/RDFGREP.EXE; \
 	cp $(OC) $$$$wd/TOC.EXE; \
 	cp $(ROOT)/BIN/OBERON.OM $$$$wd/OBERON.OM; \
+	cp $(ROOT)/BIN/NESTUB.BIN $$$$wd/NESTUB.BIN; \
 	compile_status=0; \
 	oc_flags=""; \
 	if [ -n "$$$$cmd" ] && [ "$$$$cmd" != "fails" ]; then oc_flags="$$$$cmd"; fi; \
@@ -118,6 +119,10 @@ T.$(subst /,.,$(1)):
 	        ( cd $$$$wd && $(XT) run --max=50000000 $$$$exe >/dev/null 2>&1 ) || actual=$$$$?; \
 	        if [ "$$$$actual" = "$$$$arg" ]; then rc=0; else echo "FAIL: $$$$row_name (errorlevel expected=$$$$arg actual=$$$$actual)"; exit 1; fi ;; \
 	    mz-sp|mz-min-alloc|mz-max-alloc) \
+	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	    ne-signature|ne-seg-count|ne-entry-seg|ne-word-at|ne-lfanew|ne-seg-attr|ne-has-kernel|ne-init-task) \
 	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
 	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
 	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \

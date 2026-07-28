@@ -669,3 +669,65 @@ memory models, plus two real bugs found and fixed along the way:**
   that asserted the old separate-member layout (`naming/53d-main-imports-
   mod-init`, `entry/6a`–`6e`, `syscom/41a`–`41c`) updated to check the
   merged behavior instead.
+
+---
+
+## 2026-07-28/29 — NE `/CP` alignment, two compiler bugfixes, TLINK + TASM fixes, EQU
+
+**NE `/CP` output aligned to a real Borland-Pascal reference.**  Reverse-
+engineered three BPC-`/CP` (16-bit DPMI-in-NE) executables (`OS2NE/1/H.EXE`,
+`OS2NE/2/T.EXE`, `OS2NE/3/NEBIG.EXE`) byte-for-byte and rewrote `SRC/TOC/
+LINKNE.MOD` to match: the verbatim 3646-byte MZ stub (embedded via
+`(*$L NESTUB.RDF*)`, `e_lfanew=0E3Eh`), linker 6.1 / progFlags 0x0A / appFlags
+0x03 / OS/2 target / 256-byte alignment / expver 0x300, DPL-carrying segment
+attributes, the fixed `KERNEL` module reference + imported-names + nonresident
+name, and the `FFFF`/`0000` placeholder relocation model (the loader writes the
+targets).  The program's first instruction is an external `CALL FAR
+KERNEL.INITTASK` (ordinal 91).  Authoritative format docs: `DOCS/NE-BP.MD`
+(reverse-engineered, **read-only**) and `DOCS/NE.MD` (generic spec, **read-only**);
+plan in `DOCS/NE-PLAN.MD`.  Confirmed correct on **real hardware** for small
+NE-EXEs.  New RDFGREP predicates + `ne/cp-*` manifest rows (incl.
+`ne/cp-init-task`).
+
+**Compiler bug — MZ image 7 bytes short (`SRC/TOC/LINK.MOD`).**  Every `/CD`
+program crashed at startup (`xt`: `arraycopy … out of bounds`) because the code
+spill wasn't padded up to `totalCodeLen` (the final 16-alignment gap), so the MZ
+header declared an image larger than the file and the program read past its own
+loaded image.  Fixed by zero-padding the spill to `totalCodeLen`.  See
+IMPLRULE.MD §"pad the code spill to `totalCodeLen`".  Regression:
+`paramtype/byval-aggr-and-var-runtime`.
+
+**Compiler bug — VAR named-fixed-array-alias param (`SRC/TOC/PEXPR.MOD`).**  A
+`VAR s: Str33` (named fixed-array alias) re-passed to an open-array formal
+(`Out.String(s)`) pushed the address of its far-pointer slot instead of
+dereferencing it (garbage prefix).  Fixed by gating the "local fixed array by
+value" push on `~arg.isRef`.  (Originally reported in another project's `BUG.MD`;
+fixed at source here.)  Regression: `TESTS/FIX/VARALIAS.MOD` +
+`paramtype/var-named-array-alias-fwd`.
+
+**Compiler — cross-module `POINTER TO ARRAY` compat (`SRC/TOC/SYMS.MOD`).**
+`TypeStructEq` now recurses through array/pointer bases and is consulted by both
+`TypeParamCompat` (VAR) and `TypeAssignCompat` (by-value), so a bare
+`POINTER TO ARRAY` binds across a `.def` boundary like `POINTER TO RECORD`
+already did.  This let TASM's `Scan.MemText` revert from its one-field-record
+workaround to a bare `POINTER TO ARRAY`.
+
+**TLINK (`SRC/TLINK/TLINK.MOD`).**  (1) `Align16` was mathematically wrong
+(`Align16(17)=31`), corrupting multi-module `/T=exe` layout — fixed.  (2) `/T=exe`
+now prepends a 7-byte `mov ax,ss / mov ds,ax / jmp start` DS-setup stub (small-
+model DS is the linker's job).  New two-module `/T=exe` regression
+(`TESTS/FIX/TLKMAIN.ASM` + `TLKMOD2.ASM`); `test_tlink.sh` → 4/4.
+
+**TASM (`SRC/TASM/`).**  Removed the now-obsolete VAR-param compiler-bug
+workarounds (`Scan.MemText` un-wrapped; stale `EncXchg`/`EncJmpFarDirect`
+comments updated).  Added **`EQU`** (`NAME EQU expr`, constant integer
+expression) stored as a `Sym.SegConst` label — not a `%define` — so it never
+self-expands, resolved as an absolute immediate.  Wild-jump hardening: added
+`Sym.LookupDefined` (returns FALSE for reserved-but-undefined labels) and
+switched the four branch/call emitters to it, so an undefined branch target is a
+clean error, not a jump to code offset 0.  New `TESTS/FIX/TEQU.ASM`;
+`test_tasm.sh` → 110/0.
+
+Bootstrap: the maintainer refreshed `BOOT/TOC.EXE` with the three compiler fixes
+(byte-identical to the self-host-convergent gen2/gen3).  `make test`: 301
+manifest / 110 TASM / 4 TLINK, all passing.

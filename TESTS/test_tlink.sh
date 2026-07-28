@@ -52,7 +52,7 @@ cp "$BINOM" "$WORK/OBERON.OM"
 cp "$BINTRUBOOM" "$WORK/TRUBO.OM"
 cp "$TASMDIR"/*.MOD "$WORK/"
 cp "$TLINKDIR/TLINK.MOD" "$TLINKDIR/TEXE.MOD" "$WORK/"
-cp "$FIXDIR/TLINKHI.ASM" "$FIXDIR/TLINKDRV.ASM" "$WORK/"
+cp "$FIXDIR/TLINKHI.ASM" "$FIXDIR/TLINKDRV.ASM" "$FIXDIR/TLKMAIN.ASM" "$FIXDIR/TLKMOD2.ASM" "$WORK/"
 
 PASS=0; FAIL=0
 
@@ -118,6 +118,34 @@ if [ -f "$WORK/DRV.SYS" ]; then
     fi
 else
     echo "FAIL: /T=sys did not produce DRV.SYS"
+    FAIL=$((FAIL+1))
+fi
+
+# --- multi-module /T=exe (small model) ---------------------------------------
+# Exercises the paths a single-module link never does: CalculateLayoutSmall's
+# Align16 (module 2 lands after module 1's non-paragraph-aligned code), a
+# cross-module OFFS relocation into module 2's data, and TLINK's own DS-setup
+# startup stub (the program does NOT set DS — the linker does).  Regression for
+# the Align16 bug (v=17 -> 31 instead of 32) and the missing DS-setup stub.
+echo "[tlink] linking /T=exe (multi-module small model) ..."
+( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TLKMAIN.ASM >assemble-main.log 2>&1 ) \
+    && ( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TLKMOD2.ASM >assemble-mod2.log 2>&1 ) \
+    || { echo "FAIL: TLKMAIN/TLKMOD2 did not assemble"; FAIL=$((FAIL+1)); }
+rm -f "$WORK/TLKTEST.EXE"
+( cd "$WORK" && "$XT" run --max=$MAX TLINK.exe /T=exe TLKMAIN.RDF TLKMOD2.RDF TLKTEST.EXE >link-exe.log 2>&1 ) \
+    || { echo "FAIL: /T=exe multi-module link failed"; cat "$WORK/link-exe.log"; FAIL=$((FAIL+1)); }
+if [ -f "$WORK/TLKTEST.EXE" ]; then
+    got="$( cd "$WORK" && "$XT" run --max=5000000 TLKTEST.EXE 2>/dev/null | grep -vE '^Maximum instructions limit|^DOS conventional memory' )" || true
+    want=$'tlink-multi-ok\r'
+    if [ "$got" = "$want" ]; then
+        echo "PASS: /T=exe -> multi-module cross-reference + DS-setup runs correctly"
+        PASS=$((PASS+1))
+    else
+        echo "FAIL: /T=exe -> multi-module output mismatch: got '$got'"
+        FAIL=$((FAIL+1))
+    fi
+else
+    echo "FAIL: /T=exe did not produce TLKTEST.EXE"
     FAIL=$((FAIL+1))
 fi
 

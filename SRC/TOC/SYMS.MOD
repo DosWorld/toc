@@ -598,6 +598,31 @@ BEGIN
   RETURN ext = base
 END TypeIsExtension;
 
+(* Structural equality for type binding across independently elaborated type
+   descriptors (once in the defining module, once again in an importing module
+   via .def).  Mirrors the RECORD structural fallback but for ARRAY element
+   types, recursing through nested arrays and pointer bases so a
+   POINTER TO ARRAY N OF T (any T) gets the same cross-module fallback
+   POINTER TO RECORD already has (used by both TypeAssignCompat's by-value
+   pointer path and TypeParamCompat's VAR path).  See PTR.MD. *)
+PROCEDURE TypeStructEq(a, b: TypeDesc): BOOLEAN;
+BEGIN
+  IF a = b THEN RETURN TRUE END;
+  IF a.form # b.form THEN RETURN FALSE END;
+  IF a.form = TFArray THEN
+    RETURN (a.len = b.len) & TypeStructEq(a.elemOrRet, b.elemOrRet)
+  END;
+  IF a.form = TFRecord THEN
+    IF (a.symList = b.symList) & (a.size = b.size) THEN RETURN TRUE END;
+    RETURN TypeIsExtension(b, a) OR TypeIsExtension(a, b)
+  END;
+  IF a.form = TFPointer THEN
+    IF (a.base = NIL) OR (b.base = NIL) THEN RETURN a.base = b.base END;
+    RETURN TypeStructEq(a.base, b.base)
+  END;
+  RETURN TRUE
+END TypeStructEq;
+
 PROCEDURE TypeAssignCompat*(dst, src: TypeDesc): BOOLEAN;
 BEGIN
   IF dst = src THEN RETURN TRUE END;
@@ -625,7 +650,17 @@ BEGIN
   IF (dst.form = TFProc)    & (src.form = TFNiltype)  THEN RETURN TRUE END;
   IF (dst.form = TFPointer) & (src.form = TFPointer) THEN
     IF (dst.base # NIL) & (dst.base.form = TFNotype) THEN RETURN TRUE END;
-    RETURN TypeIsExtension(src.base, dst.base)
+    IF TypeIsExtension(src.base, dst.base) THEN RETURN TRUE END;
+    (* Cross-module structural fallback: two independently-elaborated
+       POINTER TO ARRAY (or nested pointer-to-array) descriptors for the same
+       type — same fix TypeParamCompat's VAR path has, needed for a by-value
+       POINTER-TO-ARRAY parameter passed across a .def boundary (e.g. TASM's
+       Scan.MemText handed by value to Scan.InitMem from Parse.MOD). *)
+    IF (dst.base # NIL) & (src.base # NIL) &
+       (dst.base.form = TFArray) & (src.base.form = TFArray) THEN
+      RETURN TypeStructEq(dst.base, src.base)
+    END;
+    RETURN FALSE
   END;
   IF (dst.form = TFRecord) & (src.form = TFRecord) THEN
     RETURN TypeIsExtension(src, dst)
@@ -642,30 +677,6 @@ BEGIN
   END;
   RETURN FALSE
 END TypeAssignCompat;
-
-(* Structural equality for VAR-parameter binding across independently
-   elaborated type descriptors (once in the defining module, once again in
-   an importing module via .def).  Mirrors the RECORD structural fallback
-   below but for ARRAY element types, recursing through nested arrays and
-   pointer-to-record so a POINTER TO ARRAY N OF T (any T) gets the same
-   cross-module fallback POINTER TO RECORD already has.  See PTR.MD. *)
-PROCEDURE TypeStructEq(a, b: TypeDesc): BOOLEAN;
-BEGIN
-  IF a = b THEN RETURN TRUE END;
-  IF a.form # b.form THEN RETURN FALSE END;
-  IF a.form = TFArray THEN
-    RETURN (a.len = b.len) & TypeStructEq(a.elemOrRet, b.elemOrRet)
-  END;
-  IF a.form = TFRecord THEN
-    IF (a.symList = b.symList) & (a.size = b.size) THEN RETURN TRUE END;
-    RETURN TypeIsExtension(b, a) OR TypeIsExtension(a, b)
-  END;
-  IF a.form = TFPointer THEN
-    IF (a.base = NIL) OR (b.base = NIL) THEN RETURN a.base = b.base END;
-    RETURN TypeStructEq(a.base, b.base)
-  END;
-  RETURN TRUE
-END TypeStructEq;
 
 PROCEDURE TypeParamCompat*(formal, actual: TypeDesc; isVar: BOOLEAN): BOOLEAN;
 BEGIN

@@ -1,48 +1,29 @@
-# Makefile for Trubo Link (SRC/TLINK/)
-# Builds tlink.exe (DOS MZ): merged RDOFF2 linker for tiny-model .COM/.SYS
-# and small-model .EXE output (see TLINK.MOD's header comment for details).
-#
-# Bootstrap: BOOT/TOC.EXE (MS-DOS MZ) — copied locally so xt can find it
-# in the CWD.  BOOT/TOC.EXE is NEVER modified by the build.
-#
-# Not part of the top-level `make all` build graph: tlink is a standalone
-# leaf tool (same status as tasm), built and installed on demand.
-#
-# Usage:
-#   make          — compile + link tlink.exe (auto-named TLINK.exe)
-#   make install  — copy TLINK.exe to BIN/TLINK.EXE
-#   make clean    — remove .om files, TLINK.exe, and local setup files
-BIN_DIR = ../../BIN
-BIN_TOC = $(BIN_DIR)/TOC.EXE
-BIN_OM  = $(BIN_DIR)/OBERON.OM
-BIN_TRUBO_OM = $(BIN_DIR)/TRUBO.OM
-XT      = xt
-
-# No -c: xt uses process CWD (SRC/TLINK/) as the C:\ mount root, same
-# rationale as SRC/TASM/Makefile — the stdlib OBERON.OM lives outside this
-# dir, so it's copied locally rather than reached via a DOS path.
-XTRUN  = $(XT) run --max=300000000
-TOC = TOC.EXE
+BIN_DIR   = ../../BIN
+OBERON_OM = OBERON.OM
+TRUBO_OM  = TRUBO.OM
+TOC       = TOC.EXE
+XT        = xt
+XTRUN     = $(XT) run --max=300000000
 
 all: TLINK.EXE
 
-TRUBO.OM: $(BIN_TRUBO_OM)
-	cp $(BIN_TRUBO_OM) TRUBO.OM
+$(TRUBO_OM): $(BIN_DIR)/$(TRUBO_OM)
+	cp $(BIN_DIR)/$(TRUBO_OM) $(TRUBO_OM)
 
-$(TOC): $(BIN_TOC)
-	cp $(BIN_TOC) $(TOC)
+$(TOC): $(BIN_DIR)/$(TOC)
+	cp $(BIN_DIR)/$(TOC) $(TOC)
 
-OBERON.OM: $(BIN_OM)
-	cp $(BIN_OM) OBERON.OM
+$(OBERON_OM): $(BIN_DIR)/$(OBERON_OM)
+	cp $(BIN_DIR)/$(OBERON_OM) $(OBERON_OM)
 
-TLINK.EXE: TLINK.MOD TEXE.MOD $(TOC) OBERON.OM TRUBO.OM
-	$(XTRUN) -e "OBERON_LIB=TRUBO.OM" $(TOC) /LOG=debug /ENTRY=Run TLINK.MOD /M
+TLINK.EXE: TLINK.MOD TEXE.MOD $(TOC) $(OBERON_OM) $(TRUBO_OM)
+	$(XTRUN) -e "OBERON_LIB=$(TRUBO_OM)" $(TOC) /CD /LOG=debug /ENTRY=Run TLINK.MOD /M
 
 install: TLINK.EXE
 	mkdir -p $(BIN_DIR)
 	cp TLINK.EXE $(BIN_DIR)/TLINK.EXE
 
 clean:
-	rm -f *.OM *.EXE OUTPUT.LOG
+	rm -f *.OM *.EXE
 
 .PHONY: all install clean

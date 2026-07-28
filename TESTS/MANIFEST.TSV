@@ -52,6 +52,7 @@ paramtype/real-to-int-formal-rejected	PARMTYP1.MOD	fails	compile-fails
 paramtype/int-to-real-formal-rejected	PARMTYP2.MOD	fails	compile-fails
 paramtype/open-array-accepts-fixed	PARMTYPK.MOD		file-in-workdir	Parmtypk.om
 paramtype/byval-aggr-and-var-runtime	ASGNPARM.MOD	/ENTRY=Run	errorlevel	0
+paramtype/var-named-array-alias-fwd	VARALIAS.MOD	/ENTRY=Run	errorlevel	0
 paramtype/pass-records-byval-byvar	PASSREC.MOD	/ENTRY=Run	errorlevel	0
 asgnrec/array-elem-record-assign	ASGNREC.MOD	/ENTRY=Run	errorlevel	0
 paramtype/pass-fixed-arrays-byval-byvar	PASSARR.MOD	/ENTRY=Run	errorlevel	0
@@ -93,7 +94,7 @@ cross-call/10b-reloc-segreloc-pair	CROSSCAL.MOD+OTHERLIB.OM		has-reloc-and-segre
 cross-call/13f-imported-still-far	CROSSCAL.MOD+OTHERLIB.OM		code-contains	9A
 local-far/13a-push-cs-near	LOCALFAR.MOD		code-contains	0EE8
 local-far/13b-no-far-call	LOCALFAR.MOD		no-code-contains	9A
-local-far/13c-no-segreloc	LOCALFAR.MOD		no-segreloc
+local-far/13c-has-code-segreloc	LOCALFAR.MOD		has-segreloc
 local-far/13d-internal-near	NEAR13.MOD		code-contains	E8
 local-far/13e-no-pushcs	NEAR13.MOD		no-code-contains	0EE8
 entry/6a-system-init	ENTRYMOD.MOD	/ENTRY=Main	has-import	SYSTEM_INIT
@@ -236,6 +237,18 @@ mz/min-alloc-65536-stack	STK55A.MOD	/ENTRY=Run	mz-min-alloc	4096
 mz/max-alloc-65536-stack	STK55A.MOD	/ENTRY=Run	mz-max-alloc	4096
 mz/min-alloc-32768-stack	STK55G.MOD	/ENTRY=Run	mz-min-alloc	2048
 mz/max-alloc-32768-stack	STK55G.MOD	/ENTRY=Run	mz-max-alloc	2048
+ne/cp-signature	NECHECK.MOD	/CP /ENTRY=Run	ne-signature
+ne/cp-seg-count	NECHECK.MOD	/CP /ENTRY=Run	ne-seg-count	5
+ne/cp-entry-seg	NECHECK.MOD	/CP /ENTRY=Run	ne-entry-seg	1
+ne/cp-lfanew	NECHECK.MOD	/CP /ENTRY=Run	ne-lfanew	3646
+ne/cp-linkver	NECHECK.MOD	/CP /ENTRY=Run	ne-word-at	2 262
+ne/cp-progflags	NECHECK.MOD	/CP /ENTRY=Run	ne-word-at	12 778
+ne/cp-modrefcnt	NECHECK.MOD	/CP /ENTRY=Run	ne-word-at	30 1
+ne/cp-targetos-expver	NECHECK.MOD	/CP /ENTRY=Run	ne-word-at	62 768
+ne/cp-kernel-modref	NECHECK.MOD	/CP /ENTRY=Run	ne-has-kernel
+ne/cp-init-task	NECHECK.MOD	/CP /ENTRY=Run	ne-init-task
+ne/cp-code-seg-attr	NECHECK.MOD	/CP /ENTRY=Run	ne-seg-attr	1 7440
+ne/cp-data-seg-attr	NECHECK.MOD	/CP /ENTRY=Run	ne-seg-attr	2 3137
 dos/paramstr0-not-truncated	DOSARG.MOD	/ENTRY=Run	errorlevel	0
 constexp/40a-pub-in-def	CSTEXP.MOD		om-member-contains	CSTEXP.DEF Cstexp_Pub
 constexp/40b-priv-not-in-def	CSTEXP.MOD		om-member-no-contains	CSTEXP.DEF Priv

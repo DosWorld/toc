@@ -202,7 +202,7 @@ END OnSegReloc;
 PROCEDURE PerformLinking*(ls: Link.State; ms: State);
 BEGIN
   curMs := ms;
-  Link.PerformLinking(ls, OnSegReloc)
+  Link.PerformLinking(ls, Link.OnReloc, OnSegReloc)
 END PerformLinking;
 
 (* ---- TDS/TDINFO debug block (/G) ----
@@ -657,7 +657,7 @@ END WriteDebugInfo;
    The chunked copy itself lives in Link.CopySpan (shared with LinkNE). *)
 PROCEDURE CopyCodeImage(ls: Link.State; VAR fout: Files.File; n: LONGINT);
 BEGIN
-  IF n > LONGINT(0) THEN Link.CopySpan(ls^.spillFile, fout, n) END;
+  IF n > LONGINT(0) THEN Files.BlockCopy(ls^.spillFile, fout, n) END;
   Files.Close(ls^.spillFile)   (* delete-on-close removes LNKCODE.TMP *)
 END CopyCodeImage;
 

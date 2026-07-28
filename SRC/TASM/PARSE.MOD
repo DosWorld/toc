@@ -273,8 +273,8 @@ BEGIN
     IF srcTop = MaxSrcDepth - 1 THEN Fail("macro expansion nested too deep"); RETURN END;
     NEW(expansion);
     IF expansion = NIL THEN Fail("out of memory (define expansion)"); RETURN END;
-    SYSTEM.MOVE(sub[0], expansion^.buf[0], Strings.Length(sub));
-    expansion^.buf[Strings.Length(sub)] := 0X;
+    SYSTEM.MOVE(sub[0], expansion^[0], Strings.Length(sub));
+    expansion^[Strings.Length(sub)] := 0X;
     (* CurFname BEFORE the push: it must capture the INVOCATION SITE's
        filename for the expansion's diagnostics -- after INC(srcTop) it
        would read the new slot's stale/blank fname instead, making every
@@ -531,6 +531,7 @@ END ParseMemBody;
 PROCEDURE ParseOperand(VAR op: Enc.Operand; sizeHint: INTEGER);
   VAR size, reg, qual: INTEGER; isSeg: BOOLEAN; neg: BOOLEAN;
       name: ARRAY Scan.MaxIdent OF CHAR; nameOrig: ARRAY Scan.MaxIdent OF CHAR;
+      equVal: LONGINT;
 BEGIN
   (* full zero-init: an OKReg/OKImm operand only fills the fields it needs,
      leaving the rest as stack garbage from the caller's uninitialised
@@ -566,6 +567,22 @@ BEGIN
       TokNext;
       IF isSeg THEN op.kind := Enc.OKSegReg ELSE op.kind := Enc.OKReg END;
       op.reg := reg; op.size := size; op.seg := Enc.NoSeg;
+      RETURN
+    END;
+    IF Sym.LookupConst(nameOrig, equVal) THEN
+      (* EQU constant: a plain absolute immediate, NOT a relocated label. Its
+         value is known by the time it is referenced (EQU is defined before use
+         in this dialect), so it resolves the same in both passes. An optional
+         "+/- disp" tail folds into the constant, matching the label path. *)
+      TokNext;
+      op.kind := Enc.OKImm; op.hasLabel := FALSE; op.disp := equVal;
+      WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+        neg := (tSym = Scan.TMinus); TokNext;
+        IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
+        IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
+        TokNext
+      END;
+      IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
       RETURN
     END;
     (* bare label used as an immediate/address value -- original case, to
@@ -1067,14 +1084,12 @@ BEGIN
   inMacroDef := FALSE;
   IF skipping THEN RETURN END;
   macroBodyBuf[total] := 0X;
-  (* MemText is a fixed-size (Scan.MaxMemText) heap pointer to a one-
-     field RECORD wrapping the buffer -- see Scan.MemText's own comment
-     for why (a compiler VAR-parameter type-compatibility gap for bare
-     POINTER-TO-ARRAY across three modules). NEW takes no size argument. *)
+  (* MemText is a fixed-size (Scan.MaxMemText) heap POINTER TO ARRAY OF CHAR;
+     NEW takes no size argument. *)
   NEW(body);
   IF body = NIL THEN Fail("out of memory (macro body)"); RETURN END;
-  SYSTEM.MOVE(macroBodyBuf[0], body^.buf[0], total);
-  body^.buf[total] := 0X;
+  SYSTEM.MOVE(macroBodyBuf[0], body^[0], total);
+  body^[total] := 0X;
   Sym.DefineMacro(name, nParams, body)
 END DoMacroRecord;
 
@@ -1132,13 +1147,19 @@ END DoTimes;
 (* ParseResTerm: one signed integer literal -- the leaf of the count
    expression grammar below. *)
 PROCEDURE ParseResTerm(VAR v: LONGINT);
-  VAR neg: BOOLEAN;
+  VAR neg: BOOLEAN; cval: LONGINT;
 BEGIN
   neg := FALSE;
   IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
-  IF tSym # Scan.TInt THEN Fail("expected count after RESB/RESW/RESD"); RETURN END;
-  v := tIval; IF neg THEN v := -v END;
-  TokNext
+  IF tSym = Scan.TInt THEN
+    v := tIval; TokNext
+  ELSIF (tSym = Scan.TIdent) & Sym.LookupConst(tIdOrig, cval) THEN
+    (* an EQU constant is a legal term in a count/EQU expression *)
+    v := cval; TokNext
+  ELSE
+    Fail("expected integer or EQU constant"); RETURN
+  END;
+  IF neg THEN v := -v END
 END ParseResTerm;
 
 (* ParseResMulDiv: left-to-right chain of '*'/'/' over integer terms,
@@ -1380,6 +1401,43 @@ BEGIN
   RETURN (d = Lex.DDb) OR (d = Lex.DDw) OR (d = Lex.DTimes)
 END IsDataDirectiveNext;
 
+(* IsEquNext: TRUE if the current token is the EQU keyword (the operator of a
+   colon-less "NAME EQU expr" constant definition). *)
+PROCEDURE IsEquNext(): BOOLEAN;
+BEGIN
+  RETURN (tSym = Scan.TIdent) & Strings.Equal(tId, "EQU")
+END IsEquNext;
+
+(* DoEqu: "NAME EQU expr" -- define NAME as a constant equal to the value of a
+   constant integer expression (the same +,-,*,/ integer grammar RESB/RESW/RESD
+   counts accept).  Implemented over the %define table: the evaluated value is
+   stored as its decimal text, so every existing reference-substitution path
+   (scanner-level %define expansion) resolves NAME to the number with no new
+   symbol kind, segment, or relocation needed.  `name` is the already-consumed
+   colon-less identifier; the current token is EQU.
+   NASM evaluates the RHS once at definition; a purely-constant RHS makes this
+   equivalent to the textual %define of the same number.  Names used in the RHS
+   that were themselves EQU/%define constants are already text-substituted by
+   the scanner before this point, so the RHS the grammar sees is pure integers. *)
+PROCEDURE DoEqu(name, nameOrig: ARRAY OF CHAR);
+  VAR v: LONGINT; fn: ARRAY 128 OF CHAR;
+BEGIN
+  TokNext;   (* consume EQU *)
+  ParseResExpr(v);
+  IF LogErr.HaveErr() OR anyErr THEN RETURN END;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after EQU expression"); RETURN
+  END;
+  (* Store as a SegConst label (NOT a %define): this is why the EQU name does
+     not self-expand on its own definition line in pass 2 — Sym.DefineConst
+     lives in the label table, which the scanner's %define expansion ignores.
+     Both passes run this; DefineConst treats an identical re-definition as
+     idempotent.  The name is case-sensitive like every other label, so store
+     the original-case spelling. *)
+  CurFname(fn);
+  Sym.DefineConst(nameOrig, v, fn, tLine)
+END DoEqu;
+
 (* ParseInstruction: mnemId already resolved via Lex.LookupMnem; parse
    0..3 comma-separated operands, then hand off to Enc.Encode.  Enc's own
    pass gating (see ENC.MOD SetContext/B/W) means calling Encode
@@ -1528,18 +1586,18 @@ BEGIN
      sequence either way. Once no more '%' is found, the final literal
      tail (including a trailing lone '%' with nothing useful after it,
      copied through as-is) is appended and the loop ends. *)
-  bodyLen := Strings.Length(body^.buf);
+  bodyLen := Strings.Length(body^);
   expBuf[0] := 0X;
   runStart := 0;
   more := TRUE;
   WHILE more DO
     pctPos := WORD(runStart);
-    IF ~Strings.Pos("%", body^.buf, pctPos) THEN
-      Strings.Extract(body^.buf, runStart, bodyLen - runStart, literalBuf);
+    IF ~Strings.Pos("%", body^, pctPos) THEN
+      Strings.Extract(body^, runStart, bodyLen - runStart, literalBuf);
       IF ~AppendChecked(literalBuf, expBuf, "macro expansion too long") THEN RETURN END;
       more := FALSE
     ELSE
-      Strings.Extract(body^.buf, runStart, INTEGER(pctPos) - runStart, literalBuf);
+      Strings.Extract(body^, runStart, INTEGER(pctPos) - runStart, literalBuf);
       IF ~AppendChecked(literalBuf, expBuf, "macro expansion too long") THEN RETURN END;
       IF INTEGER(pctPos) + 1 >= bodyLen THEN
         (* trailing lone '%' at the very end of the body -- copy it
@@ -1548,7 +1606,7 @@ BEGIN
         IF ~AppendChecked("%", expBuf, "macro expansion too long") THEN RETURN END;
         more := FALSE
       ELSE
-        Strings.Extract(body^.buf, INTEGER(pctPos) + 1, 1, literalBuf);
+        Strings.Extract(body^, INTEGER(pctPos) + 1, 1, literalBuf);
         afterPct := literalBuf[0];
         IF (afterPct >= "1") & (afterPct <= "9") THEN
           argNum := ORD(afterPct) - ORD("0");
@@ -1576,8 +1634,8 @@ BEGIN
   IF srcTop = MaxSrcDepth - 1 THEN Fail("macro expansion nested too deep"); RETURN END;
   NEW(expansion);
   IF expansion = NIL THEN Fail("out of memory (macro expansion)"); RETURN END;
-  SYSTEM.MOVE(expBuf[0], expansion^.buf[0], Strings.Length(expBuf));
-  expansion^.buf[Strings.Length(expBuf)] := 0X;
+  SYSTEM.MOVE(expBuf[0], expansion^[0], Strings.Length(expBuf));
+  expansion^[Strings.Length(expBuf)] := 0X;
   (* CurFname BEFORE the push -- same ordering fix as TokNext's %define
      push: after INC(srcTop) it reads the new slot's stale/blank fname,
      which made every diagnostic inside a macro body report an empty
@@ -1603,7 +1661,14 @@ END InvokeMacro;
 PROCEDURE ParseStatement(name, nameOrig: ARRAY OF CHAR; mnemId: INTEGER);
   VAR prefixId: INTEGER;
 BEGIN
-  IF (mnemId = Lex.LNone) & IsDataDirectiveNext() THEN
+  IF (mnemId = Lex.LNone) & IsEquNext() THEN
+    (* "NAME EQU expr": `name`/`nameOrig` (already consumed) is the constant's
+       name, the current token is the EQU keyword.  Defines a numeric constant
+       (see DoEqu) — NOT a code/data label, so DefineCurLabel is deliberately
+       not called.  The constant is stored (SegConst) under its original-case
+       spelling, like every other label. *)
+    DoEqu(name, nameOrig)
+  ELSIF (mnemId = Lex.LNone) & IsDataDirectiveNext() THEN
     (* NASM allows a colon-less label immediately followed by a data
        directive on the same line, e.g. "MemStartSeg  dw 0" -- `name`
        (already consumed) is that implicit label; `tSym` is now

@@ -83,6 +83,12 @@ VAR
      order (the chain follows ModRec.sortNext). *)
   gModFile:  Files.File;
   gModOpen:  BOOLEAN;
+  (* /CP (NE) target selected — set from the CLI in Run before compilation.
+     Under /CP the entry stub prepends a far call to the external KERNEL.INITTASK
+     (ordinal 91) as the program's first instruction (see GenEntryStub);
+     LinkNE turns it into the one external IMPORTORDINAL NE reloc.  /CD (MZ) never
+     emits it. *)
+  gTargetCP: BOOLEAN;
   modCount:  ModEntry;
   gSortHead: ModEntry;
   gSortTail: ModEntry;
@@ -514,6 +520,10 @@ END FreeMods;
 PROCEDURE EmitFarCallTo(obj: Rdoff.ObjFile; id: INTEGER);
   VAR oa, sa: LONGINT;
 BEGIN
+  (* Normal 0000 placeholder: the linker bakes the resolved offset into the
+     operand.  For /CP the NE writer (LinkNE) reads that resolved offset for the
+     reloc's target and then stamps the reference-NE FFFF placeholder back into
+     the file — so no target-specific placeholder is needed here. *)
   Rdoff.EmitByte(obj, Rdoff.SegCode, OpCallFar);
   oa := Rdoff.CodeLen(obj);
   Rdoff.EmitByte(obj, Rdoff.SegCode, BYTE(0));
@@ -531,7 +541,7 @@ END EmitFarCallTo;
 PROCEDURE GenEntryStub(modName, procName: ARRAY OF CHAR; minPara, maxPara: LONGINT;
                        VAR mainRdf: Files.File): BOOLEAN;
   VAR obj: Rdoff.ObjFile;
-      sysInitId, sysDoneId, modInitId, procId: INTEGER;
+      sysInitId, sysDoneId, modInitId, procId, initTaskId: INTEGER;
       initSym: ARRAY 66 OF CHAR;
       procSym: ARRAY 66 OF CHAR;
 BEGIN
@@ -539,7 +549,8 @@ BEGIN
   IF obj = NIL THEN LogErr.Error("out of memory (entry stub)"); RETURN FALSE END;
   Rdoff.RdfInit(obj);
   IF LogErr.HaveErr() THEN DISPOSE(obj); RETURN FALSE END;
-  sysInitId := Rdoff.RdfAddImport(obj, "SYSTEM_INIT");
+  IF gTargetCP THEN sysInitId := Rdoff.RdfAddImport(obj, "SYSTEM_DPMI_INIT")
+  ELSE sysInitId := Rdoff.RdfAddImport(obj, "SYSTEM_INIT") END;
   sysDoneId := Rdoff.RdfAddImport(obj, "SYSTEM_DONE");
   Strings.Copy(modName, initSym); Strings.Append("__init", initSym);
   modInitId := Rdoff.RdfAddImport(obj, initSym);
@@ -547,6 +558,17 @@ BEGIN
   Strings.Append(procName, procSym);
   procId := Rdoff.RdfAddImport(obj, procSym);
   Rdoff.RdfAddGlobal(obj, "start", BYTE(Rdoff.SegCode), LONGINT(0));
+  (* /CP only: the OS/2 kernel requires the program's FIRST instruction to be a
+     far call to KERNEL.INITTASK (a genuine external import, resolved by the OS/2
+     loader).  It is emitted as an unresolvable import named "KERNEL_INITTASK";
+     LinkNE turns that into an EXTERNAL (module-ref) NE reloc — the ONLY external
+     fixup this toolchain emits.  "start" stays at offset 0 (points at this
+     call), so the CS:IP entry is the INITTASK call, exactly like the reference
+     NE.  /CD (MZ) never emits it. *)
+  IF gTargetCP THEN
+    initTaskId := Rdoff.RdfAddImport(obj, "KERNEL_INITTASK");
+    EmitFarCallTo(obj, initTaskId)
+  END;
   Rdoff.EmitByte(obj, Rdoff.SegCode, BYTE(0B8H));
   Rdoff.EmitByte(obj, Rdoff.SegCode, BYTE(minPara MOD LONGINT(256)));
   Rdoff.EmitByte(obj, Rdoff.SegCode, BYTE((minPara DIV LONGINT(256)) MOD LONGINT(256)));
@@ -937,7 +959,7 @@ BEGIN
     Out.String("               block to the linked .EXE, merged from every"); Out.Ln;
     Out.String("               module compiled with (*$D+*). Requires /ENTRY=."); Out.Ln;
     Out.String("  /CD          DOS real-mode MZ .EXE output (default)."); Out.Ln;
-    Out.String("  /CP          protected-mode New Executable (NE) output."); Out.Ln;
+    Out.String("  /CP          DOS protected-mode NE .EXE output."); Out.Ln;
     Out.String("  /LOG=level   set diagnostic verbosity: debug, info (default),"); Out.Ln;
     Out.String("               warn, or error. Case-insensitive."); Out.Ln;
     LogErr.Error("missing <file.Mod> argument");
@@ -984,6 +1006,11 @@ BEGIN
     LogErr.Error("oc: no source file");
     RETURN 1
   END;
+
+  (* Record the target so the entry stub (built at compile time in
+     GenEntryStub/EmitFarCallTo) can use TP's FFFF far-call placeholder under
+     /CP.  /CD is unchanged. *)
+  gTargetCP := targetCP;
 
   (* /SYSTEM: single-file compile only, no dep-scan or link *)
   IF hasSystem THEN

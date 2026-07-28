@@ -646,12 +646,17 @@ BEGIN
             Cgen.Emit1(BYTE(Cgen.OpPushDs));             (* PUSH DS *)
             Cgen.CgLoadAddrMem(WORD(arg.adr));
             Cgen.Emit1(BYTE(Cgen.OpPushAx))             (* PUSH offset *)
-          ELSIF (arg.mode = Cgen.MLocal) & (arg.type.len >= 0) THEN
+          ELSIF (arg.mode = Cgen.MLocal) & (arg.type.len >= 0) & ~arg.isRef THEN
+            (* genuine local fixed-size array by value: its bytes live in the
+               stack slot, so its address is SS:[BP+adr]. *)
             Cgen.Emit1(BYTE(Cgen.OpPushSs));             (* PUSH SS *)
             Cgen.CgLoadAddrBp(arg.adr);
             Cgen.Emit1(BYTE(Cgen.OpPushAx))             (* PUSH offset *)
           ELSIF arg.mode = Cgen.MLocal THEN
-            (* open-array formal forwarded: far ptr at [BP+adr] *)
+            (* far ptr already in the slot at [BP+adr]: either an open-array
+               formal, or a VAR fixed-array-alias param (arg.isRef) whose slot
+               holds {ofs:2,seg:2} — forward the pointer, do NOT take the slot's
+               own address. *)
             PushFarSlotBp(arg.adr)
           ELSIF (arg.mode = Cgen.MReg) & arg.isRef THEN
             (* ES:BX already holds far address (record field, indexed elem) *)

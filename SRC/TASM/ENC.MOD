@@ -653,11 +653,11 @@ END EncShift;
 
 (* ---- XCHG: AX,reg has a 1-byte short form (90+r); otherwise the general
    87 /r (word) or 86 /r (byte) ModRM form. *)
-(* NOTE: deliberately does NOT copy a VAR-param Operand into a local via
-   `:=` (e.g. "other := b") -- a compiler codegen bug (under investigation)
-   makes that copy read from the WRONG VAR parameter's address when a
-   procedure has two VAR params of the same RECORD type.  EmitModRm is
-   called directly on the VAR params themselves instead. *)
+(* Operates on the VAR params a/b directly and passes them straight to
+   EmitModRm — no local Operand copy is needed here.  (Historically this
+   avoided copying a VAR-param Operand via `:=` to dodge a TOC codegen bug with
+   two same-type VAR RECORD params; that bug was fixed 2026-07-28, so the copy
+   is safe again, but the direct form is still the simplest.) *)
 PROCEDURE EncXchg(VAR a, b: Operand);
 BEGIN
   IF (a.kind = OKReg) & (a.reg = RAX) & (a.size = SzWord) & (b.kind = OKReg) THEN
@@ -781,7 +781,7 @@ BEGIN
     Err("short branch to EXTERN symbol is impossible (rel8 has no relocation)");
     B(opcode); B(BYTE(0)); RETURN
   END;
-  IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
+  IF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
     Err("undefined symbol"); B(opcode); B(BYTE(0)); RETURN
   END;
   IF lseg # Sym.SegCode THEN
@@ -820,7 +820,7 @@ BEGIN
     Rdoff.RdfAddReloc(obj, Rdoff.SegCode, patchOfs, 2, impId, TRUE);
     RETURN
   END;
-  IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
+  IF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
     Err("undefined symbol"); B(opcode); W(0); RETURN
   END;
   IF lseg # Sym.SegCode THEN
@@ -957,7 +957,7 @@ BEGIN
   IF pass = 1 THEN
     IF ~Sym.IsDefined(target.labelName) THEN
       useShort := FALSE
-    ELSIF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
+    ELSIF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
       useShort := FALSE
     ELSE
       instrEnd := here + LONGINT(2);
@@ -969,7 +969,7 @@ BEGIN
     useShort := ReplayJmpDecision(startOfs)
   END;
   IF useShort THEN
-    IF ~Sym.Lookup(target.labelName, lseg, lofs) THEN
+    IF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
       Err("undefined symbol"); B(BYTE(0EBH)); B(BYTE(0)); RETURN
     END;
     IF lseg # Sym.SegCode THEN
@@ -1021,14 +1021,10 @@ END EncCallIndirect;
    same offset/segment split EmitDisp16 already performs for `SEG label`
    elsewhere, just both halves of the same instruction instead of two
    separate instructions. *)
-(* E2 (code-smell audit): `segOp := target` below copies a VAR-param
-   Operand into a local -- currently safe (EncJmpFarDirect has only ONE
-   VAR Operand param, and EncXchg's comment above scopes the known TOC
-   codegen bug to procedures with TWO same-type VAR record params), but
-   the pattern is a trap: adding a second VAR Operand param here later
-   would silently hit the same miscompile EncXchg works around by never
-   doing this copy at all. If this procedure ever grows a second VAR
-   Operand parameter, build segOp field-by-field instead of `:=`. *)
+(* `segOp := target` below copies the VAR-param Operand into a local so the
+   segment word can be emitted with isSegOf=TRUE without disturbing `target`.
+   (The former warning here about a two-same-type-VAR-RECORD-param copy
+   miscompile no longer applies — that TOC codegen bug was fixed 2026-07-28.) *)
 PROCEDURE EncJmpFarDirect(opcode: BYTE; VAR target: Operand);
   VAR segOp: Operand;
 BEGIN

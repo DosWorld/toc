@@ -113,6 +113,10 @@ BEGIN
   Out.String("  ne-seg-count      FILE.EXE VALUE      NE segment count (ofs 1Ch) == VALUE"); Out.Ln;
   Out.String("  ne-entry-seg      FILE.EXE VALUE      NE entry CS seg idx (ofs 16h) == VALUE"); Out.Ln;
   Out.String("  ne-word-at        FILE.EXE OFS VALUE  NE WORD at NE+OFS (decimal) == VALUE"); Out.Ln;
+  Out.String("  ne-lfanew         FILE.EXE VALUE      e_lfanew (NE header offset) == VALUE"); Out.Ln;
+  Out.String("  ne-seg-attr       FILE.EXE IDX VALUE  NE seg IDX attribute WORD == VALUE"); Out.Ln;
+  Out.String("  ne-has-kernel     FILE.EXE            module-ref table == one KERNEL ref"); Out.Ln;
+  Out.String("  ne-init-task      FILE.EXE            seg1 has KERNEL.INITTASK importord reloc (ord 91)"); Out.Ln;
   Out.Ln;
   Out.String("Exit codes: 0=match  1=no-match  2=usage  3=I/O"); Out.Ln;
   Halt(ExitUsage)
@@ -484,6 +488,18 @@ BEGIN
   RETURN TRUE
 END mzWordAt;
 
+PROCEDURE mzByteAt(path: ARRAY OF CHAR; ofs: LONGINT; VAR val: INTEGER): BOOLEAN;
+  VAR f: Files.File; b: ARRAY 1 OF BYTE; n: INTEGER;
+BEGIN
+  IF ~Files.Reset(f, path) THEN RETURN FALSE END;
+  Files.Seek(f, ofs);
+  n := Files.BlockRead(f, b[0], 1);
+  Files.Close(f);
+  IF n # 1 THEN RETURN FALSE END;
+  val := INTEGER(b[0]);
+  RETURN TRUE
+END mzByteAt;
+
 PROCEDURE mzSpWord(path: ARRAY OF CHAR; VAR sp: INTEGER): BOOLEAN;
 BEGIN RETURN mzWordAt(path, LONGINT(16), sp)
 END mzSpWord;
@@ -528,6 +544,80 @@ BEGIN
   IF ~neBase(path, base) THEN RETURN FALSE END;
   RETURN mzWordAt(path, base + ofs, v)
 END neWordAt;
+
+(* Read the segment-table attribute WORD (offset +4 in the 8-byte entry) of the
+   1-based NE segment `idx`.  Segment-table offset is the WORD at NE+22h. *)
+PROCEDURE neSegAttr(path: ARRAY OF CHAR; idx: INTEGER; VAR v: INTEGER): BOOLEAN;
+  VAR base: LONGINT; segTblOfs: INTEGER;
+BEGIN
+  IF ~neBase(path, base) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(22H), segTblOfs) THEN RETURN FALSE END;
+  RETURN mzWordAt(path, base + LONGINT(segTblOfs) + LONGINT((idx - 1) * 8 + 4), v)
+END neSegAttr;
+
+(* TRUE if the module-reference table has exactly one entry whose imported name
+   is "KERNEL".  Reads modrefcnt (NE+1Eh), module-ref-table offset (NE+28h) —
+   the first WORD there is an offset into the imported-names table (NE+2Ah);
+   the counted string at that offset must be "KERNEL". *)
+PROCEDURE neHasKernel(path: ARRAY OF CHAR): BOOLEAN;
+  VAR base: LONGINT; cnt, modOfs, impOfs, nameOfs, ln, i, cv: INTEGER;
+      kernel: ARRAY 7 OF CHAR;
+BEGIN
+  kernel[0] := "K"; kernel[1] := "E"; kernel[2] := "R"; kernel[3] := "N";
+  kernel[4] := "E"; kernel[5] := "L"; kernel[6] := 0X;
+  IF ~neBase(path, base) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(1EH), cnt) THEN RETURN FALSE END;
+  IF cnt # 1 THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(28H), modOfs) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(2AH), impOfs) THEN RETURN FALSE END;
+  (* first module-ref WORD = offset into imported names table *)
+  IF ~mzWordAt(path, base + LONGINT(modOfs), nameOfs) THEN RETURN FALSE END;
+  IF ~mzByteAt(path, base + LONGINT(impOfs) + LONGINT(nameOfs), ln) THEN RETURN FALSE END;
+  IF ln # 6 THEN RETURN FALSE END;
+  i := 0;
+  WHILE i < 6 DO
+    IF ~mzByteAt(path, base + LONGINT(impOfs) + LONGINT(nameOfs) + LONGINT(1 + i), cv) THEN
+      RETURN FALSE END;
+    IF CHR(cv) # kernel[i] THEN RETURN FALSE END;
+    INC(i)
+  END;
+  RETURN TRUE
+END neHasKernel;
+
+(* TRUE if segment 1's relocation block contains the KERNEL.INITTASK external
+   import: an IMPORTORDINAL (flag bit0 set) PTR (type 03h) record whose
+   target-seg = 1 (KERNEL module-ref index) and target-offset = 91 (the INITTASK
+   ordinal).  Reads the seg1 table entry (file-offset in sectors via alignShift,
+   file length), then the reloc block that immediately follows the raw data:
+   <count WORD><count * 8-byte records>. *)
+PROCEDURE neInitTask(path: ARRAY OF CHAR): BOOLEAN;
+  VAR base: LONGINT; segTblOfs, alignSh, foSect, flen, cnt, i: INTEGER;
+      rt, fl, tseg, toff: INTEGER; recBase: LONGINT; blockBase: LONGINT;
+      sector: LONGINT;
+BEGIN
+  IF ~neBase(path, base) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(22H), segTblOfs) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(32H), alignSh) THEN RETURN FALSE END;
+  (* seg1 table entry: fileOfs(sectors) at +0, fileLen at +2 *)
+  IF ~mzWordAt(path, base + LONGINT(segTblOfs), foSect) THEN RETURN FALSE END;
+  IF ~mzWordAt(path, base + LONGINT(segTblOfs) + LONGINT(2), flen) THEN RETURN FALSE END;
+  sector := SYSTEM.LSL(LONGINT(1), alignSh);
+  blockBase := LONGINT(foSect) * sector + LONGINT(flen);   (* reloc block start *)
+  IF ~mzWordAt(path, blockBase, cnt) THEN RETURN FALSE END;
+  i := 0;
+  WHILE i < cnt DO
+    recBase := blockBase + LONGINT(2) + LONGINT(i) * LONGINT(8);
+    IF ~mzByteAt(path, recBase, rt) THEN RETURN FALSE END;
+    IF ~mzByteAt(path, recBase + LONGINT(1), fl) THEN RETURN FALSE END;
+    IF ~mzWordAt(path, recBase + LONGINT(4), tseg) THEN RETURN FALSE END;
+    IF ~mzWordAt(path, recBase + LONGINT(6), toff) THEN RETURN FALSE END;
+    IF (rt = 03H) & (SYSTEM.AND(fl, 3) = 1) & (tseg = 1) & (toff = 91) THEN
+      RETURN TRUE
+    END;
+    INC(i)
+  END;
+  RETURN FALSE
+END neInitTask;
 
 (* ---- make-stub: write a tiny .om containing one .DEF member ---- *)
 
@@ -801,6 +891,28 @@ BEGIN
     IF ~neWordAt(file, parseInt(a1), spVal) THEN Halt(ExitIo) END;
     lval := SYSTEM.AND(LONGINT(spVal), LONGINT(0FFFFH));
     IF lval = parseInt(a2) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-lfanew") THEN
+    (* e_lfanew (NE header file offset, proves the MZ stub length) == VALUE *)
+    IF ~getArg(3, a1) THEN Usage END;
+    IF ~neBase(file, lval) THEN Halt(ExitIo) END;
+    IF lval = parseInt(a1) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-seg-attr") THEN
+    (* attribute WORD of 1-based NE segment IDX == VALUE (a1=IDX, a2=VALUE) *)
+    IF ~getArg(3, a1) THEN Usage END;
+    IF ~getArg(4, a2) THEN Usage END;
+    IF ~neSegAttr(file, INTEGER(parseInt(a1)), spVal) THEN Halt(ExitIo) END;
+    lval := SYSTEM.AND(LONGINT(spVal), LONGINT(0FFFFH));
+    IF lval = parseInt(a2) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-has-kernel") THEN
+    (* module-ref table is exactly one KERNEL reference *)
+    IF neHasKernel(file) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
+
+  ELSIF Strings.Equal(cmd, "ne-init-task") THEN
+    (* seg1 has an IMPORTORDINAL PTR reloc to KERNEL(modref 1) ordinal 91 *)
+    IF neInitTask(file) THEN Halt(ExitMatch) ELSE Halt(ExitNoMatch) END
 
   ELSE
     Out.String("rdfgrep: unknown subcommand: "); Out.String(cmd); Out.Ln;

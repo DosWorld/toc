@@ -25,6 +25,9 @@ CONST
   SegCode* = 0;
   SegData* = 1;
   SegBss*  = 2;
+  SegConst* = 3;   (* EQU constant: label-table entry whose "offset" is the
+                      constant's absolute value; resolved as a plain immediate,
+                      never a relocated address (see Parse.MOD's operand path). *)
 
 TYPE
   GlobalVisitProc* = PROCEDURE(name: ARRAY OF CHAR; seg: INTEGER; offset: LONGINT);
@@ -270,6 +273,46 @@ BEGIN
   SetLastLabel(name)
 END DefineLabel;
 
+(* DefineConst: register an EQU constant NAME = value.  Stored in the label
+   table with seg=SegConst so the scanner's %define expansion never touches it
+   (that only consults the define table) — which is why an EQU name does not
+   self-expand on its own definition line in pass 2.  A pass-2 re-definition
+   with the same value is expected (idempotent); a different value, or a clash
+   with a real label of the same name, is a duplicate error. *)
+PROCEDURE DefineConst*(name: ARRAY OF CHAR; value: LONGINT; fname: ARRAY OF CHAR; line: LONGINT);
+  VAR node: LabelNode; idx: INTEGER;
+BEGIN
+  IF FindNode(name, node, idx) THEN
+    IF node^.defined[idx] THEN
+      IF (node^.seg[idx] = SegConst) & (node^.offset[idx] = value) THEN
+        (* pass-2 identical re-definition: ignore *)
+      ELSE
+        LogErr.ErrorInFile(fname, line, "duplicate symbol (EQU name clashes)")
+      END
+    ELSE
+      node^.seg[idx] := SegConst; node^.offset[idx] := value; node^.defined[idx] := TRUE;
+      node^.defOrder[idx] := nextDefOrder; INC(nextDefOrder)
+    END
+  ELSE
+    IF ~AppendLabelSlot(name, node, idx) THEN RETURN END;
+    node^.seg[idx] := SegConst; node^.offset[idx] := value;
+    node^.defined[idx] := TRUE; node^.isGlobal[idx] := FALSE;
+    node^.defOrder[idx] := nextDefOrder; INC(nextDefOrder);
+    node^.isExtern[idx] := FALSE; node^.importId[idx] := 0;
+    INC(node^.count); INC(nLabels)
+  END
+END DefineConst;
+
+(* LookupConst: if NAME is an EQU constant, return its value and TRUE. *)
+PROCEDURE LookupConst*(name: ARRAY OF CHAR; VAR value: LONGINT): BOOLEAN;
+  VAR node: LabelNode; idx: INTEGER;
+BEGIN
+  IF FindNode(name, node, idx) & node^.defined[idx] & (node^.seg[idx] = SegConst) THEN
+    value := node^.offset[idx]; RETURN TRUE
+  END;
+  RETURN FALSE
+END LookupConst;
+
 (* ReserveLabel: ensure a (possibly forward-referenced, not-yet-defined)
    label exists in the table so Lookup won't report "unknown symbol" for a
    genuine forward reference during Pass 1 operand scanning.  A no-op if
@@ -343,6 +386,25 @@ BEGIN
   END;
   RETURN FALSE
 END Lookup;
+
+(* LookupDefined: like Lookup, but returns FALSE for a reserved-but-never-
+   DEFINED label (Lookup returns TRUE with a placeholder offset 0 for those, so
+   a branch emitter that trusted it would jump to code offset 0 — a "jump into
+   nowhere").  Used by the branch/call emitters (pass 2 only, where the target
+   must be defined), so an undefined target is a clean error instead of a wild
+   jump even if CheckAllDefined is ever bypassed.  NOT used on the pass-1
+   forward-reference data path (EmitDisp16), which legitimately needs the
+   offset-0 placeholder before the label is defined. *)
+PROCEDURE LookupDefined*(name: ARRAY OF CHAR; VAR seg: INTEGER; VAR offset: LONGINT): BOOLEAN;
+  VAR full: ARRAY MaxName OF CHAR; node: LabelNode; idx: INTEGER;
+BEGIN
+  NormalizeLocal(name, full);
+  IF FindNode(full, node, idx) & node^.defined[idx] THEN
+    seg := node^.seg[idx]; offset := node^.offset[idx];
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END LookupDefined;
 
 PROCEDURE IsDefined*(name: ARRAY OF CHAR): BOOLEAN;
   VAR full: ARRAY MaxName OF CHAR; node: LabelNode; idx: INTEGER;

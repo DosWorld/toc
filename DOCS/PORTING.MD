@@ -153,7 +153,7 @@ Covers a practical 8086 subset: the general-purpose/segment/string instructions
 `SECTION .text|.data|.bss`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added
 synonym)/`STRUC`/`ENDSTRUC`/`RESB`/`RESW`/`RESD` (valid only inside
 `SECTION .bss`)/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`%INCLUDE`/
-`%MACRO`/`%ENDMACRO`/`DB`/`DW`/`TIMES`, plus `SEG`/`BYTE`/`WORD`/`FAR`/
+`%MACRO`/`%ENDMACRO`/`DB`/`DW`/`TIMES`/`EQU`, plus `SEG`/`BYTE`/`WORD`/`FAR`/
 `SHORT`/`NEAR` operand qualifiers, character-literal immediates, and
 `-Dname[=value]` CLI predefines.  `EXTERN`/`IMPORT` symbols resolve through
 RDOFF2 `RDFREC_IMPORT` records, so a `.rdf` produced by `tasm` can reference
@@ -182,6 +182,19 @@ to a fixed 4096-byte cap (`Scan.MaxMemText`); nested `%macro` and macro-
 invokes-itself recursion (past the same 8-level source-stack depth as
 `%include`) are both fatal errors, not hangs or silent mis-scoping.
 
+`NAME EQU expr` (2026-07-29): defines a numeric constant.  `expr` is a
+constant integer expression over `+`,`-`,`*`,`/` (NASM precedence, no parens)
+whose terms are integer literals or previously-defined `EQU` constants —
+e.g. `BUFSIZE EQU 128`, `COMBO EQU BUFSIZE*2+BASE`.  Unlike `%define`, an `EQU`
+name is a real symbol (stored in the label table as a `SegConst` entry, not the
+text-substitution table), so it never self-expands on its own definition line
+and resolves to a plain absolute immediate — no relocation — wherever it is
+referenced (including as a `RESB`/`RESW`/`RESD` count).  Using an `EQU` name as a
+branch target is a "target must be a label" error, not a jump to its numeric
+value.  Constant-integer RHS only (no label-address or forward-reference
+arithmetic — Simplicity First; the `.asm` files this toolchain assembles use
+`EQU`/`%define` for constants, never label math).
+
 `tasm` is the tool of record for six hand-written `SRC/LIB/*.asm` files:
 `SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`,
 `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, and
@@ -201,12 +214,14 @@ questions (jump sizing, FPU/`%define` scope, CLI conventions) and the
 `[label+register]` addressing limitation.
 
 Source: `SRC/TASM/{SCAN,SYM,LEX,DIR,ENC,PARSE,TASM}.MOD`.  Tests:
-`TESTS/test_tasm.sh` — 16 checks: 3 real-NASM oracles (`SYSTEM.ASM`/`EMS.ASM`/
-`DETECT.ASM`), 11 byte-diff self-consistency/synthetic fixtures (incl.
-`WINCB.ASM`/`KMOUSE.ASM`/`SCREEN.ASM` and the `TESTS/FIX/*.ASM` STRUC/EXTERN/
-shift/Jcc/no-operand/REP/`.bss` fixtures), 2 `check_fails` error-path
-fixtures — run as part of `make test`. See `DOCS/TESTS.MD` §"TASM assembler
-regression test" for the full breakdown.
+`TESTS/test_tasm.sh` (110 checks as of 2026-07-29) — real-NASM oracles
+(`SYSTEM.ASM`/`EMS.ASM`, byte-identical), byte-diff self-consistency/synthetic
+fixtures (incl. `WINCB.ASM`/`KMOUSE.ASM`/`SCREEN.ASM` and the `TESTS/FIX/*.ASM`
+STRUC/EXTERN/shift/Jcc/no-operand/REP/`.bss`/`EQU` fixtures), and `check_fails`
+error-path fixtures (incl. `TUNDEFJMP.ASM` — a branch to an undefined label must
+be a fatal "undefined symbol" error, never a wild jump to code offset 0) — run
+as part of `make test`. See `DOCS/TESTS.MD` §"TASM assembler regression test"
+for the full breakdown.
 
 ### 1.8 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
 
@@ -219,10 +234,21 @@ image (`/T=com`, the default; `/T=sys` with `/A:`/`/N:` for a device
 driver; `/T=texe` for a tiny-model MZ `.EXE` — a 3-byte `JMP start` stub,
 an 18-byte device header, or no on-disk stub at all, respectively, all
 sharing one contiguous code+data+bss segment with no relocation table) or
-a small-model `.EXE` (`/T=exe` — paragraph-aligned code/data/bss regions
-plus an MZ relocation table). These are memory models `toc.exe`'s own
-embedded linker does not target (it always produces a full/large-model-style
-single-segment image sized to the compiler's own conventions).
+a small-model `.EXE` (`/T=exe` — a paragraph-aligned CS code segment and a
+separate DS=SS segment holding data+bss+stack, plus an MZ relocation table).
+These are memory models `toc.exe`'s own embedded linker does not target (it
+always produces a full/large-model-style single-segment image sized to the
+compiler's own conventions).
+
+`/T=exe` (small model) prepends a **7-byte DS-setup startup stub**
+(`mov ax,ss / mov ds,ax / jmp start`) at code offset 0 and points the MZ entry
+`IP` at it, so `DS` is established as the DGROUP (=SS) before `start` runs — the
+program does not set `DS` itself (setting up the small-model data segment is the
+linker's job).  Module code/data are laid out with a correct paragraph-aligned
+round-up (`Align16`) between modules, so multi-module small-model links resolve
+cross-module references correctly (fixed 2026-07-29 — the earlier `Align16`
+rounded to the wrong boundary, corrupting every module after the first with a
+non-16-aligned size).
 
 `/T=texe` wraps the same tiny-model layout as `/T=com` in a minimal MZ
 header instead of relying on DOS's `.COM` loader convention: header

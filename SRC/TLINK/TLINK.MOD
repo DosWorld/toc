@@ -441,7 +441,14 @@ END Align2;
 
 PROCEDURE Align16(v: LONGINT): LONGINT;
 BEGIN
-  IF SYSTEM.AND(WORD(v), 15) # 0 THEN RETURN (v - Align2(SYSTEM.AND(WORD(v), 15)) + LONGINT(16)) END;
+  (* round UP to the next 16-byte (paragraph) boundary.  The low nibble is
+     v AND 15; when non-zero, advance to the next paragraph by subtracting that
+     nibble and adding 16.  (The earlier form subtracted Align2(v AND 15), which
+     is NOT the low nibble — e.g. v=17 gave 31 instead of 32 — corrupting
+     small-model multi-module layout; see CalculateLayoutSmall.) *)
+  IF SYSTEM.AND(WORD(v), 15) # 0 THEN
+    RETURN v - LONGINT(SYSTEM.AND(WORD(v), 15)) + LONGINT(16)
+  END;
   RETURN v
 END Align16;
 
@@ -492,7 +499,14 @@ END CalculateLayoutTiny;
 PROCEDURE CalculateLayoutSmall;
   VAR m: Module; codeBase, dataBase, bssBase: LONGINT;
 BEGIN
-  codeBase := LONGINT(0); dataBase := LONGINT(0);
+  (* Reserve a DS-setup startup stub at code offset 0 (mov ax,ss / mov ds,ax /
+     jmp start = 7 bytes).  DOS enters an .EXE with DS=ES=PSP; the small-model
+     layout math (ResolveTarget's SegData case, PatchMem) assumes DS=SS=DGROUP,
+     so TLINK owns establishing DS.  All module code shifts up by headerSize;
+     finalCodeOfs already threads through every reloc, so nothing else changes.
+     WriteOutputExe emits the stub bytes and points the MZ entry IP at 0. *)
+  headerSize := 7;
+  codeBase := LONGINT(headerSize); dataBase := LONGINT(0);
   m := modHead;
   WHILE m # NIL DO
     IF m.used THEN
@@ -710,12 +724,18 @@ BEGIN
   END;
 
   IF mode = ModeSys THEN
-    FindSymbol("strategy", e); owner := SymOwner(e);
+    FindSymbol("strategy", e);
+    IF ~SymFound(e) THEN LogErr.Error("tlink: /T=sys: 'strategy' entry symbol not found"); RETURN END;
+    owner := SymOwner(e);
     strategyIp := WORD(SymOffset(e) + owner.finalCodeOfs);
-    FindSymbol("interrupt", e); owner := SymOwner(e);
+    FindSymbol("interrupt", e);
+    IF ~SymFound(e) THEN LogErr.Error("tlink: /T=sys: 'interrupt' entry symbol not found"); RETURN END;
+    owner := SymOwner(e);
     interruptIp := WORD(SymOffset(e) + owner.finalCodeOfs)
   ELSE
-    FindSymbol("start", e); owner := SymOwner(e);
+    FindSymbol("start", e);
+    IF ~SymFound(e) THEN LogErr.Error("tlink: 'start' entry symbol not found"); RETURN END;
+    owner := SymOwner(e);
     IF mode = ModeExe THEN
       entryIp := WORD(SymOffset(e));
       IF SymSegId(e) = Rdoff.SegCode THEN entryIp := entryIp + WORD(owner.finalCodeOfs)
@@ -797,6 +817,20 @@ PROCEDURE WriteOutputExe;
 BEGIN
   IF ~Files.ReWrite(fout, outFileName) THEN LogErr.Error2("tlink: cannot write ", outFileName); RETURN END;
 
+  (* DS-setup startup stub at code offset 0 (headerSize=7 bytes reserved by
+     CalculateLayoutSmall).  Establishes DS=SS=DGROUP then jumps to the real
+     entry point.  The MZ header enters here (IP=0), NOT at 'start' directly.
+       8C D0        mov ax, ss
+       8E D8        mov ds, ax
+       E9 rel16     jmp near start   ; rel16 = entryIp - 7 (next-instr = offset 7)
+     Emitted after PerformLinking has filled codeBuf, overwriting the reserved
+     7 leading bytes (no module code lives there — codeBase started at 7). *)
+  codeBuf^[0] := 08CH; codeBuf^[1] := 0D0H;               (* mov ax, ss *)
+  codeBuf^[2] := 08EH; codeBuf^[3] := 0D8H;               (* mov ds, ax *)
+  codeBuf^[4] := 0E9H;                                    (* jmp near   *)
+  codeBuf^[5] := BYTE(SYSTEM.AND(entryIp - 7, 0FFH));
+  codeBuf^[6] := BYTE(SYSTEM.AND(SYSTEM.LSR(WORD(entryIp - 7), 8), 0FFH));
+
   (* codePara must round UP (ceiling), not truncate: SS is set to codePara,
      so if totalCodeLen isn't a multiple of 16, truncating leaves the last
      <16 bytes of code physically inside the stack segment -- stack pushes
@@ -836,7 +870,7 @@ BEGIN
   Files.WriteWord(fout, INTEGER(codePara));  (* SS *)
   Files.WriteWord(fout, 0FFFEH);             (* SP *)
   Files.WriteWord(fout, 0);                  (* checksum *)
-  Files.WriteWord(fout, entryIp);            (* IP *)
+  Files.WriteWord(fout, 0);                  (* IP = 0: enter the DS-setup stub *)
   Files.WriteWord(fout, 0);                  (* CS *)
   Files.WriteWord(fout, 28);                 (* reloc table offset *)
   Files.WriteWord(fout, 0);                  (* overlay *)

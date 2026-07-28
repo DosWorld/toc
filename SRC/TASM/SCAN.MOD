@@ -40,23 +40,12 @@ CONST
                             staging-buffer cap. *)
 
 TYPE
-  (* MemText wraps its buffer in a one-field RECORD rather than being a
-     bare `POINTER TO ARRAY MaxMemText OF CHAR` -- SRC/TOC/SYMS.MOD's
-     TypeParamCompat (VAR-parameter type compatibility) has a structural-
-     equality fallback for POINTER-TO-RECORD across module boundaries
-     but none for POINTER-TO-ARRAY, so a bare array pointer used as a
-     VAR parameter in a THIRD module (Parse.MOD calling Sym.MOD's
-     GetMacro/DefineMacro, both declared against Scan.MemText) fails
-     with a spurious "type mismatch in actual parameter" even though
-     both sides import the identical Scan.MemText -- each module's
-     compile re-parses SCAN.def into its own TypeDesc instance, and only
-     the RECORD-base branch of TypeParamCompat treats those as
-     compatible. Routing through a RECORD sidesteps the missing
-     compiler branch entirely (found and confirmed 2026-07-16; the real
-     fix would be a TFArray-base branch in TypeParamCompat, out of scope
-     for this TASM feature). *)
-  MemTextRec* = RECORD buf*: ARRAY MaxMemText OF CHAR END;
-  MemText* = POINTER TO MemTextRec;
+  (* A heap buffer for in-memory source text (%macro bodies / expansions).
+     A bare POINTER TO ARRAY now works as a cross-module VAR parameter: the
+     compiler's SYMS.TypeParamCompat gained the POINTER-TO-ARRAY structural-
+     equality branch (2026-07-28), so the former one-field-RECORD wrapper that
+     sidestepped its absence is no longer needed. *)
+  MemText* = POINTER TO ARRAY MaxMemText OF CHAR;
 
   Scanner* = RECORD
     f*:      Files.File;
@@ -103,7 +92,7 @@ BEGIN RETURN IsAlpha(c) OR SYSTEM.ISDIGIT(CHR(c))
 END IsIdentChar;
 
 (* NextChMem: §I.4's memory-source read -- pulls one char from
-   s.mem^.buf[s.memPos] instead of the file, sharing the same CR-skip/LF-
+   s.mem^[s.memPos] instead of the file, sharing the same CR-skip/LF-
    count semantics as the file path below so callers (Next, ScanNumber,
    ScanString, ...) never need to know which source is active. A NUL
    byte in the buffer ends the virtual "file" (mem is a NUL-terminated
@@ -117,7 +106,7 @@ BEGIN
     IF s.memPos >= MaxMemText THEN
       s.ch := ChEof; done := TRUE
     ELSE
-      c := s.mem^.buf[s.memPos]; INC(s.memPos);
+      c := s.mem^[s.memPos]; INC(s.memPos);
       IF c = 0X THEN
         s.ch := ChEof; done := TRUE
       ELSIF ORD(c) = 13 THEN

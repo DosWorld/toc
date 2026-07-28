@@ -428,7 +428,7 @@ of which can be combined in one comment separated by commas:
 incremental compiler, and smart linker.
 
 ```
-toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] <Root.Mod>
+toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] <Root.Mod>
 ```
 
 | Command | Behavior |
@@ -451,6 +451,10 @@ its case:
 - **`/G`** — at link time, merge every module's Turbo-Debugger symbol
   records (collected via `$D+`) into a TDS/TDINFO block appended to the
   `.exe`. See [Debug info](#debug-info-for-turbo-debugger).
+- **`/CD`** (default) — DOS real-mode MZ `.EXE` output.
+- **`/CP`** — 16-bit DPMI protected-mode **New Executable (NE)** output,
+  structured to match a Borland-Pascal `/CP` reference (see
+  `DOCS/NE-PLAN.MD`). `/G` is not valid with `/CP`.
 
 ```
 toc.exe MyLib.Mod                     REM compile-only → MyLib.om

@@ -75,7 +75,7 @@ That means:
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
-- **281-row regression manifest** plus DOS-side executable and unit-test
+- **301-row regression manifest** plus DOS-side executable and unit-test
   suites — every codegen change is checked against real compiled/linked/run
   output, not just "it compiled."
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
@@ -90,16 +90,24 @@ That means:
   oracles for every hand-assembled `.ASM` file in the standard library
   (`SYSTEM.ASM`, `EMS.ASM`, `DETECT.ASM`, `WINCB.ASM`, `KMOUSE.ASM`,
   `SCREEN.ASM`) — four fully byte-identical, two identical in code/data with
-  only a benign header-record-ordering difference. It's the toolchain's tool
+  only a benign header-record-ordering difference. Directives include
+  `SECTION`/`GLOBAL`/`EXTERN`/`STRUC`/`DB`/`DW`/`TIMES`/`RESB`.../`EQU` and the
+  `%define`/`%ifdef`/`%include`/`%macro` preprocessor. It's the toolchain's tool
   of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
   `SRC/TLINK/` is one TOC-tool (`tlink /T=com|sys|exe|texe`) covering both
   tiny model (`.COM`/`.SYS`/`texe`, no relocation table) and small model
-  (`.EXE` with an MZ relocation table) — memory models `toc.exe`'s own
-  embedded linker does not target. `texe` is a tiny-model `.COM`-equivalent
-  wrapped in an MZ header instead of relying on DOS's `.COM`-load
-  convention — see `DOCS/BUILD.MD`'s "Using tlink" section.
+  (`.EXE` with an MZ relocation table + a DS-setup startup stub) — memory
+  models `toc.exe`'s own embedded linker does not target. `texe` is a
+  tiny-model `.COM`-equivalent wrapped in an MZ header instead of relying on
+  DOS's `.COM`-load convention — see `DOCS/BUILD.MD`'s "Using tlink" section.
+- **New Executable (NE) output (`/CP`).** `toc /CP` emits a 16-bit
+  DPMI-protected-mode program in an **NE** container, structured to match a
+  real Borland-Pascal `/CP` reference (verbatim MZ stub, `KERNEL` module
+  reference + `INITTASK` entry call, DPL segment attributes, per-segment
+  relocation blocks). Default `/CD` still produces the DOS real-mode MZ `.EXE`.
+  See `DOCS/NE-PLAN.MD` / `DOCS/NE-BP.MD`.
 
 ---
 
@@ -277,7 +285,8 @@ see `DOCS/PORTING.MD` §16.1 for the porting conventions (companion NASM
 ## Test suite
 
 ```bash
-make test     # 281-row manifest — codegen bytes, RDOFF structure, error messages, exit codes
+make test     # 301-row manifest + TASM (110) & TLINK (4) regressions — codegen
+              # bytes, RDOFF structure, error messages, exit codes
 make testall  # + DOS-side executables (Section 17) and unit tests (Section 18)
 ```
 
