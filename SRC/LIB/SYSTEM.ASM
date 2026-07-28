@@ -43,7 +43,7 @@ global SYSTEM_REQUIRE87
 global SYSTEM_Halt
 global SYSTEM_SetExitProc, SYSTEM_GetExitProc
 global SYSTEM_Seg0040, SYSTEM_SegB000, SYSTEM_SegB800, SYSTEM_SegA000
-global SYSTEM_IsDPMI
+global SYSTEM_IsDPMI, SYSTEM_DPMI_INIT
 
 check_8087:
         FNINIT
