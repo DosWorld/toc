@@ -195,29 +195,19 @@ BEGIN
   EscStr(buf)
 END TextBackground;
 
-(* Delay: pause execution for approximately the given duration, via
-   repeated INT 15h AH=86h (BIOS wait) calls in 65535-microsecond chunks.
-   Parameters: MS — delay duration in milliseconds; values <= 0 return
-   immediately.
-   Result: none. *)
-PROCEDURE Delay*(MS: INTEGER);
+(* Delay: block for `ms` milliseconds via the BIOS wait service
+   (INT 15h AH=86h; CX:DX = microseconds).  Used for the cosmetic
+   line-clear/new-figure pauses -- a real blocking wait, so it cannot spin
+   forever the way the old `WHILE TicksFrom(...) < N` busy-waits could. *)
+PROCEDURE Delay(ms: INTEGER);
   VAR r: SYSTEM.Registers; us: LONGINT;
 BEGIN
-  IF MS <= 0 THEN RETURN END;
-  us := LONGINT(MS) * 1000;
-  WHILE us > 0 DO
-    r.AX := 8600H;
-    IF us > 65535 THEN
-      r.CX := INTEGER(SYSTEM.LSR(us, 16));
-      r.DX := INTEGER(SYSTEM.AND(us, 0FFFFH));
-      us := 0
-    ELSE
-      r.CX := 0;
-      r.DX := INTEGER(us);
-      us := 0
-    END;
-    SYSTEM.Intr(15H, r)
-  END
+  IF ms <= 0 THEN RETURN END;
+  us := LONGINT(ms) * 1000;
+  r.AX := 8600H;
+  r.CX := INTEGER(SYSTEM.LSR(us, 16));
+  r.DX := INTEGER(SYSTEM.AND(us, 0FFFFH));
+  SYSTEM.Intr(15H, r)
 END Delay;
 
 (* Sound: start the PC speaker beeping at a given frequency, by
