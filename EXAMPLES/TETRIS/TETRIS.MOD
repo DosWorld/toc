@@ -434,12 +434,14 @@ BEGIN
           END;
           screen[gy, gx] := col
   END END;
-  x0 := (40 - (NLetters * GlyphW + (NLetters - 1) * Gap)) DIV 2;
-  y0 := (25 - GlyphH) DIV 2;
+
   SYSTEM.FILL(screen[3, 5], 30, ChDot);
   FOR gy := 4 TO 20 DO SYSTEM.FILL(screen[gy, 3], 34, ChDot) END;
   SYSTEM.FILL(screen[21, 5], 30, ChDot);
+
   (* total width = NLetters glyphs + (NLetters-1) gaps *)
+  x0 := (40 - (NLetters * GlyphW + (NLetters - 1) * Gap)) DIV 2;
+  y0 := (25 - GlyphH) DIV 2;
   FOR i := 0 TO NLetters - 1 DO
     FOR gy := 0 TO GlyphH - 1 DO
       row := font[i, gy];
