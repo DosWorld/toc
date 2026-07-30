@@ -60,23 +60,24 @@ VAR
 (* --- assembly (TETRIS.ASM, linked via $L) ------------------------------- *)
 (* All FAR (Pascal call convention: args pushed left-to-right, callee pops
    the stack).  Function results come back in AX. *)
-PROCEDURE Draw(VAR buf; VAR sprites); FAR; EXTERNAL;   (* CGA sprite blitter *)
-PROCEDURE CalcDiff(VAR scr; VAR prv); FAR; EXTERNAL;   (* dirty-cell diff: mask unchanged cells 0FFH *)
-PROCEDURE GraphMode; FAR; EXTERNAL;                    (* set CGA mode 4 *)
-PROCEDURE TextMode; FAR; EXTERNAL;                     (* set 80x25 text *)
-PROCEDURE GetKey(): WORD; FAR; EXTERNAL;               (* INT 16h AH=0, blocking *)
-PROCEDURE HasKey(): BOOLEAN; FAR; EXTERNAL;            (* INT 16h AH=1 peek *)
-PROCEDURE Scan(key: WORD): BYTE; FAR; EXTERNAL;        (* scan code = hi(key) *)
-PROCEDURE Delay(ms: INTEGER); FAR; EXTERNAL;           (* BIOS wait, INT 15h AH=86h *)
-PROCEDURE Sound(hz: INTEGER); FAR; EXTERNAL;           (* PC-speaker tone on *)
-PROCEDURE NoSound; FAR; EXTERNAL;                      (* PC-speaker off *)
-(*$L TETRIS.RDF*)
 
-PROCEDURE WaitKey;
-BEGIN
-  WHILE HasKey() DO GetKey() END;
-  GetKey()
-END WaitKey;
+(* CGA sprite blitter *)
+PROCEDURE Draw(VAR buf; VAR sprites); FAR; EXTERNAL;
+(* dirty-cell diff: mask unchanged cells 0FFH *)
+PROCEDURE CalcDiff(VAR scr; VAR prv); FAR; EXTERNAL;
+
+PROCEDURE GraphMode; FAR; EXTERNAL;             (* set CGA mode 4 *)
+PROCEDURE TextMode; FAR; EXTERNAL;              (* set 80x25 text *)
+PROCEDURE GetKey(): WORD; FAR; EXTERNAL;        (* INT 16h AH=0, blocking *)
+PROCEDURE HasKey(): BOOLEAN; FAR; EXTERNAL;     (* INT 16h AH=1 peek *)
+PROCEDURE Scan(key: WORD): BYTE; FAR; EXTERNAL; (* scan code = hi(key) *)
+PROCEDURE Delay(ms: INTEGER); FAR; EXTERNAL;    (* BIOS wait, INT 15h AH=86h *)
+PROCEDURE Sound(hz: INTEGER); FAR; EXTERNAL;    (* PC-speaker tone on *)
+PROCEDURE NoSound; FAR; EXTERNAL;               (* PC-speaker off *)
+(* drain the keyboard buffer, then block for one keypress (result discarded) *)
+PROCEDURE WaitKey; FAR; EXTERNAL;
+
+(*$L TETRIS.RDF*)
 
 PROCEDURE MkAnimDown(x, y, width, heigh : INTEGER);
 VAR dy : INTEGER;

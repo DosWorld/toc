@@ -32,7 +32,7 @@ SECTION .text
 
 GLOBAL Tetris_Draw, Tetris_CalcDiff
 GLOBAL Tetris_GraphMode, Tetris_TextMode
-GLOBAL Tetris_GetKey, Tetris_HasKey, Tetris_Scan
+GLOBAL Tetris_GetKey, Tetris_HasKey, Tetris_Scan, Tetris_WaitKey
 GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
 
 %ifdef IS_FAR
@@ -197,6 +197,24 @@ Tetris_HasKey:
         jnz     .has                    ; ZF clear -> a key is waiting
         xor     ax, ax
 .has:
+        RETMACRO
+
+; -----------------------------------------------------------------------------
+; WaitKey -- no args -> retf 0.  Drain any keys already in the buffer, then
+; block until the next keypress (result discarded).  Equivalent to the Oberon
+;   WHILE HasKey() DO GetKey() END; GetKey()
+; -----------------------------------------------------------------------------
+Tetris_WaitKey:
+.drain:
+        mov     ax, 0100h               ; AH=1: peek keyboard status
+        int     16h
+        jz      .block                  ; ZF set -> buffer empty, go block
+        xor     ax, ax                  ; AH=0: consume the waiting key
+        int     16h
+        jmp     .drain
+.block:
+        xor     ax, ax                  ; AH=0: block for one keypress
+        int     16h
         RETMACRO
 
 ; -----------------------------------------------------------------------------
