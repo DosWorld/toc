@@ -31,7 +31,7 @@ CPU 8086
 SECTION .text
 
 GLOBAL Tetris_Draw, Tetris_CalcDiff
-GLOBAL Tetris_GraphMode, Tetris_TextMode
+GLOBAL Tetris_GraphMode, Tetris_TextMode, Tetris_SetCgaPalette
 GLOBAL Tetris_GetKey, Tetris_HasKey, Tetris_Scan, Tetris_WaitKey
 GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
 
@@ -170,6 +170,7 @@ Tetris_Draw:
 ; -----------------------------------------------------------------------------
 Tetris_GraphMode:
         mov     ax, 0004h               ; INT 10h: set CGA mode 4 (320x200x4)
+;        mov     ax, 0006h               ; INT 10h: set CGA mode 6 (640x200x2)
         int     10h
         RETMACRO
 
@@ -177,6 +178,23 @@ Tetris_TextMode:
         mov     ax, 0003h               ; INT 10h: set 80x25 colour text
         int     10h
         RETMACRO
+
+; -----------------------------------------------------------------------------
+; SetCgaPalette(num: BYTE) -- 1 arg (2 bytes) -> retf 2.
+; Selects the CGA mode-4 palette via INT 10h AH=0Bh, BH=1:
+;   num=0 -> green / red / brown ; num=1 -> cyan / magenta / white.
+; The BYTE arg is passed in the low byte of the pushed word at [bp+RSIZE+2].
+; -----------------------------------------------------------------------------
+Tetris_SetCgaPalette:
+        push    bp
+        mov     bp, sp
+        mov     al, [bp+RSIZE+2]        ; AL = num (low byte of arg word)
+        mov     bl, al                  ; BL = palette number
+        mov     bh, 1                   ; BH=1: select palette
+        mov     ah, 0Bh                 ; INT 10h AH=0Bh: set colour palette
+        int     10h
+        pop     bp
+        RETMACRO 2
 
 ; -----------------------------------------------------------------------------
 ; GetKey(): WORD -- blocking read, no args.  Result in AX (AH=scan, AL=ascii).
