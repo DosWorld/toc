@@ -425,9 +425,20 @@ BEGIN
      title cell is masked away by a stale ChSkip match. *)
   SYSTEM.FILL(prev[0,0], 25 * 40, ChSkip);
   SYSTEM.FILL(screen[0,0], 25 * 40, ChDot);
-  (* total width = NLetters glyphs + (NLetters-1) gaps *)
+  FOR gy := 0 TO 24 DO FOR gx := 0 TO 39 DO
+          CASE Random.Value(3) OF
+          0: col := ChGB;
+          | 1: col := ChRB;
+          | 2: col := ChFull;
+          END;
+          screen[gy, gx] := col
+  END END;
   x0 := (40 - (NLetters * GlyphW + (NLetters - 1) * Gap)) DIV 2;
   y0 := (25 - GlyphH) DIV 2;
+  SYSTEM.FILL(screen[3, 5], 30, ChDot);
+  FOR gy := 4 TO 20 DO SYSTEM.FILL(screen[gy, 3], 34, ChDot) END;
+  SYSTEM.FILL(screen[21, 5], 30, ChDot);
+  (* total width = NLetters glyphs + (NLetters-1) gaps *)
   FOR i := 0 TO NLetters - 1 DO
     FOR gy := 0 TO GlyphH - 1 DO
       row := font[i, gy];
