@@ -26,6 +26,7 @@ CONST
   ChRB    = 01H;   (* falling-figure block *)
   ChGB    = 02H;   (* settled block *)
   ChFull  = 09H;   (* full-row flash *)
+  ChSkip  = 0FFH;  (* sentinel: cell unchanged since last frame -> Draw skips it *)
 
 (* BIOS keyboard scan codes (high byte of INT 16h AH=0), used by Game. *)
   ScEsc   = 01H;   (* quit *)
@@ -45,6 +46,7 @@ VAR figures: ARRAY 8, 13 OF CHAR;
 
 VAR
   screen      : ARRAY 25, 40 OF BYTE;
+  prev        : ARRAY 25, 40 OF BYTE;   (* last frame's rendered cells (for dirty-cell diff) *)
   field       : ARRAY 20, 10 OF BYTE;
   figureField : ARRAY 4, 4 OF BYTE;
   figI, figN  : INTEGER;
@@ -59,6 +61,7 @@ VAR
 (* All FAR (Pascal call convention: args pushed left-to-right, callee pops
    the stack).  Function results come back in AX. *)
 PROCEDURE Draw(VAR buf; VAR sprites); FAR; EXTERNAL;   (* CGA sprite blitter *)
+PROCEDURE CalcDiff(VAR scr; VAR prv); FAR; EXTERNAL;   (* dirty-cell diff: mask unchanged cells 0FFH *)
 PROCEDURE GraphMode; FAR; EXTERNAL;                    (* set CGA mode 4 *)
 PROCEDURE TextMode; FAR; EXTERNAL;                     (* set 80x25 text *)
 PROCEDURE GetKey(): WORD; FAR; EXTERNAL;               (* INT 16h AH=0, blocking *)
@@ -68,6 +71,40 @@ PROCEDURE Delay(ms: INTEGER); FAR; EXTERNAL;           (* BIOS wait, INT 15h AH=
 PROCEDURE Sound(hz: INTEGER); FAR; EXTERNAL;           (* PC-speaker tone on *)
 PROCEDURE NoSound; FAR; EXTERNAL;                      (* PC-speaker off *)
 (*$L TETRIS.RDF*)
+
+PROCEDURE WaitKey;
+BEGIN
+  WHILE HasKey() DO GetKey() END;
+  GetKey()
+END WaitKey;
+
+PROCEDURE MkAnimDown(x, y, width, heigh : INTEGER);
+VAR dy : INTEGER;
+BEGIN
+  dy := 0;
+  WHILE dy < heigh DO
+     SYSTEM.FILL(screen[y+dy,x], width, ChFull);
+     IF dy # 0 THEN SYSTEM.FILL(screen[y + dy - 1, x], width, ChGB) END;
+     Delay(15);
+     INC(dy);
+     CalcDiff(screen, prev);
+     Draw(screen, spr)
+  END;
+END MkAnimDown;
+
+PROCEDURE MkAnimUp(x, y, width, heigh : INTEGER; Empty : BYTE);
+VAR dy : INTEGER;
+BEGIN
+  dy := heigh - 1;
+  WHILE dy >= 0 DO
+     SYSTEM.FILL(screen[y+dy,x], width, ChFull);
+     IF dy < heigh - 1 THEN SYSTEM.FILL(screen[y + dy + 1, x], width, Empty) END;
+     Delay(15);
+     DEC(dy);
+     CalcDiff(screen, prev);
+     Draw(screen, spr)
+  END;
+END MkAnimUp;
 
 (* --- game logic --------------------------------------------------------- *)
 
@@ -140,14 +177,6 @@ PROCEDURE ReDraw;
   VAR x, y: INTEGER;
       c: BYTE;
 BEGIN
-  SYSTEM.FILL(screen[0,0], 25 * 40, ChEmpty);
-  FOR y := 1 TO 21 DO
-    screen[y, 15] := ChVL;
-    screen[y, 26] := ChVL
-  END;
-  SYSTEM.FILL(screen[21, 15], 12, ChHL);
-  screen[21, 15] := ChLC;
-  screen[21, 26] := ChRC;
   FOR y := 0 TO 19 DO
     SYSTEM.FILL(screen[y + 1, 16], 10, ChDot);
     FOR x := 0 TO 9 DO
@@ -160,8 +189,13 @@ BEGIN
     IF c # ChEmpty THEN screen[1 + figY + y, 16 + figX + x] := c END
   END END;
   FOR y := 0 TO 2 DO FOR x := 0 TO 3 DO
-    IF figures[figN, y * 4 + x] # " " THEN screen[y + 1, x + 29] := ChGB END
+    IF figures[figN, y * 4 + x] = " " THEN screen[y + 1, x + 29] := ChEmpty
+    ELSE screen[y + 1, x + 29] := ChGB END
   END END;
+  (* Dirty-cell diff: keep only cells that changed since the previous frame;
+     mask the rest with ChSkip so Draw leaves their CGA area untouched.  `prev`
+     holds the real (unmasked) rendered value of each cell for next time. *)
+  CalcDiff(screen, prev);
   Draw(screen, spr)
 END ReDraw;
 
@@ -229,9 +263,11 @@ BEGIN
       SYSTEM.FILL(field[0,0], 10, ChEmpty);
       lines := lines + 1;
       (* Speed up every 20 lines: pause is the per-frame gravity delay in
-         BIOS ticks (Delay(pause*55) ms).  Floor at 1 so the fall never
-         becomes instant. *)
-      IF ((lines MOD 20) = 19) & (pause > 1) THEN pause := pause - 1 END;
+         BIOS ticks (Delay(pause*55) ms).  Derive it from the running line
+         count (level = lines DIV 20) so the ramp can't be skipped by a
+         multi-line clear, and floor at 1 so the fall never becomes instant. *)
+      pause := 7 - (lines DIV 20);
+      IF pause < 1 THEN pause := 1 END;
       IF ~muted THEN NoSound END
     ELSE y := y - 1 END
   END
@@ -275,7 +311,9 @@ BEGIN
     | ScDown:                                             (* rotate counter-cw *)
         figA := SYSTEM.AND(figA - 1, 3); LoadFigure; needRedraw := TRUE
     | ScP:                                                (* pause: block until next key *)
-        key := GetKey()
+        MkAnimDown(16, 1, 10, 20);
+        key := GetKey();
+        MkAnimUp(16, 1, 10, 20, ChDot)
     | ScSpace:                                            (* drop *)
         fall := TRUE
     | ScM:                                                (* toggle sound *)
@@ -292,7 +330,7 @@ END HandleKeys;
    be redrawn.  This is what makes controls feel live during the fall. *)
 PROCEDURE WaitStep(VAR needRedraw, fall, quit: BOOLEAN);
   CONST Slice = 15;                            (* ms per poll slice *)
-  VAR waited, target: INTEGER;
+  VAR waited, target: WORD;
 BEGIN
   target := pause * 55;
   waited := 0;
@@ -306,10 +344,23 @@ END WaitStep;
 
 PROCEDURE Game;
   VAR needRedraw: BOOLEAN;
-      steps: INTEGER;
+      steps: WORD;
+      y : INTEGER;
       fall, quit: BOOLEAN;
 BEGIN
   SYSTEM.FILL(field[0,0], 20 * 10, ChEmpty);
+  (* Force a full first-frame paint: no cell can match ChSkip, which is never
+     a real sprite index, so every cell is treated as changed. *)
+  SYSTEM.FILL(prev[0,0], 25 * 40, ChSkip);
+  SYSTEM.FILL(screen[0,0], 25 * 40, ChEmpty);
+  FOR y := 1 TO 21 DO
+    screen[y, 15] := ChVL;
+    screen[y, 26] := ChVL
+  END;
+  SYSTEM.FILL(screen[21, 15], 12, ChHL);
+  screen[21, 15] := ChLC;
+  screen[21, 26] := ChRC;
+  MkAnimUp(16, 1, 10, 20, ChDot);
   muted := FALSE;
   figN := Random.Value(8);
   NextFigure;
@@ -353,11 +404,50 @@ BEGIN
   END
 END Game;
 
-PROCEDURE WaitKey;
+(* Welcome screen: render "TETRIS" centred on the board in a 3x5 block font
+   (3 cells wide, 5 cells tall per glyph, 1 blank cell between letters), each
+   letter a random block colour, then wait for any key.  Each glyph is 5 bytes,
+   one per row; the low 3 bits of a byte are the 3 columns, bit 2 = leftmost. *)
+PROCEDURE Welcome;
+  CONST GlyphW = 3; GlyphH = 5; Gap = 1; NLetters = 6;
+  VAR font: ARRAY NLetters, GlyphH OF BYTE;
+      i, gx, gy, x0, y0, col: INTEGER;
+      row: BYTE;
 BEGIN
-  WHILE HasKey() DO GetKey() END;
-  GetKey()
-END WaitKey;
+  (* glyph rows: low 3 bits = 3 columns, bit 2 = leftmost pixel *)
+  font[0,0]:=07H; font[0,1]:=02H; font[0,2]:=02H; font[0,3]:=02H; font[0,4]:=02H; (* T *)
+  font[1,0]:=07H; font[1,1]:=04H; font[1,2]:=06H; font[1,3]:=04H; font[1,4]:=07H; (* E *)
+  font[2,0]:=07H; font[2,1]:=02H; font[2,2]:=02H; font[2,3]:=02H; font[2,4]:=02H; (* T *)
+  font[3,0]:=06H; font[3,1]:=05H; font[3,2]:=06H; font[3,3]:=05H; font[3,4]:=05H; (* R *)
+  font[4,0]:=07H; font[4,1]:=02H; font[4,2]:=02H; font[4,3]:=02H; font[4,4]:=07H; (* I *)
+  font[5,0]:=07H; font[5,1]:=04H; font[5,2]:=07H; font[5,3]:=01H; font[5,4]:=07H; (* S *)
+  (* prev is uninitialised before the first Game; force a full paint so no
+     title cell is masked away by a stale ChSkip match. *)
+  SYSTEM.FILL(prev[0,0], 25 * 40, ChSkip);
+  SYSTEM.FILL(screen[0,0], 25 * 40, ChDot);
+  (* total width = NLetters glyphs + (NLetters-1) gaps *)
+  x0 := (40 - (NLetters * GlyphW + (NLetters - 1) * Gap)) DIV 2;
+  y0 := (25 - GlyphH) DIV 2;
+  FOR i := 0 TO NLetters - 1 DO
+    FOR gy := 0 TO GlyphH - 1 DO
+      row := font[i, gy];
+      FOR gx := 0 TO GlyphW - 1 DO
+        (* bit (GlyphW-1-gx) set -> column gx lit (bit 2 = leftmost) *)
+        IF SYSTEM.AND(row, SYSTEM.LSL(1, GlyphW - 1 - gx)) # 0 THEN
+          CASE Random.Value(3) OF
+          0: col := ChGB;
+          | 1: col := ChRB;
+          | 2: col := ChFull;
+          END;
+          screen[y0 + gy, x0 + i * (GlyphW + Gap) + gx] := col
+        END
+      END
+    END
+  END;
+  CalcDiff(screen, prev);
+  Draw(screen, spr);
+  WaitKey
+END Welcome;
 
 (* --- static data init (runtime does NOT zero/const-init) ---------------- *)
 
@@ -399,8 +489,11 @@ PROCEDURE Run*;
 BEGIN
   InitData;
   GraphMode;
+  Welcome;
+  MkAnimDown(0, 0, 40, 25);
   Game;
-  WaitKey;
+  MkAnimDown(16, 1, 10, 20);
+  MkAnimUp(0, 0, 40, 25, ChEmpty);
   TextMode;
   SYSTEM.Halt(0)
 END Run;

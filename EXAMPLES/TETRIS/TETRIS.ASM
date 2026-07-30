@@ -30,7 +30,7 @@ CPU 8086
 
 SECTION .text
 
-GLOBAL Tetris_Draw
+GLOBAL Tetris_Draw, Tetris_CalcDiff
 GLOBAL Tetris_GraphMode, Tetris_TextMode
 GLOBAL Tetris_GetKey, Tetris_HasKey, Tetris_Scan
 GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
@@ -44,15 +44,65 @@ GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
 %endif
 
 ; -----------------------------------------------------------------------------
+; CalcDiff(VAR screen; VAR prev)  -- 2 VAR params = 8 arg bytes -> retf 8
+; Dirty-cell diff over all 25*40 = 1000 bytes.  For each cell i:
+;   if screen[i] = prev[i]  ->  screen[i] := 0FFH  (mark unchanged for Draw)
+;   else                    ->  prev[i]   := screen[i]  (remember new value)
+; After this, Draw skips every 0FFH cell, so only cells that changed since the
+; previous frame are blitted.  Same FAR/Pascal convention as Draw:
+;   screen (param 1): ofs [bp+RSIZE+6], seg [bp+RSIZE+8]
+;   prev   (param 2): ofs [bp+RSIZE+2], seg [bp+RSIZE+4]
+; DS:SI walks screen, ES:DI walks prev, in lockstep.
+; -----------------------------------------------------------------------------
+Tetris_CalcDiff:
+        push    bp
+        mov     bp, sp
+        push    ds
+        push    es
+        push    si
+        push    di
+
+        les     di, [bp+RSIZE+2]        ; ES:DI = prev   (param 2, low slot)
+        lds     si, [bp+RSIZE+6]        ; DS:SI = screen (param 1, high slot)
+        mov     cx, 1000                ; 25*40 cells
+        cld
+.cdloop:
+        lodsb                           ; AL = screen[i]; SI++ (SI now -> i+1)
+        cmp     al, [es:di]             ; == prev[i] ?
+        jne     .cdchanged
+        mov     byte [si-1], 0FFH       ; unchanged -> mask screen[i] so Draw skips it
+        inc     di                      ; advance prev in step (no write)
+        jmp     .cdnext
+.cdchanged:
+        stosb                           ; changed -> prev[i] := AL (screen value); DI++
+.cdnext:
+        dec     cx
+        jnz     .cdloop
+
+        pop     di
+        pop     si
+        pop     es
+        pop     ds
+        pop     bp
+        RETMACRO 8
+
+; -----------------------------------------------------------------------------
 ; Draw(VAR buf; VAR spr)   -- 2 VAR params = 8 arg bytes -> retf 8
 ; Oberon pushes args left-to-right: param 1 (buf) lands at the HIGHEST offset,
 ; param 2 (spr) at the lowest.  With a FAR frame:
 ;   buf (param 1): ofs [bp+RSIZE+6], seg [bp+RSIZE+8]
 ;   spr (param 2): ofs [bp+RSIZE+2], seg [bp+RSIZE+4]
 ;
-; For each of 25 rows x 40 columns of buf: read a sprite index byte, scale
-; by 16 (SHL 4) to index spr, then copy the 4x8 CGA cell into B800: even
-; scanlines at BX, odd scanlines at BX+2000h, +80 bytes per scanline pair.
+; Dirty-cell blit: a cell whose sprite index byte is 0FFH is UNCHANGED since
+; the previous frame -- the blitter skips it entirely (leaves that 4x8 area of
+; CGA memory untouched) and only advances the CGA cursor.  Sprite indices are
+; 0..9, so 0FFH is a safe "skip" sentinel that ReDraw writes into every cell
+; that did not change.
+;
+; For each of 25 rows x 40 columns of buf: read a sprite index byte; if 0FFH,
+; skip; else scale by 16 (SHL 4) to index spr, then copy the 4x8 CGA cell into
+; B800: even scanlines at BX, odd scanlines at BX+2000h, +80 bytes per
+; scanline pair.
 ; -----------------------------------------------------------------------------
 Tetris_Draw:
         push    bp
@@ -73,10 +123,12 @@ Tetris_Draw:
         push    bx
         mov     dl, 40
 .drawcol:
+        lodsb                           ; AL = buf[] sprite index
+        cmp     al, 0FFH                ; unchanged cell?
+        je      .skipcell               ; yes -> leave CGA area untouched
         push    di
         push    bx
         push    ds
-        lodsb                           ; AL = buf[] sprite index
         xor     ah, ah
         mov     cl, 4
         shl     ax, cl                  ; AX = index * 16
@@ -96,6 +148,7 @@ Tetris_Draw:
         pop     ds
         pop     bx
         pop     di
+.skipcell:
         add     bx, 2
         dec     dl
         jnz     .drawcol
