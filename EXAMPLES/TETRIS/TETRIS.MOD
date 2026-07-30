@@ -7,7 +7,7 @@
   Controls: Left/Right = move, Up/Down = rotate, Space = drop,
             P = pause, M = toggle sound, Esc = quit.
 
-  Build:  make          (in this directory)
+  Now, I (and you) saw something new: cga-camo.
 *)
 MODULE Tetris;
 
