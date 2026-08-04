@@ -436,17 +436,17 @@ of which can be combined in one comment separated by commas:
 
 ## Compiling and linking
 
-`toc.exe` is the whole toolchain in one binary: dependency scanner,
+`toc286.exe` is the whole toolchain in one binary: dependency scanner,
 incremental compiler, and smart linker.
 
 ```
-toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] <Root.Mod>
+toc286.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] <Root.Mod>
 ```
 
 | Command | Behavior |
 |---|---|
-| `toc.exe Root.Mod` | **Compile-only.** Scans transitive imports, recompiles anything stale, emits `.om` files. No link step — this is how you build a library. |
-| `toc.exe /ENTRY=Run Root.Mod` | **Compile + link.** Same scan/compile, then links every `.om` into `Root.exe` (name auto-derived from the module name). |
+| `toc286.exe Root.Mod` | **Compile-only.** Scans transitive imports, recompiles anything stale, emits `.om` files. No link step — this is how you build a library. |
+| `toc286.exe /ENTRY=Run Root.Mod` | **Compile + link.** Same scan/compile, then links every `.om` into `Root.exe` (name auto-derived from the module name). |
 
 Switches are case-insensitive except the value after `/ENTRY=`, which keeps
 its case:
@@ -499,7 +499,7 @@ current directory.
 SET OBERON_LIB=C:\TOC\OBERON.OM;D:\OLIB\NET.OM;D:\OLIB\UI.OM
 ```
 
-`toc.exe` also looks for `OBERON.OM` next to its own binary automatically,
+`toc286.exe` also looks for `OBERON.OM` next to its own binary automatically,
 so on a normal install you often don't need to set this at all.
 
 **Output layout.** A normal compile writes `ModName.rdf` + `ModName.def` as
@@ -833,7 +833,7 @@ variable.
 ### `LogErr` — toolchain-wide error/diagnostic state
 
 The single error state and single place any message is printed, used
-internally by `toc.exe`/`tolib.exe`/`rdfgrep.exe`/`tasm.exe`/`tlink.exe`
+internally by `toc286.exe`/`tolib.exe`/`rdfgrep.exe`/`tasm.exe`/`tlink.exe`
 (and available to any user program that wants the same fail-fast
 diagnostic convention).
 
@@ -855,7 +855,7 @@ for the process, matching this toolchain's fail-fast convention (see
 ### `Rdoff` — RDOFF2 object file reader/writer
 
 Reads and writes RDOFF2 `.rdf` object files (segments, GLOBAL/IMPORT/RELOC/
-SEGRELOC/BSS records) — the format `toc.exe`'s code generator emits and its
+SEGRELOC/BSS records) — the format `toc286.exe`'s code generator emits and its
 linker consumes. See [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) for the binary
 layout this module implements.
 
@@ -953,7 +953,7 @@ MODULE MyProg;
 ```
 
 ```
-toc.exe /G /ENTRY=Run MyProg.Mod
+toc286.exe /G /ENTRY=Run MyProg.Mod
 ```
 
 The block carries modules, source file names, symbols, and a line-number
