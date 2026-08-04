@@ -2,10 +2,10 @@
 
 <img src="TRUBO.JPG" alt="Trubo Oberon" width="33%" align="right">
 
-### A self-hosting Oberon-07 compiler for 16-bit MS-DOS real mode
+### A self-hosting Oberon-07 compiler for 16-bit MS-DOS — real mode and DPMI16 protected mode
 
 [![license](https://img.shields.io/badge/license-public%20domain-brightgreen)](LICENSE.TXT)
-[![platform](https://img.shields.io/badge/platform-MS--DOS%20%2F%208086%20real%20mode-blue)](DOCS/XT.MD)
+[![platform](https://img.shields.io/badge/platform-MS--DOS%20%2F%208086%20real%20mode%20%2B%20DPMI16-blue)](DOCS/XT.MD)
 [![self-hosted](https://img.shields.io/badge/self--hosted-byte--stable-success)](TESTS/test_selfhost.sh)
 
 [Oberon](https://en.wikipedia.org/wiki/Oberon_(programming_language)) is
@@ -102,14 +102,29 @@ That means:
   models `toc.exe`'s own embedded linker does not target. `texe` is a
   tiny-model `.COM`-equivalent wrapped in an MZ header instead of relying on
   DOS's `.COM`-load convention — see `DOCS/BUILD.MD`'s "Using tlink" section.
-- **New Executable (NE) output (`/CP`).** `toc /CP` emits a 16-bit
-  DPMI-protected-mode program in an **NE** container, structured to match a
-  real Borland-Pascal `/CP` reference (verbatim MZ stub, `KERNEL` module
-  reference + `INITTASK` entry call, DPL segment attributes, per-segment
-  relocation blocks). Confirmed working on real DPMI16 hardware via HX-DOS.
-  Default `/CD` still produces the DOS real-mode MZ `.EXE`; the self-hosted
-  compiler itself builds both (`BIN/TOC.EXE` and `BIN/TOC286.EXE` — see
-  `DOCS/BUILD.MD`). See `DOCS/NE-BP.MD`.
+- **New Executable (NE) output (`/CP`) — a 16-bit DPMI protected-mode
+  target, still segmented.** `toc /CP` emits a 16-bit DPMI-protected-mode
+  program in an **NE** container, the same approach Borland Pascal's own
+  `/CP` target used: still 16-bit, still real segments and far pointers, no
+  32-bit flat-memory escape hatch — segment registers just hold
+  protected-mode LDT selectors instead of raw paragraph addresses.
+  Structured to match a real Borland-Pascal `/CP` reference (verbatim MZ
+  stub, `KERNEL` module reference + `INITTASK` entry call, DPL segment
+  attributes, per-segment relocation blocks). Every `/CP`-linked `.EXE`
+  embeds the DPMI-extender loader stub (`NESTAB.BIN`, taken from the
+  **HX-DOS extender** — the file is also historically known as
+  `DPMIST16.BIN`) ahead of its NE header. Confirmed working end-to-end,
+  including self-hosting, on real DPMI16 hardware via HX-DOS. `SYSTEM.Intr`
+  calls must fill `Regs.DS`/`Regs.ES` correctly under `/CP` — an unset field
+  is a General Protection Fault under DPMI, not a harmless no-op the way it
+  can be under real mode (see `MANUAL.MD`). Default `/CD` still produces the
+  DOS real-mode MZ `.EXE`; the self-hosted compiler itself builds both —
+  `BIN/TOC.EXE` (`/CD`, "clean DOS" version) and `BIN/TOC286.EXE` (`/CP`,
+  DPMI16 version, same compiler, just linked for the DPMI16 target — see
+  `DOCS/BUILD.MD`). `TOC286.EXE` is the one to reach for when plain DOS
+  conventional memory isn't enough to run `TOC.EXE` itself — a DPMI host
+  gives the compiler access to memory beyond the 640 KB conventional-memory
+  ceiling. See `DOCS/NE-BP.MD` and `DOCS/PORTING.MD` §3.5.
 
 ---
 

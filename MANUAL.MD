@@ -319,12 +319,24 @@ ordinary imported procedure can't express).
 ```oberon
 TYPE Registers = RECORD AX, BX, CX, DX, SI, DI, DS, ES, Flags: INTEGER END;
 PROCEDURE Intr*(IntNo: BYTE; VAR Regs: Registers);
+PROCEDURE GetDS*: INTEGER;   (* current DS, for filling Regs.DS/Regs.ES *)
+PROCEDURE GetES*: INTEGER;
 ```
 
 Fire a raw DOS/BIOS interrupt with the given register set; `Regs` is
 updated in place with the result. `Dos.MOD` and `Crt.MOD` are built entirely
 on top of this — reach for it directly only when you need an interrupt the
 stdlib doesn't already wrap.
+
+**Always set `Regs.DS` and `Regs.ES` explicitly**, even for interrupts that
+don't appear to need them. `SYSTEM.Intr` loads both registers from `Regs`
+unconditionally. Under `/CD` (real mode) a left-unset field often goes
+unnoticed. Under `/CP` (DPMI16, see [Compiling and linking](#compiling-and-linking))
+it is not optional: the DPMI host validates every segment load against the
+LDT, so a stale or zero selector in a field the call "doesn't use" triggers
+an immediate GPF instead of being silently ignored. Use `SYSTEM.GetDS()`/
+`SYSTEM.GetES()` to supply "the current valid segment" for fields the
+specific call doesn't care about.
 
 ### `SYSTEM.SetExitProc` / `SYSTEM.GetExitProc`
 
@@ -454,8 +466,23 @@ its case:
 - **`/CD`** (default) — DOS real-mode MZ `.EXE` output.
 - **`/CP`** — 16-bit DPMI protected-mode **New Executable (NE)** output,
   structured to match a Borland-Pascal `/CP` reference; confirmed working
-  on real DPMI16 hardware via HX-DOS (see `DOCS/NE-BP.MD`). `/G` is not
-  valid with `/CP`.
+  end-to-end (including self-hosting) on real DPMI16 hardware via HX-DOS
+  (see `DOCS/NE-BP.MD`). `/G` is not valid with `/CP`. This is **still a
+  16-bit, segmented target** — same memory model, same far pointers, same
+  64 KB code/data segment limits as `/CD` (see `DOCS/PORTING.MD` §3.5); the
+  only real difference is that segment registers hold protected-mode LDT
+  selectors instead of raw paragraph addresses, and `SYSTEM.Intr` calls
+  require `Regs.DS`/`Regs.ES` to always be filled correctly (an unset field
+  is a GPF under DPMI, not a harmless no-op — see
+  [`SYSTEM.Registers` and `SYSTEM.Intr`](#systemregisters-and-systemintr)
+  below). Every `/CP`-linked `.EXE` embeds the DPMI-extender loader stub
+  (`NESTAB.BIN`, sourced from the HX-DOS extender — historically also called
+  `DPMIST16.BIN`) ahead of its NE header. The compiler ships as two
+  binaries built from this same source: `BIN/TOC.EXE` (`/CD`, "clean DOS")
+  and `BIN/TOC286.EXE` (`/CP`, DPMI16). Reach for `TOC286.EXE` when plain
+  DOS conventional memory (the 640 KB ceiling) isn't enough to run
+  `TOC.EXE` itself — running under a DPMI host gives the compiler access to
+  memory beyond that limit.
 
 ```
 toc.exe MyLib.Mod                     REM compile-only → MyLib.om

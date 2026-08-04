@@ -45,6 +45,11 @@ its case.  There are exactly three switches — any other `-…`/`/…` token is
 
 - `/SYSTEM` — single-file compile for the `SYSTEM` module itself (`SYSTEM.MOD`); no dep-scan or link.  Not usable for any other module.
 - `/M` — recompile all modules regardless of staleness (the old `-force`).
+- `/CD` (default) / `/CP` — output target: `/CD` is the DOS real-mode MZ
+  `.EXE` this guide otherwise assumes throughout; `/CP` links a 16-bit DPMI
+  protected-mode NE `.EXE` instead — see §3.5 for what changes (and, mostly,
+  what doesn't) when targeting `/CP`. Full switch reference: `MANUAL.MD`
+  §"Compiling and linking".
 
 **Import resolution:** the compiler finds imported modules by searching for `ModName.OM` in:
 1. Current directory
@@ -629,6 +634,44 @@ On 8086:
 
 The stack is typically 8 KB (configurable via `$M`).  Deep recursion will crash with a stack overflow (no guard page).  Convert deep recursion to iteration when porting.
 
+### 3.5 The `/CP` DPMI16 target — still 16-bit, still segmented
+
+`toc.exe` can also link a program as `/CP` instead of the default `/CD`
+(§1.2/§1.3). This produces a **16-bit DPMI protected-mode program** in an NE
+container — the same approach Borland Pascal's own `/CP` protected-mode
+target used. It is **not** a 32-bit or flat-memory target: everything in
+§3.1-3.4 above still applies unchanged.
+
+- Segments, far pointers, per-module 64 KB code segments, the large memory
+  model — all identical to `/CD`. The only difference is that segment
+  registers now hold **LDT selectors** (indices into a protected-mode
+  descriptor table) instead of raw paragraph addresses; the CPU still
+  enforces per-segment limits and access rights, same segmented-memory
+  mental model as real mode, just with hardware-checked bounds.
+- A program compiled `/CP` runs under a DPMI host (a DOS extender providing
+  DPMI 0.9/1.0 services) — this project has confirmed correct operation via
+  the **HX-DOS extender**. Every `/CP`-linked `.EXE` embeds the extender's
+  loader stub (`NESTAB.BIN`, taken from HX-DOS — the historical file is also
+  known as `DPMIST16.BIN`) ahead of the NE header, exactly the way a BPC
+  `/CP` executable embeds its own DOS-extender stub; running the `.EXE`
+  under plain DOS (no DPMI host resident) invokes that stub, which loads the
+  DPMI environment before jumping into the protected-mode program.
+- **`SYSTEM.Intr` requires `Regs.DS`/`Regs.ES` to be filled correctly under
+  DPMI16 — this is not optional the way it sometimes is under real mode.**
+  See §6.2 below; getting this wrong is a General Protection Fault (GPF)
+  under DPMI16, not silently-wrong data.
+- `xt` (this project's dev-loop DOS emulator) cannot execute NE binaries at
+  all — `/CP` output can only be tested on a real DPMI16 host or DPMI16-
+  capable extender. See `DOCS/NE-BP.MD` for the full NE format writeup,
+  including every real-hardware bug found bringing this target up.
+- **The compiler itself ships as two binaries, exactly the same source, just
+  linked for different targets:** `BIN/TOC.EXE` (`/CD`, "clean DOS") and
+  `BIN/TOC286.EXE` (`/CP`, DPMI16). Reach for `TOC286.EXE` when plain DOS
+  conventional memory (the 640 KB ceiling) isn't enough to run `TOC.EXE`
+  itself — a DPMI host gives the compiler access to memory beyond that
+  limit. There is no behavioral difference between the two beyond that;
+  neither is a "reduced" or "alternate" compiler.
+
 ---
 
 ## 4. Programming tricks and workarounds
@@ -895,6 +938,20 @@ Flag constants: `SYSTEM.FCarry=1`, `SYSTEM.FParity=4`, `SYSTEM.FAuxiliary=16`, `
 SYSTEM.Intr(IntNo: BYTE; VAR Regs: Registers)
 ```
 Execute a software interrupt.  Fill `Regs` with input values; read output values after the call.
+
+**Always set `Regs.DS` and `Regs.ES` explicitly, even for calls that don't
+appear to use them.**  Under the `/CD` real-mode target this can sometimes go
+unnoticed (an unset field happens to carry the caller's own segment, which is
+frequently harmless).  Under the `/CP` DPMI16 target (§3.5) it is not
+optional: `SYSTEM.Intr` loads both `DS` and `ES` from whatever is in `Regs`
+unconditionally before firing the interrupt, and a real DPMI host validates
+every segment register load against the LDT — a leftover garbage or
+zero/stale selector value in a field you didn't think you needed produces an
+immediate General Protection Fault (Exception 0Dh), not a silently-ignored
+value the way an unused real-mode segment register would be.  Use
+`SYSTEM.GetDS()`/`SYSTEM.GetES()` to fill a field with "the current valid
+segment" when the call genuinely doesn't care which one, rather than leaving
+it unset.
 
 ```oberon
 SYSTEM.ADR(VAR v): SYSTEM.ADDRESS
