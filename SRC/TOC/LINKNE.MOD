@@ -50,6 +50,7 @@ CONST
   SegChunk    = 32;      (* NE segments per mapping/reloc chunk node *)
   NeRelChunk  = 128;     (* NE relocs per chunk node (small-record rule) *)
   StubBytes   = 3646;    (* size of NESTUB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
+  //StubBytes   = 96;      (* size of NESTUB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
   KernelLen   = 6;       (* length of the imported module name "KERNEL" *)
 
   (* Segment attributes (Table 6) — measured from the reference NE
@@ -199,7 +200,7 @@ END SegIndexOf;
 (* Build the NE segment table + BSS index.  Called before PerformLinking so
    OnSegReloc can resolve target indices. *)
 PROCEDURE BuildSegTable*(ls: Link.State; ns: State);
-  VAR m: Link.Module; dummy: INTEGER;
+  VAR m: Link.Module; dummy: INTEGER; bssStackLen: LONGINT;
 BEGIN
   m := ls^.modHead;
   WHILE m # NIL DO
@@ -209,8 +210,20 @@ BEGIN
     END;
     m := m^.next
   END;
-  (* one shared BSS data segment (no file bytes; allocLen = total shared BSS) *)
-  ns^.bssIdx := AddSeg(ns, NIL, Rdoff.SegBss, LONGINT(0), ls^.totalBssLen, TRUE)
+  (* One shared BSS+stack data segment (no file bytes).  allocLen must cover
+     BOTH the compiler's BSS globals AND the run-time stack — SS and the auto
+     data segment are the same NE segment index (WriteExe), so the stack
+     (growing down from SP, set below the BSS globals which sit at offset 0
+     upward) would otherwise alias live BSS data the moment real stack depth
+     is used.  Mirrors LinkMZ's minAlloc = totalBssLen + stackPara
+     (LINKMZ.MOD ~702-704); NE has no >64K segments, so this is a hard error
+     rather than MZ's silent 0FFFFH clamp. *)
+  bssStackLen := ls^.totalBssLen + ls^.stackSize;
+  IF bssStackLen > LONGINT(0FFFFH) THEN
+    LogErr.Error("NE: combined BSS+stack exceeds 64K (single shared data segment)");
+    RETURN
+  END;
+  ns^.bssIdx := AddSeg(ns, NIL, Rdoff.SegBss, LONGINT(0), bssStackLen, TRUE)
 END BuildSegTable;
 
 (* ---- per-segment reloc list ---- *)
@@ -508,11 +521,20 @@ PROCEDURE WriteExe*(ls: Link.State; ns: State; outPath: ARRAY OF CHAR);
       filePos, segFilePos: LONGINT;
       summary: ARRAY 128 OF CHAR;
       m: Link.Module;
+      bssSeg: SegNode; bssStackLen: LONGINT;
 BEGIN
   IF ~Files.ReWrite(fout, outPath) THEN LogErr.Error2("Cannot write: ", outPath); RETURN END;
 
   neOfs := LONGINT(StubBytes);
   alignShift := 8; sectorSize := 256;   (* 256-byte sectors (matches reference) *)
+
+  (* SP must point at the TOP of the shared BSS+stack segment (BuildSegTable
+     sized allocLen = totalBssLen + stackSize, BSS globals occupy the low
+     offsets from 0 upward) — not at a fixed low offset that ignores where
+     the compiler's own BSS data ends, or the descending stack aliases live
+     globals the first time real call depth is used. *)
+  bssSeg := SegOf(ns, ns^.bssIdx);
+  bssStackLen := bssSeg^.e[(ns^.bssIdx - 1) MOD SegChunk].allocLen;
 
   (* resolve entry point: "start" symbol's own module CODE segment *)
   esym := Link.FindSymbol(ls, "start");
@@ -580,7 +602,7 @@ BEGIN
                                                         (SP set explicitly below) *)
   w := Files.WriteWord(fout, ls^.entryIp);           (* entry IP *)
   w := Files.WriteWord(fout, entryIdx);              (* entry CS = NE seg idx *)
-  w := Files.WriteWord(fout, INTEGER(ls^.stackSize) - 2); (* SP *)
+  w := Files.WriteWord(fout, INTEGER(bssStackLen) - 2); (* SP: top of BSS+stack seg *)
   w := Files.WriteWord(fout, ns^.bssIdx);            (* SS = shared BSS (DGROUP) *)
   w := Files.WriteWord(fout, ns^.segCount);          (* segment count *)
   w := Files.WriteWord(fout, 1);                     (* module ref count (KERNEL) *)

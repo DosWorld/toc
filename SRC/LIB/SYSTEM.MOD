@@ -91,6 +91,19 @@ PROCEDURE MemAvail*() : WORD; EXTERNAL;     (* total free heap, in paragraphs *)
    Result: size of the largest contiguous free block, in paragraphs. *)
 PROCEDURE MemMaxAvail*() : WORD; EXTERNAL;  (* largest free block, in paragraphs *)
 
+PROCEDURE IsDPMI* : BOOLEAN; EXTERNAL;
+
+(* DpmiMapDosSeg: map a real-mode DOS segment into a fresh LDT descriptor
+   for access from DPMI protected mode.
+   Parameters: dosseg — real-mode segment number (paragraph address).
+   Result: a scratch selector whose base is dosseg*16 and whose limit
+   covers the full 64KB segment, R/W data access, or 0 on DPMI error.
+   Only valid when SYSTEM.IsDPMI() is TRUE; free with DpmiUnmapDosSeg. *)
+PROCEDURE DpmiMapDosSeg*(dosseg : WORD) : WORD; EXTERNAL;
+(* DpmiUnmapDosSeg: release a selector previously returned by
+   DpmiMapDosSeg (frees its LDT descriptor). *)
+PROCEDURE DpmiUnmapDosSeg*(scrSelector : WORD); EXTERNAL;
+
 (* S32MUL: 32-bit signed multiply (the runtime backing for Oberon's `*` on
    LONGINT operands).
    Parameters: a, b — the two operands.
@@ -136,6 +149,27 @@ PROCEDURE SEG*(VAR v): WORD;
    Result: the offset portion of v's far address. *)
 PROCEDURE OFS*(VAR v): WORD;
   INLINE(058H, 059H);
+
+(* GetDS/GetES/GetSS/GetCS: read the CPU's current DS/ES/SS/CS segment
+   register value directly (MOV AX,segreg — no stack traffic, SP unchanged).
+   Use these to fill SYSTEM.Registers.DS/.ES with a KNOWN-VALID selector
+   (whatever the register already holds) for DOS calls that don't otherwise
+   need a real DS:/ES: pointer (AH=57h GetFTime/SetFTime, etc.) — SYSTEM.Intr
+   loads BOTH DS and ES from the caller-supplied Registers unconditionally,
+   so an unset field (stack garbage) can be an invalid selector under DPMI16
+   and fault on load even though the DOS call itself never dereferences it.
+   Result: the live DS/ES/SS/CS segment register value. *)
+PROCEDURE GetDS*: INTEGER;
+  INLINE(08CH, 0D8H);
+
+PROCEDURE GetES*: INTEGER;
+  INLINE(08CH, 0C0H);
+
+PROCEDURE GetSS*: INTEGER;
+  INLINE(08CH, 0D0H);
+
+PROCEDURE GetCS*: INTEGER;
+  INLINE(08CH, 0C8H);
 
 (* PTR(s, o: WORD): ADDRESS
    Constructs a far pointer from segment s and offset o.
@@ -469,6 +503,7 @@ PROCEDURE Seg0040*:WORD; EXTERNAL;
 PROCEDURE SegB000*:WORD; EXTERNAL;
 PROCEDURE SegB800*:WORD; EXTERNAL;
 PROCEDURE SegA000*:WORD; EXTERNAL;
+PROCEDURE PrefixSeg*:WORD; EXTERNAL;
 
 (*$L SYSTEM.RDF*)
 

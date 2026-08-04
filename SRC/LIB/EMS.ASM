@@ -82,7 +82,7 @@ global EMS_Alloc, EMS_Free, EMS_Realloc
 global EMS_CopyToEMS, EMS_CopyToDos
 global EMS_Version, EMS_RequireVersion
 global EMS_MapPage, EMS_UnmapPage, EMS_MapPtr
-
+extern SYSTEM_IsDPMI
 ; -----------------------------------------------------------------------------
 ; EMS_Detect()
 ; Probes INT 67h presence via the INT 21h/AH=35h vector-get + "EMMXXXX0"
@@ -92,12 +92,6 @@ global EMS_MapPage, EMS_UnmapPage, EMS_MapPtr
 ; Call Type: FAR, no params, no return value.
 ; -----------------------------------------------------------------------------
 EMS_Detect:
-        push    ax
-        push    bx
-        push    cx
-        push    dx
-        push    si
-        push    di
         push    ds
         push    es
 
@@ -107,7 +101,9 @@ EMS_Detect:
         mov     byte [pageFrameObtained], 0
         mov     word [pageFrameSeg], 0
         mov     word [errorCode], 0
-
+        call    far SYSTEM_IsDPMI
+        or      ax, ax
+        jnz     .absent
         mov     ax, 3567h
         int     21h                     ; ES:BX = INT 67h vector
 
@@ -141,12 +137,6 @@ EMS_Detect:
 .absent:
         pop     es
         pop     ds
-        pop     di
-        pop     si
-        pop     dx
-        pop     cx
-        pop     bx
-        pop     ax
         RETMACRO 0
 
 ; -----------------------------------------------------------------------------

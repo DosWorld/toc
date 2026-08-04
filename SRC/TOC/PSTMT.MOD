@@ -583,7 +583,8 @@ PROCEDURE ParseReturn(retType: Syms.TypeDesc);
 BEGIN
   Scan.Next(PExpr.sc);
   IF (PExpr.sc.sym # Scan.TSemi) & (PExpr.sc.sym # Scan.TEnd) &
-     (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TElsif) THEN
+     (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TElsif) &
+     (PExpr.sc.sym # Scan.TBar) & (PExpr.sc.sym # Scan.TUntil) THEN
     PExpr.ParseExpression(val); Cgen.CgLoadItem(val)
   ELSIF (retType # Syms.NoType) & (retType.form # Syms.TFNotype) THEN
     PExpr.Error("RETURN value required")

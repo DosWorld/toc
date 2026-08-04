@@ -80,19 +80,6 @@ VAR
     argOfs   : ARRAY 32 OF INTEGER;
     argCount : INTEGER;
 
-(* GetPsp: retrieve the segment address of the current process's Program
-   Segment Prefix, via INT 21h AH=62h.
-   Parameters: none.
-   Result: the PSP segment. *)
-PROCEDURE GetPsp*:INTEGER;
-VAR
-    regs    : SYSTEM.Registers;
-BEGIN
-    regs.AX := 6200H;
-    SYSTEM.Intr(21H, regs);
-    RETURN regs.BX;
-END GetPsp;
-
 PROCEDURE ArgInit;
 VAR
     len     : WORD;
@@ -105,7 +92,7 @@ VAR
     k       : SYSTEM.ADDRESS;
 BEGIN
     argCount := 0;
-    k := SYSTEM.PTR(GetPsp(), 80H);
+    k := SYSTEM.PTR(SYSTEM.PrefixSeg(), 80H);
     len := ORD(k^);
     IF len = 0 THEN RETURN END;
 
@@ -183,7 +170,7 @@ BEGIN
     IF i = 0 THEN
         (* Argv[0] = EXE filename, retrieved from PSP environment block. *)
         dst := 0;
-        k := SYSTEM.PTR(GetPsp(), 2CH);
+        k := SYSTEM.PTR(SYSTEM.PrefixSeg(), 2CH);
         envseg := ORD(k^) + ORD(k^[1]) * 256;
         IF envseg = 0 THEN p[0] := 0X; RETURN END;
         k := SYSTEM.PTR(envseg, 0);
@@ -244,7 +231,7 @@ BEGIN
        the moment assignment type checking landed (2026-07-17): split into
        a properly-typed WORD peek + CHAR scan. *)
     dst[0] := 0X;
-    pw := SYSTEM.PTR(GetPsp(), 2CH);
+    pw := SYSTEM.PTR(SYSTEM.PrefixSeg(), 2CH);
     envseg := pw^;
     IF envseg = 0 THEN RETURN END;
     pc := SYSTEM.PTR(envseg, 0);
@@ -289,6 +276,7 @@ PROCEDURE GetDTA*: SYSTEM.ADDRESS;
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 2F00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   RETURN SYSTEM.PTR(r.ES, r.BX)
 END GetDTA;
@@ -303,6 +291,7 @@ BEGIN
   r.AX := 1A00H;
   r.DS := SYSTEM.SEG(p^);
   r.DX := SYSTEM.OFS(p^);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetDTA;
 
@@ -331,12 +320,14 @@ BEGIN
   r.AX := 1A00H;
   r.DS := SYSTEM.SEG(S);
   r.DX := SYSTEM.OFS(S);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   (* INT 21h / 4Eh: AX=4E00, DS:DX = ASCIIZ pattern, CX = attribute mask. *)
   r.AX := 4E00H;
   r.CX := Attr;
   r.DS := SYSTEM.SEG(pathz);
   r.DX := SYSTEM.OFS(pathz);
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN DosError := r.AX
@@ -358,8 +349,10 @@ BEGIN
   r.AX := 1A00H;
   r.DS := SYSTEM.SEG(S);
   r.DX := SYSTEM.OFS(S);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   r.AX := 4F00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN DosError := r.AX
@@ -382,6 +375,7 @@ BEGIN
   r.AX := 3900H;
   r.DS := SYSTEM.SEG(pathz);
   r.DX := SYSTEM.OFS(pathz);
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
@@ -405,6 +399,7 @@ BEGIN
   r.AX := 3B00H;
   r.DS := SYSTEM.SEG(pathz);
   r.DX := SYSTEM.OFS(pathz);
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
@@ -421,6 +416,7 @@ PROCEDURE GetDate*(VAR Year,Month,Day,DayOfWeek: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 2A00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   Year := r.CX;
   Month := ORD(SYSTEM.LSR(r.DX, 8));
@@ -437,6 +433,7 @@ BEGIN
   r.AX := 2B00H;
   r.CX := Year;
   r.DX := Day + SYSTEM.LSL(Month, 8);
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetDate;
 
@@ -449,6 +446,7 @@ PROCEDURE GetTime*(VAR Hour,Minute,Second,Sec100: INTEGER);
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 2C00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   Hour := ORD(SYSTEM.LSR(r.CX, 8));
   Minute := r.CX MOD 256;
@@ -466,6 +464,7 @@ BEGIN
   r.AX := 2D00H;
   r.CX := Minute + SYSTEM.LSL(Hour, 8);
   r.DX := Sec100 + SYSTEM.LSL(Second, 8);
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetTime;
 
@@ -478,6 +477,7 @@ PROCEDURE GetCBreak*(VAR Break: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 3300H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   Break := (r.DX MOD 256) # 0
 END GetCBreak;
@@ -492,6 +492,7 @@ PROCEDURE SetCBreak*(Break: BOOLEAN);
 BEGIN
   r.AX := 3301H;
   IF Break THEN r.DX := 1 ELSE r.DX := 0 END;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetCBreak;
 
@@ -503,6 +504,7 @@ PROCEDURE GetVerify*(VAR Verify: BOOLEAN);
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 5400H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   Verify := (r.AX MOD 256) # 0
 END GetVerify;
@@ -517,6 +519,7 @@ PROCEDURE SetVerify*(Verify: BOOLEAN);
 BEGIN
   r.AX := 2E00H;
   IF Verify THEN r.DX := 1 ELSE r.DX := 0 END;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetVerify;
 
@@ -529,6 +532,7 @@ PROCEDURE DiskFree*(Drive: BYTE): LONGINT;
 BEGIN
   r.AX := 3600H;
   r.DX := Drive;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   IF r.AX = 0FFFFH THEN RETURN -1 END;
   RETURN LONGINT(r.AX) * LONGINT(r.BX) * LONGINT(r.CX)
@@ -545,6 +549,7 @@ PROCEDURE DiskSize*(Drive: BYTE): LONGINT;
 BEGIN
   r.AX := 3600H;
   r.DX := Drive;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   IF r.AX = 0FFFFH THEN RETURN -1 END;
   RETURN LONGINT(r.AX) * LONGINT(r.CX) * LONGINT(r.DX)
@@ -559,6 +564,7 @@ PROCEDURE GetIntVec*(IntNo: BYTE; VAR Vector: SYSTEM.ADDRESS);
   VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 3500H + IntNo;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   Vector := SYSTEM.PTR(r.ES, r.BX)
 END GetIntVec;
@@ -575,6 +581,7 @@ BEGIN
   r.AX := 2500H + IntNo;
   r.DS := SYSTEM.SEG(p^);
   r.DX := SYSTEM.OFS(p^);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r)
 END SetIntVec;
 
@@ -694,7 +701,7 @@ BEGIN
     tail[n + 1] := 0DX;
 
     (* Fill EPB.  FCB pointers go to tail buffer as harmless placeholders. *)
-    pw := SYSTEM.PTR(GetPsp(), 2CH);
+    pw := SYSTEM.PTR(SYSTEM.PrefixSeg(), 2CH);
     epb.envSeg := pw^;
     epb.tailOfs := SYSTEM.OFS(tail); epb.tailSeg := SYSTEM.SEG(tail);
     epb.fcb1Ofs := SYSTEM.OFS(tail); epb.fcb1Seg := SYSTEM.SEG(tail);
@@ -714,6 +721,7 @@ BEGIN
              AL = exit code, AH = termination type (0=normal, 1=Ctrl-C,
                                                    2=critical-err, 3=TSR). *)
         regs.AX := 4D00H;
+        regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
         SYSTEM.Intr(21H, regs);
         DosExitCode := SYSTEM.AND(regs.AX, 0FFH)
     END

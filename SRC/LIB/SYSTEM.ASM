@@ -3,13 +3,29 @@ cpu 8086
 %define IS_FAR
 
 section .data
-i87:
-        dw 0
-isDpmi:
-        dw 0
-ExitProc:
-        dw 0
-        dw 0
+i87:      dw 0
+isDpmi:   dw 0
+ExitProc: dw 0, 0
+seg0040:  dw 00040h
+segb000:  dw 0b000h
+segb800:  dw 0b800h
+sega000:  dw 0a000h
+segpsp:   dw 0
+err_code: db 0
+
+i87msg:
+    db 'Numeric coprecessor required.$'
+nomemmsg:
+    db 'Not enough memory.$'
+
+; Net paragraphs currently outstanding via DPMI_Alloc/DPMI_Free.  DPMI's
+; INT 31h/0500h "Get Free Memory Information" reports HOST-WIDE free memory,
+; not this process's own heap, so LeakGuard's deterministic before/after
+; MemAvail() diff (valid in real mode, which walks a process-private
+; free-list) produced spurious "leaks" under DPMI from host-side memory
+; drift unrelated to this process.  DPMI_MemAvail/DPMI_MemMaxAvail report
+; against this process-local counter instead of querying the host.
+dpmiAllocParas: dw 0
 
 section .text
 
@@ -42,8 +58,9 @@ global SYSTEM_S32DIV, SYSTEM_S32MOD, SYSTEM_S32MUL
 global SYSTEM_REQUIRE87
 global SYSTEM_Halt
 global SYSTEM_SetExitProc, SYSTEM_GetExitProc
-global SYSTEM_Seg0040, SYSTEM_SegB000, SYSTEM_SegB800, SYSTEM_SegA000
+global SYSTEM_Seg0040, SYSTEM_SegB000, SYSTEM_SegB800, SYSTEM_SegA000, SYSTEM_PrefixSeg
 global SYSTEM_IsDPMI, SYSTEM_DPMI_INIT
+global SYSTEM_DpmiMapDosSeg, SYSTEM_DpmiUnmapDosSeg
 
 check_8087:
         FNINIT
@@ -57,10 +74,6 @@ check_8087:
         INC     AL
 .no_fpu:
         retn
-i87msg:
-    db 'Numeric coprecessor required.$'
-nomemmsg:
-    db 'Not enough memory.$'
 
 SYSTEM_REQUIRE87:
         ; FAR-called from any module's __init (via SYSTEM_REQUIRE87 import) —
@@ -84,44 +97,81 @@ SYSTEM_Halt:
         ; CALL FAR, then CALL FAR pushed CS:IP.  Stack:
         ;   [SP+0]=ret IP   [SP+2]=ret CS   [SP+4]=param word (low byte = code)
         mov  bx, sp
+        mov  ax, seg err_code
+        mov  ds, ax
         mov  al, BYTE[ss:bx+4]
-        mov  BYTE[cs:err_code], AL
+        mov  BYTE[err_code], AL
         jmp  SYSTEM_DONE
 
 ErrWithMsg:
-        mov  BYTE[cs:err_code], al
-        push ds
-        mov  ax, cs
-        mov  ds, ax
+        mov  bx, seg err_code
+        mov  ds, bx
+        mov  BYTE[err_code], al
         mov  ah, 9
         int  21h
-        pop  ds
         jmp  SYSTEM_DONE
 
 SYSTEM_IsDPMI:
         mov  ax, seg isDpmi
         mov  es, ax
         mov  ax, [isDpmi]
+        mov  ah, 62h
+        int  21h
         retf
 
-SYSTEM_DPMI_INIT:
+common_init:
         mov  ax, seg i87
         mov  ds, ax
+        mov  es, ax
         call check_8087
         xor  ah, ah
         mov  [i87], ax
-        mov  ax, 1
+        mov  ah, 62h
+        int  21h
+        mov  [segpsp], bx
+        xor  ax, ax
         mov  [isDpmi], ax
+        retn
+
+%macro MAP_DOS_SEG 1
+        mov  ax, [%1]
+        push ax
+        push cs
+        call SYSTEM_DpmiMapDosSeg
+        mov  [%1], ax
+%endmacro
+
+%macro UNMAP_DOS_SEG 1
+        mov  ax, [%1]
+        push ax
+        push cs
+        call SYSTEM_DpmiUnmapDosSeg
+%endmacro
+
+SYSTEM_DPMI_INIT:
+        call common_init
+        inc  word[isDpmi]
+
+        MAP_DOS_SEG seg0040
+        MAP_DOS_SEG segb000
+        MAP_DOS_SEG segb800
+        MAP_DOS_SEG sega000
+        ;MAP_DOS_SEG segpsp
+        push ds
+;        mov  ax, [segpsp]
+;        mov  ds, ax
+;        mov  ax, [2ch]
+;        push ax
+;        push cs
+;        call SYSTEM_DpmiMapDosSeg
+;        mov  [2ch], ax
+        pop  ds
         retf
 
 SYSTEM_INIT:
         push ax
         push bx
-        mov  ax, seg i87
-        mov  ds, ax
-        call check_8087
-        xor  ah, ah
-        mov  [i87], ax
+        call common_init
         mov  ah, 48h
         mov  bx, 0FFFFh
         int  21h
@@ -158,26 +208,47 @@ SYSTEM_INIT:
         call MEM_INIT
         retf
 
-SYSTEM_DONE:
-        call RunExitProcChain
-
-        mov  ax, seg isDpmi
-        mov  es, ax
-        mov  ax, [es:isDpmi]
-        or   ax, ax
-        jnz  .cont
+dos_done:
         push es
         mov  ax, [cs:MemStartSeg]
         mov  es, ax
         mov  ah, 49h
         int  21h
         pop  es
+        retn
+
+dpmi_done:
+        push ds
+        mov  ax, [segpsp]
+        mov  ds, ax
+;        mov  ax, [2ch]
+;        push ax
+;        push cs
+;        call SYSTEM_DpmiUnmapDosSeg
+        pop  ds
+        UNMAP_DOS_SEG seg0040
+        UNMAP_DOS_SEG segb000
+        UNMAP_DOS_SEG segb800
+        UNMAP_DOS_SEG sega000
+        retn
+
+SYSTEM_DONE:
+        call RunExitProcChain
+
+        mov  ax, seg isDpmi
+        mov  es, ax
+        mov  ds, ax
+        mov  ax, [es:isDpmi]
+        or   ax, ax
+        jnz  .dpmi
+        call dos_done
+        jmp  .cont
+.dpmi:
+        call dpmi_done
 .cont:
-        mov  al, [cs:err_code]
+        mov  al, [err_code]
         mov  ah, 4Ch
         int  21h
-
-err_code: db 0
 
 SYSTEM_SetExitProc:
         ; FAR proc, no prologue.  Param (ADDRESS, 4 bytes) was pushed by the
@@ -759,6 +830,13 @@ SYSTEM_MemAvail:
 ; Input:  none.   Call Type: FAR.   Output: AX = largest free block paragraphs.
 ; -----------------------------------------------------------------------------
 SYSTEM_MemMaxAvail:
+        mov  ax, seg isDpmi
+        mov  es, ax
+        mov  ax, [es:isDpmi]
+        or   ax, ax
+        jz   .cont
+        jmp  DPMI_MemMaxAvail
+.cont:
         push es
         push bx
         push dx
@@ -1058,33 +1136,447 @@ SYSTEM_S32MUL:
         RETMACRO 8
 
 SYSTEM_Seg0040:
-        mov  ax, 00040H
+        mov  ax, seg seg0040
+        mov  es, ax
+        mov  ax, [es:seg0040]
         RETMACRO
 
 SYSTEM_SegB000:
-        mov  ax, 0B000H
+        mov  ax, seg segb000
+        mov  es, ax
+        mov  ax, [es:segb000]
         RETMACRO
 
 SYSTEM_SegB800:
-        mov  ax, 0B800H
+        mov  ax, seg segb800
+        mov  es, ax
+        mov  ax, [es:segb800]
         RETMACRO
 
 SYSTEM_SegA000:
-        mov  ax, 0A000H
+        mov  ax, seg sega000
+        mov  es, ax
+        mov  ax, [es:sega000]
         RETMACRO
 
+SYSTEM_PrefixSeg:
+        mov  ax, seg segpsp
+        mov  es, ax
+        mov  ax, [es:segpsp]
+        RETMACRO
+
+; -----------------------------------------------------------------------------
+; DPMI_Alloc
+; DPMI-mode backend for SYSTEM_Alloc.  Allocates a linear memory block via
+; DPMI 0501h and wraps it in a fresh LDT descriptor (16-bit R/W data, ring 3),
+; selector base = block base + 4.  The 32-bit block handle needed by 0502h
+; (free) is stashed in the 4 hidden bytes just below the selector's base, via
+; a throwaway scratch descriptor, and is never visible through the returned
+; selector itself.
+; Input:  Stack: [SizeBytes (2 bytes)] (same frame SYSTEM_Alloc was entered
+;         with -- DPMI_Alloc is reached by a plain jmp, so bp/sp/args are
+;         exactly as the caller pushed them for a FAR call.)
+; Output: DX:AX = Seg:Ofs pointer (selector:0) to the block, or 0:0 on error.
+; -----------------------------------------------------------------------------
 DPMI_Alloc:
-        %define arg_size [ss:bp+RSIZE+2]
+        %define a_size ss:bp+RSIZE+2
         push bp
         mov  bp, sp
-        mov ax, 0501h
-        xor bx, bx
-        mov cx, arg_size
-        int 31h
-        retf
+        push es
+
+        mov  cx, [a_size]
+        test cx, cx
+        jnz  .da_sizeok1
+        jmp  .da_fail
+.da_sizeok1:
+        xor  bx, bx
+        add  cx, 4
+        adc  bx, 0
+        mov  ax, 0501h
+        int  31h
+        jnc  .da_gotmem
+        jmp  .da_fail
+.da_gotmem:
+        push bx
+        push cx
+        push si
+        push di
+
+        xor  ax, ax
+        mov  cx, 1
+        int  31h
+        jnc  .da_gotdesc1
+        jmp  .da_err_free_mem
+.da_gotdesc1:
+        mov  bx, ax
+
+        mov  dx, [bp-6]
+        mov  cx, [bp-4]
+        add  dx, 4
+        adc  cx, 0
+        mov  ax, 0007h
+        int  31h
+        jnc  .da_setbase_ok
+        jmp  .da_err_free_desc
+.da_setbase_ok:
+
+        mov  dx, [a_size]
+        dec  dx
+        xor  cx, cx
+        mov  ax, 0008h
+        int  31h
+        jnc  .da_setlimit_ok
+        jmp  .da_err_free_desc
+.da_setlimit_ok:
+
+        mov  cx, 0F2h
+        mov  ax, 0009h
+        int  31h
+        jnc  .da_setrights_ok
+        jmp  .da_err_free_desc
+.da_setrights_ok:
+
+        push bx
+
+        xor  ax, ax
+        mov  cx, 1
+        int  31h
+        jnc  .da_scratchdesc_ok
+        jmp  .da_step6_fail_pop
+.da_scratchdesc_ok:
+        mov  bx, ax
+
+        mov  dx, [bp-6]
+        mov  cx, [bp-4]
+        mov  ax, 0007h
+        int  31h
+        jnc  .da_scratchbase_ok
+        jmp  .da_step6_fail_scratch
+.da_scratchbase_ok:
+
+        xor  cx, cx
+        mov  dx, 3
+        mov  ax, 0008h
+        int  31h
+        jnc  .da_scratchlimit_ok
+        jmp  .da_step6_fail_scratch
+.da_scratchlimit_ok:
+
+        mov  cx, 0F2h
+        mov  ax, 0009h
+        int  31h
+        jnc  .da_scratchrights_ok
+        jmp  .da_step6_fail_scratch
+.da_scratchrights_ok:
+
+        push ds
+        mov  ds, bx
+        mov  ax, [bp-10]
+        mov  [0], ax
+        mov  ax, [bp-8]
+        mov  [2], ax
+        pop  ds
+
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+
+        pop  bx
+
+        add  sp, 8
+
+        ; Track this block's paragraph size in dpmiAllocParas (see .data
+        ; comment) so DPMI_MemAvail can report a deterministic, process-
+        ; local figure instead of querying host-wide free memory.
+        push ax
+        push cx
+        push dx
+        push ds
+        mov  cx, [a_size]
+        add  cx, 15
+        shr  cx, 1
+        shr  cx, 1
+        shr  cx, 1
+        shr  cx, 1           ; cx = paragraphs, rounded up (8086-safe: 4x SHR 1)
+        mov  ax, seg dpmiAllocParas
+        mov  ds, ax
+        add  [dpmiAllocParas], cx
+        pop  ds
+        pop  dx
+        pop  cx
+        pop  ax
+
+        mov  dx, bx
+        xor  ax, ax
+        jmp  .da_exit
+
+.da_step6_fail_scratch:
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        jmp  .da_step6_restore
+.da_step6_fail_pop:
+.da_step6_restore:
+        pop  bx
+        jmp  .da_err_free_desc
+
+.da_err_free_desc:
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        jmp  .da_err_free_mem_onstk
+.da_err_free_mem:
+.da_err_free_mem_onstk:
+        pop  di
+        pop  si
+        add  sp, 4
+        mov  ax, 0502h
+        int  31h
+
+.da_fail:
+        xor  dx, dx
+        xor  ax, ax
+
+.da_exit:
+        pop  es
+        %undef a_size
+        pop  bp
+        RETMACRO 2
+
+; -----------------------------------------------------------------------------
+; DPMI_get_hidden_handle  (module-internal, NEAR)
+; Reads the 32-bit memory-block handle from the hidden 4-byte prefix living
+; immediately before the given selector's base, via a throwaway scratch
+; descriptor.  The caller's selector (BX) is left untouched -- BX is
+; caller-supplied input only; the scratch descriptor is tracked separately
+; (in DI, unused by DPMI 0006h/0007h/0008h/0009h/0001h's BX-selector
+; argument convention) so the original BX survives across the whole call,
+; and callers (e.g. DPMI_Free) can still free BX's selector afterward.
+; Input:  BX = selector whose hidden handle to fetch
+; Output: SI:DI = handle (high:low); BX unchanged; CF = 1 on any DPMI error
+; -----------------------------------------------------------------------------
+DPMI_get_hidden_handle:
+        mov  ax, 0006h
+        int  31h
+        jnc  .hh_gotbase
+        stc
+        ret
+.hh_gotbase:
+        sub  dx, 4
+        sbb  cx, 0
+        push cx
+        push dx
+
+        xor  ax, ax
+        mov  cx, 1
+        int  31h
+        jnc  .hh_gotscratch
+        add  sp, 4
+        stc
+        ret
+.hh_gotscratch:
+        mov  es, ax
+        xchg ax, bx         ; ax = caller's original selector, bx = scratch selector
+        pop  dx
+        pop  cx
+        push ax             ; stash caller's selector across the DPMI calls below
+        mov  ax, 0007h
+        int  31h
+        jnc  .hh_setbase_ok
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        pop  ax
+        mov  bx, ax
+        stc
+        ret
+.hh_setbase_ok:
+        xor  cx, cx
+        mov  dx, 3
+        mov  ax, 0008h
+        int  31h
+        jnc  .hh_setlimit_ok
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        pop  ax
+        mov  bx, ax
+        stc
+        ret
+.hh_setlimit_ok:
+        mov  cx, 0092h
+        mov  ax, 0009h
+        int  31h
+        jnc  .hh_setrights_ok
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        pop  ax
+        mov  bx, ax
+        stc
+        ret
+.hh_setrights_ok:
+        mov  di, [es:0]
+        mov  si, [es:2]
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+        pop  ax
+        mov  bx, ax
+        clc
+        ret
 
 DPMI_Free:
-        retf
+        %define a_ofs ss:bp+6
+        %define a_seg ss:bp+8
 
+        push bp
+        mov  bp, sp
+
+        mov  bx, [a_seg]
+        mov  ax, [a_ofs]
+        or   ax, bx
+        jz   .df_ret
+
+        call DPMI_get_hidden_handle
+        jc   .df_ret
+
+        ; Read this block's byte limit (DPMI 0003h, bx = real selector,
+        ; unchanged by the call) BEFORE freeing its descriptor, so
+        ; dpmiAllocParas can be decremented by the same paragraph count
+        ; DPMI_Alloc added -- keeps SYSTEM.MemAvail() deterministic under
+        ; DPMI (see .data comment on dpmiAllocParas).
+        push ax
+        push cx
+        push dx
+        mov  ax, 0003h
+        int  31h
+        inc  dx
+        jnz  .df_szok
+        inc  cx
+.df_szok:
+        add  dx, 15
+        adc  cx, 0
+        shr  dx, 1
+        rcr  cx, 1
+        shr  dx, 1
+        rcr  cx, 1
+        shr  dx, 1
+        rcr  cx, 1
+        shr  dx, 1
+        rcr  cx, 1           ; dx = paragraphs (low 16 bits; cx expected 0 --
+                              ; every DPMI_Alloc request is well under 64K,
+                              ; see Rdoff.SegLimit)
+        push ds
+        push ax
+        mov  ax, seg dpmiAllocParas
+        mov  ds, ax
+        sub  [dpmiAllocParas], dx
+        pop  ax
+        pop  ds
+        pop  dx
+        pop  cx
+        pop  ax
+
+        mov  cx, 1
+        mov  ax, 0001h
+        int  31h
+
+        mov  ax, 0502h
+        int  31h
+
+.df_ret:
+        %undef a_ofs
+        %undef a_seg
+        pop  bp
+        RETMACRO 4
+
+; -----------------------------------------------------------------------------
+; DPMI_MemAvail
+; DPMI-mode backend for SYSTEM_MemAvail.  Reports a deterministic,
+; process-local figure (0FFFFh minus dpmiAllocParas, the running total of
+; paragraphs outstanding via DPMI_Alloc/DPMI_Free) instead of querying the
+; DPMI host's system-wide free memory (INT 31h/0500h) -- that call reflects
+; host-wide/other-client memory pressure unrelated to this process's own
+; allocations, which made LeakGuard's deterministic before/after diff (sound
+; in real mode, which walks a process-private free-list) report spurious
+; leaks under DPMI purely from host-side memory drift.  See the
+; dpmiAllocParas .data comment.
+; Input:  none.   Output: AX = 0FFFFh - dpmiAllocParas.
+; -----------------------------------------------------------------------------
 DPMI_MemAvail:
-        retf
+        push ds
+        mov  ax, seg dpmiAllocParas
+        mov  ds, ax
+        mov  ax, 0FFFFh
+        sub  ax, [dpmiAllocParas]
+        pop  ds
+        RETMACRO 0
+
+; -----------------------------------------------------------------------------
+; DPMI_MemMaxAvail
+; DPMI-mode backend for SYSTEM_MemMaxAvail.  Same process-local figure as
+; DPMI_MemAvail -- there is no distinct "largest free block" concept for a
+; single running counter (unlike the real-mode free-list, which can be
+; fragmented).  See DPMI_MemAvail above.
+; Input:  none.   Output: AX = 0FFFFh - dpmiAllocParas.
+; -----------------------------------------------------------------------------
+DPMI_MemMaxAvail:
+        push ds
+        mov  ax, seg dpmiAllocParas
+        mov  ds, ax
+        mov  ax, 0FFFFh
+        sub  ax, [dpmiAllocParas]
+        pop  ds
+        RETMACRO 0
+
+; -----------------------------------------------------------------------------
+; SYSTEM_DpmiMapDosSeg
+; Maps a real-mode DOS segment into a fresh LDT descriptor for protected-mode
+; access: base = dosseg*16 (linear), limit = 64KB, 16-bit R/W data, ring 3.
+; Only meaningful when running under DPMI (SYSTEM.IsDPMI() = TRUE); the
+; returned selector cannot be loaded into CS (data descriptors are never
+; executable -- see DpmiMapDosSeg's doc comment in SYSTEM.MOD).
+; Input:  Stack: [DosSeg (2 bytes)].   Call Type: FAR.
+; Output: AX = scratch selector, or 0 on any DPMI error.
+; -----------------------------------------------------------------------------
+SYSTEM_DpmiMapDosSeg:
+        %define a_dosseg [ss:bp+RSIZE+2]
+
+        push bp
+        mov  bp, sp
+
+        mov  bx, a_dosseg
+        mov  ax, 0002h
+        int  31h
+        jnc  .dm_exit
+        xor  ax, ax
+.dm_exit:
+        %undef a_dosseg
+        pop  bp
+        RETMACRO 2
+
+; -----------------------------------------------------------------------------
+; SYSTEM_DpmiUnmapDosSeg
+; Releases a selector previously returned by SYSTEM_DpmiMapDosSeg (frees its
+; LDT descriptor via DPMI 0001h).
+; Input:  Stack: [ScrSelector (2 bytes)].   Call Type: FAR.
+; Output: none.
+; -----------------------------------------------------------------------------
+SYSTEM_DpmiUnmapDosSeg:
+        %define a_sel [ss:bp+RSIZE+2]
+
+        push bp
+        mov  bp, sp
+        push ax
+        push bx
+
+        mov  bx, a_sel
+        mov  ax, 0001h
+        int  31h
+
+        pop  bx
+        pop  ax
+        %undef a_sel
+        pop  bp
+        RETMACRO 2

@@ -9,6 +9,7 @@ PROCEDURE ReadChar(VAR c: CHAR);
 VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 0100H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   c := CHR(r.AX MOD 100H);
 END ReadChar;

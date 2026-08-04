@@ -90,6 +90,7 @@ PROCEDURE KeyPressed*: BOOLEAN;
 VAR r : SYSTEM.Registers;
 BEGIN
     r.AX := 0B00H;
+    r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
     SYSTEM.Intr(21H, r);
     RETURN SYSTEM.AND(SYSTEM.LSR(r.AX, 8), 0FFH) = 0FFH;
 END KeyPressed;
@@ -103,6 +104,7 @@ PROCEDURE ReadKey*: CHAR;
 VAR r : SYSTEM.Registers;
 BEGIN
     r.AX := 0800H;
+    r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
     SYSTEM.Intr(21H, r);
     RETURN CHR(SYSTEM.AND(r.AX, 0FFH))
 END ReadKey;
@@ -207,6 +209,7 @@ BEGIN
   r.AX := 8600H;
   r.CX := INTEGER(SYSTEM.LSR(us, 16));
   r.DX := INTEGER(SYSTEM.AND(us, 0FFFFH));
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(15H, r)
 END Delay;
 

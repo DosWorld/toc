@@ -471,6 +471,7 @@ BEGIN
   r.DS := SYSTEM.SEG(p^);
   r.SI := SYSTEM.OFS(p^);
   r.DI := 0;
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
 
@@ -479,6 +480,7 @@ BEGIN
     r.AX := 3D02H;
     r.DS := SYSTEM.SEG(p^);
     r.DX := SYSTEM.OFS(p^);
+    r.ES := SYSTEM.GetES();
     SYSTEM.Intr(21H, r)
   END;
 
@@ -527,6 +529,7 @@ BEGIN
   r.DX := 12H;
   r.DS := SYSTEM.SEG(p^);
   r.SI := SYSTEM.OFS(p^);
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
 
@@ -536,6 +539,7 @@ BEGIN
      r.CX := 0;
      r.DS := SYSTEM.SEG(p^);
      r.DX := SYSTEM.OFS(p^);
+     r.ES := SYSTEM.GetES();
      SYSTEM.Intr(21H, r);
   END;
 
@@ -581,19 +585,16 @@ BEGIN
 END HexDigit;
 
 PROCEDURE MakeTempName(VAR dst: ARRAY OF CHAR);
-  VAR i: INTEGER; v: LONGINT; p: WORD;
+  VAR i: INTEGER; v: LONGINT;
 BEGIN
   (* Name = 4 hex digits of the PSP segment + 4 decimal digits of a
      per-process sequence counter.  A sequence-only name ("00000001.TMP")
      collided between concurrent processes (e.g. a Dos.Exec child running in
      the same directory) and they destroyed each other's temp files. *)
   INC(tempSeq);
-  p := pspSeg;
-  i := 0;
-  WHILE i < 4 DO dst[3 - i] := HexDigit(p); p := SYSTEM.LSR(p, 4); INC(i) END;
   v := LONGINT(tempSeq);
   i := 0;
-  WHILE i < 4 DO dst[7 - i] := CHR(ORD("0") + INTEGER(v MOD LONGINT(10))); v := v DIV LONGINT(10); INC(i) END;
+  WHILE i < 8 DO dst[7 - i] := CHR(ORD("0") + INTEGER(v MOD LONGINT(10))); v := v DIV LONGINT(10); INC(i) END;
   dst[8] := "."; dst[9] := "T"; dst[10] := "M"; dst[11] := "P"; dst[12] := 0X
 END MakeTempName;
 
@@ -642,12 +643,14 @@ BEGIN
   r.SI := 0;
   r.DS := SYSTEM.SEG(FileName);
   r.DX := SYSTEM.OFS(FileName);
+  r.ES := SYSTEM.GetES();
   r.Flags := SYSTEM.FCarry;
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
     r.AX := 4100H;
     r.DS := SYSTEM.SEG(FileName);
     r.DX := SYSTEM.OFS(FileName);
+    r.ES := SYSTEM.GetES();
     SYSTEM.Intr(21H, r)
   END;
   RETURN SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0
@@ -799,6 +802,7 @@ BEGIN
     IF r.AX # 714EH THEN
       r.BX := r.AX;
       r.AX := 71A1H;
+      r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
       SYSTEM.Intr(21H, r)
     END;
     RETURN TRUE
@@ -806,6 +810,7 @@ BEGIN
   IF r.AX # 7100H THEN RETURN FALSE END;
 
   r.AX := 2F00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   oldES := r.ES;
   oldBX := r.BX;
@@ -813,12 +818,14 @@ BEGIN
   r.AX := 1A00H;
   r.DS := SYSTEM.SEG(buf);
   r.DX := SYSTEM.OFS(buf);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
 
   r.AX := 4E00H;
   r.CX := 0;
   r.DS := SYSTEM.SEG(FileName);
   r.DX := SYSTEM.OFS(FileName);
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
 
   ok := SYSTEM.AND(r.Flags, SYSTEM.FCarry) = 0;
@@ -826,6 +833,7 @@ BEGIN
   r.AX := 1A00H;
   r.DS := oldES;
   r.DX := oldBX;
+  r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
 
   RETURN ok
@@ -843,6 +851,7 @@ BEGIN
   IF f.backend # BkDisk THEN RETURN END;
   r.BX := f.handle;
   r.AX := 5700H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   time := SYSTEM.IOR(LONGINT(SYSTEM.LSL(LONGINT(WORD(r.DX)), 16)), LONGINT(WORD(r.CX)))
 END GetFTime;
@@ -859,16 +868,9 @@ BEGIN
   r.AX := 5701H;
   r.DX := SYSTEM.LSR(time, 16);
   r.CX := SYSTEM.AND(time, 0FFFFH);
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
 END SetFTime;
-
-PROCEDURE InitPsp;
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 6200H;             (* DOS get PSP segment -> BX *)
-  SYSTEM.Intr(21H, r);
-  pspSeg := WORD(r.BX)
-END InitPsp;
 
 PROCEDURE IncB*(VAR f : File; ofs : LONGINT; b : BYTE);
 VAR p : LONGINT; cp : WORD;
@@ -941,6 +943,5 @@ END IncW;
 *)
 
 BEGIN
-  tempSeq := 0;
-  InitPsp
+  tempSeq := 0
 END Files.

@@ -167,12 +167,14 @@ PROCEDURE NowDateTime*(VAR t: DateTime);
 VAR r: SYSTEM.Registers;
 BEGIN
   r.AX := 2A00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   t.Year := r.CX;
   t.Month := SYSTEM.LSR(r.DX, 8);
   t.Day := r.DX MOD 256;
 
   r.AX := 2C00H;
+  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
   SYSTEM.Intr(21H, r);
   t.Hour := SYSTEM.LSR(r.CX, 8);
   t.Min := r.CX MOD 256;
@@ -198,5 +200,13 @@ PROCEDURE SecondsBetween*(d1, d2: DosTime): LONGINT;
 BEGIN
   RETURN DosToUnixTime(d2) - DosToUnixTime(d1)
 END SecondsBetween;
+
+PROCEDURE GetBiosTicks*:LONGINT;
+TYPE PLONGINT = POINTER TO LONGINT;
+VAR t : PLONGINT;
+BEGIN
+    t := SYSTEM.PTR(SYSTEM.Seg0040(), 006CH);
+    RETURN t^
+END GetBiosTicks;
 
 END Time.
