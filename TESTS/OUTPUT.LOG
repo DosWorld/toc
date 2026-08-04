@@ -1,5 +1,0 @@
-DEBUG:ModRec table: modCount=3 recLen=229 totalBytes=687
-DEBUG:SYMSTAT syms=321 types=232 arr=121 proc=98 rec=1 ptr=0 other=12 strtab=283 strtabKB=12
-INFO:wrote TSYSMV.OM
-DEBUG:Module compiled. Max free memory block 18305 paragraphs)
-INFO:TSYSMV.EXE: Code=17408, Data=6672, BSS=0, Stack=8192

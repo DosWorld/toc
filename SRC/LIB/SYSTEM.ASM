@@ -1404,7 +1404,17 @@ DPMI_get_hidden_handle:
         stc
         ret
 .hh_setlimit_ok:
-        mov  cx, 0092h
+        mov  cx, 0F2h           ; P=1 DPL=3 S=1 data R/W -- matches DPMI_Alloc's
+                                 ; own rights byte (SYSTEM.ASM:1232,1265).  The
+                                 ; previous 0092h (DPL=0/ring-0) was silently
+                                 ; tolerated by some DPMI hosts/emulators but
+                                 ; rejected by real DPMI16 hardware (DPMI 0009h
+                                 ; fails), leaving DPMI_get_hidden_handle unable
+                                 ; to read the hidden handle and DPMI_Free
+                                 ; unable to free the block at all -- root
+                                 ; cause of a full per-block DPMI16 heap leak
+                                 ; (confirmed via SYSTEM.MemAvail() round-trip
+                                 ; on real hardware).
         mov  ax, 0009h
         int  31h
         jnc  .hh_setrights_ok
@@ -1436,24 +1446,49 @@ DPMI_Free:
         mov  bx, [a_seg]
         mov  ax, [a_ofs]
         or   ax, bx
-        jz   .df_ret
+        jnz  .df_notnil
+        jmp  .df_ret          ; NIL: nothing to free (far jump: .df_ret is
+                               ; out of short/rel8 range from here)
+.df_notnil:
 
         call DPMI_get_hidden_handle
-        jc   .df_ret
+        jnc  .df_hhok
+        jmp  .df_ret          ; far jump, same reason as above
+.df_hhok:
 
-        ; Read this block's byte limit (DPMI 0003h, bx = real selector,
-        ; unchanged by the call) BEFORE freeing its descriptor, so
+        ; Read this block's byte limit BEFORE freeing its descriptor, so
         ; dpmiAllocParas can be decremented by the same paragraph count
         ; DPMI_Alloc added -- keeps SYSTEM.MemAvail() deterministic under
         ; DPMI (see .data comment on dpmiAllocParas).
+        ;
+        ; NOTE: there is no INT 31h service that returns a selector's limit.
+        ; AX=0003h is "Get Next Selector Increment Value" (takes no selector
+        ; input at all, always succeeds, returns an unrelated power-of-two
+        ; in AX) -- a prior version of this code mistakenly called that
+        ; thinking it was "Get Segment Limit", which doesn't exist as a
+        ; DPMI service; it silently returned a bogus near-zero limit,
+        ; making DPMI_Free decrement dpmiAllocParas by ~1 paragraph instead
+        ; of the true block size on every free (DOCS/DPMI09.HTM section 8.8
+        ; explicitly says to use the LSL instruction instead).  Use LSL
+        ; DX,BX (0Fh,03h,0D3h -- TASM only assembles 8086, so this is raw
+        ; bytes) -- an 80286+ instruction, always available here since DPMI
+        ; requires at least an 80286.  LSL sets DX = the selector's limit
+        ; and ZF=1 if BX is a valid, accessible descriptor; ZF=0 (skip via
+        ; JNZ) on an invalid selector, in which case DX is undefined and
+        ; must not be used.
         push ax
         push cx
         push dx
-        mov  ax, 0003h
-        int  31h
+        db 0Fh, 03h, 0D3h        ; LSL DX, BX
+        jnz  .df_lslfail         ; ZF=0 -> BX was not a valid/accessible
+                                  ; selector; treat limit as unknown (0)
         inc  dx
         jnz  .df_szok
         inc  cx
+        jmp  .df_szok
+.df_lslfail:
+        xor  dx, dx
+        xor  cx, cx
 .df_szok:
         add  dx, 15
         adc  cx, 0

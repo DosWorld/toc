@@ -1,5 +1,7 @@
 SET OBERON_LIB=..\..\BIN\TRUBO.OM
-..\..\BOOT\TOC /Entry=Run TOC.MOD /M
+..\..\BOOT\TOC286.EXE /CD /Entry=Run TOC.MOD /M
+..\..\BOOT\TOC286.EXE /CP /Entry=Run TOC286.MOD /M
 DEL *.OM
 COPY TOC.EXE ..\..\BIN\
+COPY TOC286.EXE ..\..\BIN\
 

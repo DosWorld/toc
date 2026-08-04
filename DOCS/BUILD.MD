@@ -7,7 +7,8 @@
 | `BOOT/TOC.EXE` | checked-in MS-DOS binary | Bootstrap compiler — seeds the self-hosted build; **never modified by `make`** |
 | `BOOT/TOLIB.EXE` | checked-in MS-DOS binary | Bootstrap archive manager — used only during stdlib merge; **never modified by `make`** |
 | `BOOT/TASM.EXE` | checked-in MS-DOS binary | Bootstrap NASM-subset assembler — tool of record for `SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`, `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, `SCREEN.ASM`→`SCREEN.RDF`; **never modified by `make`** |
-| `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
+| `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link. Real-mode MZ `.EXE` — the "clean DOS version," used by `make`/`make test`/`make testall` |
+| `BIN/TOC286.EXE` | `SRC/TOC/` (Oberon) | Same compiler as `TOC.EXE`, linked as an NE/DPMI16 protected-mode `.EXE` instead — the "DPMI16 (286) version." Built via `make toc286` (additive; not part of `all`/`test`). Entry point is `TOC286.MOD` (`IMPORT TOC; PROCEDURE Run* = TOC.Run`), so both binaries share 100% of the compiler logic and only differ in link target (`/CD` vs `/CP`) |
 | `BIN/TOLIB.EXE` | `SRC/TOOLS/` (Oberon) | .OM archive manager (list/extract/create/merge); supports `@listfile` |
 | `BIN/RDFGREP.EXE` | `SRC/TOOLS/` (Oberon) | RDOFF/.om/.exe introspection for tests |
 | `BIN/TDINFO.EXE` | `SRC/TOOLS/` (Oberon) | TDS/TDINFO (0x52FB) debug-block inspector for `.exe` files |
@@ -34,6 +35,13 @@ sections below.
 make          # full build: stdlib → BIN/TOC.EXE → BIN/TOLIB.EXE → tools → OBERON.OM
 make test     # clean rebuild + run 281 manifest tests + TASM regression (host-side, fast)
 make testall  # full DOS-side suite via xt: manifest + Section 17/18 (~9 min)
+
+make -C SRC/TOC toc286   # additive: also build BIN/TOC286.EXE (DPMI16/NE /CP
+                         # binary). NOT part of `all`/`test`/`testall` — `xt`
+                         # cannot run NE binaries, so TOC286.EXE can only be
+                         # tested on a real DPMI16 host (e.g. HX-DOS, a real
+                         # DPMI server under DOSBox-X). make test/testall
+                         # keep using TOC.EXE exclusively.
 ```
 
 ### Build sequence

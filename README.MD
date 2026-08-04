@@ -106,8 +106,10 @@ That means:
   DPMI-protected-mode program in an **NE** container, structured to match a
   real Borland-Pascal `/CP` reference (verbatim MZ stub, `KERNEL` module
   reference + `INITTASK` entry call, DPL segment attributes, per-segment
-  relocation blocks). Default `/CD` still produces the DOS real-mode MZ `.EXE`.
-  See `DOCS/NE-PLAN.MD` / `DOCS/NE-BP.MD`.
+  relocation blocks). Confirmed working on real DPMI16 hardware via HX-DOS.
+  Default `/CD` still produces the DOS real-mode MZ `.EXE`; the self-hosted
+  compiler itself builds both (`BIN/TOC.EXE` and `BIN/TOC286.EXE` — see
+  `DOCS/BUILD.MD`). See `DOCS/NE-BP.MD`.
 
 ---
 

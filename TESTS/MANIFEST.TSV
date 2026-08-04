@@ -44,6 +44,7 @@ dead/exported-no-warn	DEAD6.MOD	/LOG=debug	stderr-no-contains	'ExpVar' declared
 dead/return-counts-as-read	DEAD7.MOD	/LOG=debug	stderr-no-contains	'used' declared
 dead/case-label-counts-as-read	DEAD8.MOD	/LOG=debug	stderr-no-contains	'K' declared
 dead/system-adr-counts-as-read	DEAD9.MOD	/SYSTEM /LOG=debug	stderr-no-contains	declared but never used
+case/bare-return-nonfinal-arm	CASERET.MOD		has-global	CaseRet__init
 coerce/real-from-int-rejected	INTREAL1.MOD	fails	compile-fails
 coerce/int-from-real-rejected	INTREAL2.MOD	fails	compile-fails
 coerce/longreal-from-longint-rejected	INTREAL3.MOD	fails	compile-fails

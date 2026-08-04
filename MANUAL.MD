@@ -453,8 +453,9 @@ its case:
   `.exe`. See [Debug info](#debug-info-for-turbo-debugger).
 - **`/CD`** (default) — DOS real-mode MZ `.EXE` output.
 - **`/CP`** — 16-bit DPMI protected-mode **New Executable (NE)** output,
-  structured to match a Borland-Pascal `/CP` reference (see
-  `DOCS/NE-PLAN.MD`). `/G` is not valid with `/CP`.
+  structured to match a Borland-Pascal `/CP` reference; confirmed working
+  on real DPMI16 hardware via HX-DOS (see `DOCS/NE-BP.MD`). `/G` is not
+  valid with `/CP`.
 
 ```
 toc.exe MyLib.Mod                     REM compile-only → MyLib.om
