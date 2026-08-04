@@ -21,7 +21,6 @@ library modules, and the command-line toolchain.
 | `BIN/TASM.EXE` | Self-hosted MS-DOS assembler, built via `SRC/TASM/Makefile` from `BOOT/TASM.EXE` |
 | `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS`/`texe` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
 | `BIN/RDFGREP.EXE` | RDOFF/.om/.exe introspection tool (used in tests) |
-| `xt` | DOS emulator; runs MS-DOS `.exe` files on Linux/Mac |
 
 ### 1.2 `toc.exe` — all-in-one build tool
 
@@ -67,7 +66,7 @@ Only `.om` archives are read — standalone `.def` files are ignored.
 The linker is now built into `toc.exe`.  Pass `/ENTRY=ProcName` to trigger linking:
 
 ```
-toc.exe /ENTRY=Run MyProg.Mod   → MyProg.exe (auto-named from the module name)
+TOC286.EXE /ENTRY=Run MyProg.Mod   → MyProg.exe (auto-named from the module name)
 ```
 
 `OBERON.OM` (the merged standard library) is loaded automatically — no need to list
@@ -75,41 +74,21 @@ individual `.om` files.  `toc.exe` handles dep-scan, compile, and link in one st
 
 Linking is fully integrated — no separate linker binary is needed.
 
-### 1.4 `xt` — DOS emulator
-
-```
-xt run [--max=N] [-c dir] [-e KEY=VALUE] program.exe [args]
-xt trace [--max=N] [--bp=SEG:OFS] ... program.exe
-```
-
-- Runs MS-DOS MZ executables on Linux/Mac.
-- `-c dir` — mount `dir` as the DOS `C:` drive root.  All file paths the DOS program sees start from here.
-- `-e KEY=VALUE` — set an environment variable for the DOS process.
-- `--max=N` — stop after N instructions (always use to avoid infinite loops during development).
-- Exit code 255 = emulator error; otherwise = the DOS program's exit code.
-- Output is DOS CRLF (`\r\n`); pipe through `| tr -d '\r'` on Unix if needed.
-- `xt trace` produces a per-instruction log: registers, stack, flags — essential for debugging.
-
-**Running the Oberon compiler under xt:**
-```bash
-xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=Run MyModule.Mod
-```
-
-### 1.5 No separate build scripts needed
+### 1.4 No separate build scripts needed
 
 `toc.exe` is all-in-one: dep-scan, incremental compilation, and linking happen in one
 invocation.  There is no separate linker binary, no separate dep-scanner, and no
 build-script generator.
 
-```bash
-# Single command: dep-scan + compile + link
-xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=Run MyProg.Mod
+```
+REM Single command: dep-scan + compile + link
+BIN\TOC286.EXE /ENTRY=Run MyProg.Mod
 ```
 
 `toc.exe` automatically recompiles only stale modules (pass `/M` to recompile
 everything).  `OBERON.OM` is found automatically in CWD or in the exe directory.
 
-### 1.6 `tolib` — archive manager
+### 1.5 `tolib` — archive manager
 
 ```
 tolib list    File.om
@@ -123,7 +102,7 @@ Used to inspect or manipulate `.om` archives.  `merge` combines multiple archive
 copying all members (`.RDF` and `.DEF`).  When the argument list exceeds the 127-character
 DOS command-line limit, pass `@listfile` with one path per line.
 
-### 1.7 `tasm.exe` — self-hosted NASM-subset assembler
+### 1.6 `tasm.exe` — self-hosted NASM-subset assembler
 
 ```
 tasm.exe [/LOG=level] File.asm
@@ -228,7 +207,7 @@ be a fatal "undefined symbol" error, never a wild jump to code offset 0) — run
 as part of `make test`. See `DOCS/TESTS.MD` §"TASM assembler regression test"
 for the full breakdown.
 
-### 1.8 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
+### 1.7 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
 
 ```
 tlink [/T=com|sys|exe|texe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
@@ -660,10 +639,9 @@ target used. It is **not** a 32-bit or flat-memory target: everything in
   DPMI16 — this is not optional the way it sometimes is under real mode.**
   See §6.2 below; getting this wrong is a General Protection Fault (GPF)
   under DPMI16, not silently-wrong data.
-- `xt` (this project's dev-loop DOS emulator) cannot execute NE binaries at
-  all — `/CP` output can only be tested on a real DPMI16 host or DPMI16-
-  capable extender. See `DOCS/NE-BP.MD` for the full NE format writeup,
-  including every real-hardware bug found bringing this target up.
+- `/CP` output can only be tested on a real DPMI16 host or DPMI16-capable
+  extender. See `DOCS/NE-BP.MD` for the full NE format writeup, including
+  every real-hardware bug found bringing this target up.
 - **The compiler itself ships as two binaries, exactly the same source, just
   linked for different targets:** `BIN/TOC.EXE` (`/CD`, "clean DOS") and
   `BIN/TOC286.EXE` (`/CP`, DPMI16). Reach for `TOC286.EXE` when plain DOS
@@ -903,12 +881,9 @@ stack-argument aliasing, `PCHAR` → `SYSTEM.ADDRESS`).
 `BIN/TOC.EXE` finds `OBERON.OM` automatically in CWD or in the same directory as `toc.exe`.
 One command handles compile and link — no individual `.om` files needed:
 
-```bash
-# Unix host driving xt:
-xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=Run MyProg.Mod
-
-# Real MS-DOS (with OBERON.OM in CWD or alongside toc.exe):
-toc.exe /ENTRY=Run MyProg.Mod
+```
+REM Real MS-DOS (with OBERON.OM in CWD or alongside toc.exe):
+TOC286.EXE /ENTRY=Run MyProg.Mod
 ```
 
 Individual `.om` files can be placed in `OBERON_LIB` to override specific modules —
@@ -1416,7 +1391,7 @@ END RunAllTests;
 END MyTest.
 ```
 
-Build with the all-in-one `toc.exe /ENTRY=RunAllTests MyTest.Mod`; `OBERON.OM`
+Build with the all-in-one `TOC286.EXE /ENTRY=RunAllTests MyTest.Mod`; `OBERON.OM`
 provides `Test`, `Out87`, `Math`, `Out`, `SYSTEM`, and all other stdlib modules
 automatically — no individual `.om` files need to be listed.
 
@@ -1701,9 +1676,9 @@ END Lines.
 ```
 
 Build and run — one command does everything:
-```bash
-# All-in-one: dep-scan + compile + link in a single toc.exe invocation
-# OBERON.OM is found automatically in CWD or alongside BIN/TOC.EXE
-xt run --max=50000000 -c . BIN/TOC.EXE /ENTRY=Run Lines.Mod
-xt run --max=10000000 -c . lines.exe
+```
+REM All-in-one: dep-scan + compile + link in a single toc.exe invocation
+REM OBERON.OM is found automatically in CWD or alongside BIN\TOC286.EXE
+BIN\TOC286.EXE /ENTRY=Run Lines.Mod
+LINES.EXE
 ```

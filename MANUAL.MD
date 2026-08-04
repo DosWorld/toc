@@ -73,7 +73,7 @@ END Hello.
 ```
 
 ```
-toc.exe /ENTRY=Run Hello.Mod
+TOC286.EXE /ENTRY=Run Hello.Mod
 Hello.exe
 ```
 
@@ -485,10 +485,10 @@ its case:
   memory beyond that limit.
 
 ```
-toc.exe MyLib.Mod                     REM compile-only → MyLib.om
-toc.exe /ENTRY=Run MyProg.Mod         REM compile + link → MyProg.exe
-toc.exe /M /ENTRY=Run MyProg.Mod      REM force-check every import's timestamp
-toc.exe /G /ENTRY=Run MyProg.Mod      REM link with Turbo-Debugger symbols
+TOC286.EXE MyLib.Mod                     REM compile-only → MyLib.om
+TOC286.EXE /ENTRY=Run MyProg.Mod         REM compile + link → MyProg.exe
+TOC286.EXE /M /ENTRY=Run MyProg.Mod      REM force-check every import's timestamp
+TOC.EXE /G /ENTRY=Run MyProg.Mod         REM link with Turbo-Debugger symbols (/G not valid with /CP)
 ```
 
 **`OBERON_LIB`** tells the compiler where to find the standard library

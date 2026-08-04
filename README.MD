@@ -5,7 +5,7 @@
 ### A self-hosting Oberon-07 compiler for 16-bit MS-DOS — real mode and DPMI16 protected mode
 
 [![license](https://img.shields.io/badge/license-public%20domain-brightgreen)](LICENSE.TXT)
-[![platform](https://img.shields.io/badge/platform-MS--DOS%20%2F%208086%20real%20mode%20%2B%20DPMI16-blue)](DOCS/XT.MD)
+[![platform](https://img.shields.io/badge/platform-MS--DOS%20%2F%208086%20real%20mode%20%2B%20DPMI16-blue)](DOCS/BUILD.MD)
 [![self-hosted](https://img.shields.io/badge/self--hosted-byte--stable-success)](TESTS/test_selfhost.sh)
 
 [Oberon](https://en.wikipedia.org/wiki/Oberon_(programming_language)) is
@@ -93,7 +93,7 @@ That means:
   only a benign header-record-ordering difference. Directives include
   `SECTION`/`GLOBAL`/`EXTERN`/`STRUC`/`DB`/`DW`/`TIMES`/`RESB`.../`EQU` and the
   `%define`/`%ifdef`/`%include`/`%macro` preprocessor. It's the toolchain's tool
-  of record for regenerating those files — see `DOCS/PORTING.MD` §1.7 and
+  of record for regenerating those files — see `DOCS/PORTING.MD` §1.6 and
   `DOCS/BUILD.MD`'s `regen-asm` target.
 - **Trubo Link (TLINK) — a second linker for tiny/small memory models.**
   `SRC/TLINK/` is one TOC-tool (`tlink /T=com|sys|exe|texe`) covering both
@@ -105,26 +105,7 @@ That means:
 - **New Executable (NE) output (`/CP`) — a 16-bit DPMI protected-mode
   target, still segmented.** `toc /CP` emits a 16-bit DPMI-protected-mode
   program in an **NE** container, the same approach Borland Pascal's own
-  `/CP` target used: still 16-bit, still real segments and far pointers, no
-  32-bit flat-memory escape hatch — segment registers just hold
-  protected-mode LDT selectors instead of raw paragraph addresses.
-  Structured to match a real Borland-Pascal `/CP` reference (verbatim MZ
-  stub, `KERNEL` module reference + `INITTASK` entry call, DPL segment
-  attributes, per-segment relocation blocks). Every `/CP`-linked `.EXE`
-  embeds the DPMI-extender loader stub (`NESTAB.BIN`, taken from the
-  **HX-DOS extender** — the file is also historically known as
-  `DPMIST16.BIN`) ahead of its NE header. Confirmed working end-to-end,
-  including self-hosting, on real DPMI16 hardware via HX-DOS. `SYSTEM.Intr`
-  calls must fill `Regs.DS`/`Regs.ES` correctly under `/CP` — an unset field
-  is a General Protection Fault under DPMI, not a harmless no-op the way it
-  can be under real mode (see `MANUAL.MD`). Default `/CD` still produces the
-  DOS real-mode MZ `.EXE`; the self-hosted compiler itself builds both —
-  `BIN/TOC.EXE` (`/CD`, "clean DOS" version) and `BIN/TOC286.EXE` (`/CP`,
-  DPMI16 version, same compiler, just linked for the DPMI16 target — see
-  `DOCS/BUILD.MD`). `TOC286.EXE` is the one to reach for when plain DOS
-  conventional memory isn't enough to run `TOC.EXE` itself — a DPMI host
-  gives the compiler access to memory beyond the 640 KB conventional-memory
-  ceiling. See `DOCS/NE-BP.MD` and `DOCS/PORTING.MD` §3.5.
+  `/CP` target used. See `DOCS/NE-BP.MD` and `DOCS/PORTING.MD` §3.5.
 
 ---
 
@@ -147,7 +128,7 @@ END Hello.
 ```
 
 ```bash
-BIN\TOC.EXE /ENTRY=Run Hello.Mod
+BIN\TOC286.EXE /ENTRY=Run Hello.Mod
 Hello.exe
 ```
 
@@ -191,7 +172,7 @@ END Example.
 ```
 
 ```
-BIN\TOC.EXE /ENTRY=Run Example.Mod
+BIN\TOC286.EXE /ENTRY=Run Example.Mod
 Example.exe
 5 4 3 2 1
 ```
@@ -310,8 +291,8 @@ make testall  # + DOS-side executables (Section 17) and unit tests (Section 18)
 Every codegen or language change is checked three ways: the compile-time
 manifest (does it produce the right object bytes / the right diagnostic?),
 DOS-side executables (does the linked program actually behave correctly when
-run under `xt`?), and the self-hosting fixpoint (does the compiler still
-reproduce itself?).
+run?), and the self-hosting fixpoint (does the compiler still reproduce
+itself?).
 
 ---
 
@@ -325,7 +306,6 @@ reproduce itself?).
 | [`DOCS/IMPLRULE.MD`](DOCS/IMPLRULE.MD) | DOS/portability rules, `.def` file format, emit conventions |
 | [`DOCS/BUILD.MD`](DOCS/BUILD.MD) | Build instructions, `toc.exe` flags, linker internals |
 | [`DOCS/TESTS.MD`](DOCS/TESTS.MD) | Test suite reference: running, adding, interpreting tests |
-| [`DOCS/XT.MD`](DOCS/XT.MD) | `xt` emulator reference: options, trace format, debugging |
 | [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) | RDOFF2 object file format specification |
 | [`DOCS/TD-SPEC.MD`](DOCS/TD-SPEC.MD) | Turbo Debugger TDS/TDINFO format notes |
 | [`DOCS/PORTING.MD`](DOCS/PORTING.MD) | Guide for porting code from C/Pascal |
