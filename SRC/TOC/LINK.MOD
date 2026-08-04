@@ -68,7 +68,7 @@ TYPE
                                  512 KB. One module = one CODE segment: no more
                                  grouping (each module's .rdf is already
                                  self-contained by the time it reaches Link —
-                                 see DOCS/NE-PLAN.MD §0). *)
+                                 see DOCS/NE-BP.MD Part 2 §2.2). *)
     dataPara*:     WORD;      (* this module's own DATA segment paragraph *)
     bssOfs*:       LONGINT;   (* this module's own byte offset WITHIN the one
                                  shared BSS segment (State.bssPara) — all
@@ -586,7 +586,7 @@ BEGIN RETURN (v + LONGINT(15)) DIV LONGINT(16) * LONGINT(16) END Align16;
 (* CalculateLayout: one module = one CODE segment = one DATA segment = one
    BSS segment — no more grouping (each module's own .rdf is already a
    complete, self-contained unit by the time it reaches Link; see
-   DOCS/NE-PLAN.MD §0).  Image order (fixed, see WriteExe):
+   DOCS/NE-BP.MD Part 2 §2.2).  Image order (fixed, see WriteExe):
      [mod1 CODE][mod1 DATA] ... [modN CODE][modN DATA]
      [mod1 BSS] ... [modN BSS]           <- memory-only, no file bytes
      [stack]                             <- also memory-only
@@ -645,7 +645,7 @@ BEGIN
   ls^.totalDataLen := dataBase - ls^.totalCodeLen;
 
   (* Pass 3: ONE shared BSS segment for every used module (unlike CODE/DATA,
-     BSS stays a single combined segment — see NE-PLAN discussion) — each
+     BSS stays a single combined segment — see NE-BP.MD Part 2 §2.2 discussion) — each
      module gets its own byte OFFSET within that one segment, 2-byte
      aligned (matches the pre-per-module-CODE/DATA combined-segment
      behaviour).  Placed after all CODE+DATA; memory-only, no file bytes
@@ -789,7 +789,7 @@ BEGIN RETURN DataFileBase(ls, m) + rofs END DataFileOffsetOf;
 (* Read the WORD currently at a reloc site (rseg, rofs).  For a self-CODE/DATA
    reference the compiler already baked the real in-segment offset into the
    operand; LinkNE reads it (for the NE reloc's target-offset) before stamping
-   the FFFF placeholder over it (see LINKNE / NE-PLAN.MD §4). *)
+   the FFFF placeholder over it (see LINKNE / NE-BP.MD §1.4). *)
 PROCEDURE ReadSiteWord*(rseg: INTEGER; rofs: LONGINT): WORD;
   VAR o: WORD; lo, hi: BYTE; addr: LONGINT;
 BEGIN
@@ -806,7 +806,7 @@ END ReadSiteWord;
 
 (* Force-write a WORD at a reloc site (rseg, rofs), REPLACING (not adding).
    LinkNE stamps the BPC-reference FFFF / 0000 reloc placeholder for /CP so the
-   loader writes the real value at load time (NE-PLAN.MD §4). *)
+   loader writes the real value at load time (NE-BP.MD §1.4). *)
 PROCEDURE WriteSiteWord*(rseg: INTEGER; rofs: LONGINT; val: WORD);
   VAR o: WORD; addr: LONGINT;
 BEGIN
@@ -853,7 +853,7 @@ END WriteSiteWord;
    bakes into the site), WITHOUT patching anything.  LinkNE uses this to obtain
    the real target offset for an NE OFFS/PTR reloc record while leaving the file
    site as its placeholder (the NE loader writes the value at load time — see
-   NE-PLAN.MD §4).  Absolute fixups (rrel = 0) return the target's in-segment
+   NE-BP.MD §1.4).  Absolute fixups (rrel = 0) return the target's in-segment
    offset; IP-relative fixups (rrel # 0) return the PC-relative displacement. *)
 PROCEDURE OnReloc*(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                   rrefSeg: INTEGER; rrel: INTEGER); FAR;
@@ -908,6 +908,15 @@ BEGIN RETURN lnkMod END CurrentModule;
 PROCEDURE WriteZeros*(VAR f: Files.File; n: LONGINT);
   VAR buf: ARRAY 128 OF BYTE; chunk: WORD;
 BEGIN
+  (* n<=0 means "nothing to pad" -- must return here, not fall through to
+     chunk:=WORD(n): a negative n reinterprets as a huge unsigned WORD
+     (e.g. -2 -> 65534), driving Files.BlockWrite to read far past this
+     128-byte buf and silently desyncing every file offset computed after
+     this call.  A caller passing negative n is itself a bug (its own
+     offset arithmetic is wrong) -- this guard turns that into a clean
+     no-op instead of file corruption; it does not paper over the caller's
+     bug, which must still be fixed at the source. *)
+  IF n <= LONGINT(0) THEN RETURN END;
   SYSTEM.FILL(buf, 128, 0);
   WHILE n > LONGINT(128) DO
     IF Files.BlockWrite(f, buf, 128) # 128 THEN LogErr.Error("Write error") END;

@@ -150,7 +150,8 @@ PROCEDURE CgFree*();
 BEGIN
   IF CgObj # NIL THEN
     Rdoff.RdfFree(CgObj);
-    DISPOSE(CgObj)   (* return the ObjFile struct itself to the heap *)
+    DISPOSE(CgObj);   (* return the ObjFile struct itself to the heap *)
+    CgObj := NIL
   END
 END CgFree;
 

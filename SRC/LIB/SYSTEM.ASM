@@ -114,9 +114,7 @@ ErrWithMsg:
 SYSTEM_IsDPMI:
         mov  ax, seg isDpmi
         mov  es, ax
-        mov  ax, [isDpmi]
-        mov  ah, 62h
-        int  21h
+        mov  ax,[es:isDpmi]
         retf
 
 common_init:
@@ -156,15 +154,7 @@ SYSTEM_DPMI_INIT:
         MAP_DOS_SEG segb000
         MAP_DOS_SEG segb800
         MAP_DOS_SEG sega000
-        ;MAP_DOS_SEG segpsp
         push ds
-;        mov  ax, [segpsp]
-;        mov  ds, ax
-;        mov  ax, [2ch]
-;        push ax
-;        push cs
-;        call SYSTEM_DpmiMapDosSeg
-;        mov  [2ch], ax
         pop  ds
         retf
 

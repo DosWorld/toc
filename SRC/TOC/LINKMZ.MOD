@@ -2,7 +2,7 @@
 MODULE LinkMZ;
 (*
   MZ-specific consumer of Link's target-agnostic core: writes a DOS real-mode
-  MZ .EXE (§0 of DOCS/NE-PLAN.MD).  Owns everything the generic Link module no
+  MZ .EXE (DOCS/NE-BP.MD Part 2 §2.2).  Owns everything the generic Link module no
   longer hardcodes for MZ: the flat MZ relocation list, the SEGRELOC callback
   that both patches a segment-value fixup and records an MZ reloc entry, the
   TDS/TDINFO (/G) debug-info writer, and the final WriteExe.

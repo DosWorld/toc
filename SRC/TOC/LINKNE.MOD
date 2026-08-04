@@ -7,13 +7,13 @@ MODULE LinkNE;
   same seam (a segRelocProc callback on Link.PerformLinking), different output
   format.
 
-  Segment model (DOCS/NE-PLAN.MD §0/§2): one NE CODE segment per used module's
+  Segment model (DOCS/NE-BP.MD Part 2 §2.2): one NE CODE segment per used module's
   own CODE segment, one NE DATA segment per used module's own DATA segment, and
   ONE final NE DATA segment for the shared BSS.  1-based NE segment indices are
   assigned by walking ls^.modHead in order (CODE then DATA per module), then the
   shared BSS last.
 
-  Relocation model (DOCS/NE-PLAN.MD §4, DOCS/NE-BP.MD §4) — the Borland-Pascal
+  Relocation model (DOCS/NE-BP.MD §1.4 and Part 2 §2.1) — the Borland-Pascal
   /CP PLACEHOLDER model: the file word at every reloc site is a placeholder and
   the NE LOADER writes the real value from the reloc record (LinkNE does NOT bake
   for /CP, unlike LinkMZ).
@@ -29,9 +29,9 @@ MODULE LinkNE;
       stays BAKED (via Link.OnReloc), and gets NO NE reloc (BPC omits these too).
   Each reloc is appended to the OUTPUT segment the patch site lives in.
 
-  KERNEL.INITTASK (the one external import): the /CP entry stub's first
+  KERNEL.INITTASK (the one external import): the /CP entry stab's first
   instruction is a far call to KERNEL.INITTASK (ordinal 91), emitted by
-  TOC.GenEntryStub as an unresolvable import "KERNEL_INITTASK".  It surfaces here
+  TOC.GenEntryStab as an unresolvable import "KERNEL_INITTASK".  It surfaces here
   as the only import FindImport can't resolve (IsExternalImport); OnSegReloc
   emits ONE external PTR (03h) reloc with flags = IMPORTORDINAL (01h), target-seg
   = the KERNEL module-ref index (1), target-offset = the ordinal (91).  Every
@@ -49,12 +49,11 @@ CONST
   NeHdrBytes  = 64;      (* fixed NE header size *)
   SegChunk    = 32;      (* NE segments per mapping/reloc chunk node *)
   NeRelChunk  = 128;     (* NE relocs per chunk node (small-record rule) *)
-  StubBytes   = 3646;    (* size of NESTUB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
-  //StubBytes   = 96;      (* size of NESTUB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
+  StabBytes   = 512;     (* size of NESTAB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
   KernelLen   = 6;       (* length of the imported module name "KERNEL" *)
 
   (* Segment attributes (Table 6) — measured from the reference NE
-     (DOCS/NE-PLAN.MD §0): every segment carries the 80286 DPL bits (0C00H,
+     (DOCS/NE-BP.MD Part 2 §2.2): every segment carries the 80286 DPL bits (0C00H,
      bits 10-11).  CODE = MOVEABLE + DISCARD + DPL (no PRELOAD, matching the
      reference user-code segment); DATA/BSS = DATA + PRELOAD + DPL.  Either kind
      adds HASRELOC when it owns a non-empty reloc block. *)
@@ -71,7 +70,7 @@ CONST
   RelOFFS = 05H;         (* 16-bit offset within a target segment *)
 
   (* Relocation flag byte (Table 10) — target-type bits 0-1: internal fixups use
-     INTERNALREF (0); the single KERNEL.INITTASK entry-stub call uses
+     INTERNALREF (0); the single KERNEL.INITTASK entry-stab call uses
      IMPORTORDINAL (target-seg = module-ref index, target-offset = ordinal). *)
   RelTypeImportOrd = 01H;
 
@@ -133,8 +132,8 @@ TYPE
     modName:  ARRAY 10 OF CHAR   (* resident-names-table module name (upper) *)
   END;
 
-(*$L NESTUB.RDF*)
-PROCEDURE NESTUB;FAR;EXTERNAL;
+(*$L NESTAB.RDF*)
+PROCEDURE NESTAB;FAR;EXTERNAL;
 
 PROCEDURE InitState*(ns: State);
 BEGIN
@@ -330,9 +329,9 @@ BEGIN
 END OutSeg;
 
 (* TRUE when rrefSeg names an import that does NOT resolve to any linked symbol.
-   In this no-import model the only such import is the entry stub's
-   KERNEL.INITTASK sentinel — a genuine OS/2 external fixup (see GenEntryStub /
-   NE-PLAN.MD §4).  Every real IMPORT resolves; anything unresolved here is
+   In this no-import model the only such import is the entry stab's
+   KERNEL.INITTASK sentinel — a genuine OS/2 external fixup (see GenEntryStab /
+   NE-BP.MD §1.4).  Every real IMPORT resolves; anything unresolved here is
    INITTASK. *)
 PROCEDURE IsExternalImport(rrefSeg: INTEGER): BOOLEAN;
 BEGIN
@@ -341,7 +340,7 @@ BEGIN
 END IsExternalImport;
 
 (* onRelocProc for Link.PerformLinking (BPC-reference placeholder model,
-   NE-PLAN.MD §4).  A real NE loader WRITES each reloc'd site from the reloc
+   NE-BP.MD §1.4).  A real NE loader WRITES each reloc'd site from the reloc
    record at load time; the file word is an FFFF placeholder.  So for an ABSOLUTE
    offset fixup (rrel = 0) we do NOT bake — we compute the target offset, stamp
    the site with FFFF, and record an NE OFFS reloc (flags = INTERNALREF 0) for
@@ -390,7 +389,7 @@ BEGIN
 END OnReloc;
 
 (* segRelocProc for Link.PerformLinking (BPC-reference placeholder model,
-   NE-PLAN.MD §4).  A SEGRELOC targets a segment VALUE.  The loader writes the
+   NE-BP.MD §1.4).  A SEGRELOC targets a segment VALUE.  The loader writes the
    selector from the reloc record; the file word is a placeholder we do NOT bake.
    If the immediately-preceding word (rofs-2) already carries an OFFS reloc, the
    two are one far pointer → coalesce into a single PTR and stamp the SEGMENT word
@@ -450,18 +449,27 @@ END PerformLinking;
 
 (* ---- write NE EXE ---- *)
 
-(* MZ stub: the verbatim 3646-byte Borland-Pascal /CP DOS stub, embedded in the
-   linker binary via `(*$L NESTUB.RDF*)` (assembled from SRC/TOC/NESTUB.BIN by
-   TASM) and written byte-for-byte (DOCS/NE-BP.MD §1).  Its own e_lfanew field
-   (at MZ offset 3Ch) already reads 0E3EH = StubBytes, so the NE header lands
-   exactly after it — no field synthesis needed.  Embedding it (vs reading a file
-   at link time) means /CP needs no external NESTUB.BIN on the search path. *)
-PROCEDURE WriteStub(VAR fout: Files.File);
-  VAR p: SYSTEM.ADDRESS;
+(* MZ stab: the verbatim Borland-Pascal /CP DOS stab, embedded in the linker
+   binary via `(*$L NESTAB.RDF*)` (assembled from SRC/TOC/NESTAB.BIN by TASM)
+   and written byte-for-byte (DOCS/NE-BP.MD §1).  Its own e_lfanew field (at
+   MZ offset 3Ch) is NOT trusted to already equal StabBytes -- NESTAB.BIN has
+   been swapped before without every generation baking a correct e_lfanew
+   (one such swap shipped with e_lfanew=0, silently pointing the NE header
+   lookup back at the MZ header itself and corrupting every downstream file
+   offset) -- so this always overwrites offset 3Ch with StabBytes explicitly
+   after writing the stab bytes, rather than trusting whatever the embedded
+   stab happens to already contain there.  Embedding it (vs reading a file at
+   link time) means /CP needs no external NESTAB.BIN on the search path. *)
+PROCEDURE WriteStab(VAR fout: Files.File);
+  VAR p: SYSTEM.ADDRESS; savedPos: LONGINT;
 BEGIN
-  p := SYSTEM.ADR(NESTUB);
-  Files.BlockWrite(fout, p^, StubBytes)
-END WriteStub;
+  p := SYSTEM.ADR(NESTAB);
+  Files.BlockWrite(fout, p^, StabBytes);
+  savedPos := Files.Position(fout);
+  Files.Seek(fout, LONGINT(3CH));
+  Files.WriteDWord(fout, LONGINT(StabBytes));
+  Files.Seek(fout, savedPos)
+END WriteStab;
 
 (* Write one segment's reloc block (count WORD + 8*count bytes) after its data. *)
 PROCEDURE WriteRelocBlock(VAR fout: Files.File; sn: SegNode; k: INTEGER);
@@ -525,7 +533,7 @@ PROCEDURE WriteExe*(ls: Link.State; ns: State; outPath: ARRAY OF CHAR);
 BEGIN
   IF ~Files.ReWrite(fout, outPath) THEN LogErr.Error2("Cannot write: ", outPath); RETURN END;
 
-  neOfs := LONGINT(StubBytes);
+  neOfs := LONGINT(StabBytes);
   alignShift := 8; sectorSize := 256;   (* 256-byte sectors (matches reference) *)
 
   (* SP must point at the TOP of the shared BSS+stack segment (BuildSegTable
@@ -545,7 +553,7 @@ BEGIN
   END;
 
   (* ---- table layout (offsets from NE header start) ----
-     Order in the header area (matches the reference NE, DOCS/NE-PLAN.MD §3):
+     Order in the header area (matches the reference NE, DOCS/NE-BP.MD §1.2/§1.3):
      [NE header 64B][segment table][resource table (empty)][resident names]
      [module ref table (1 KERNEL entry)][imported names ("KERNEL")][entry table].
      Nonresident names table is at a file offset after the entry table. *)
@@ -578,8 +586,8 @@ BEGIN
   nrTabLen := 1 + nrLen + 2 + 1;
   nonresOfs := neOfs + LONGINT(entryTblOfs) + LONGINT(entryTblLen);
 
-  (* ---- MZ stub (verbatim NESTUB.BIN; its own e_lfanew = StubBytes) ---- *)
-  WriteStub(fout);
+  (* ---- MZ stab (verbatim NESTAB.BIN; its own e_lfanew = StabBytes) ---- *)
+  WriteStab(fout);
   IF LogErr.HaveErr() THEN Files.Close(fout); RETURN END;
 
   (* ---- NE header (64 bytes) ---- *)
@@ -625,13 +633,15 @@ BEGIN
 
   (* ---- segment table (filled after segment file offsets are known) ---- *)
   (* The segment table's File Offset field is in sectors; segment data starts
-     after the whole header area (which ends at nonresOfs + 1 for the empty
-     nonresident table).  Round each segment start up to a sector boundary.
-     We first compute each segment's sector, then stream the table, then the
-     data.  Two-pass: pass A assigns sectors; pass B writes table + data. *)
+     after the whole header area (which ends at nonresOfs + nrTabLen -- the
+     nonresident-names table is NOT empty, it always carries the .EXE
+     filename entry built above).  Round each segment start up to a sector
+     boundary.  We first compute each segment's sector, then stream the
+     table, then the data.  Two-pass: pass A assigns sectors; pass B writes
+     table + data. *)
 
   (* pass A: assign each segment a sector-aligned file offset *)
-  filePos := nonresOfs + LONGINT(1);   (* end of header area *)
+  filePos := nonresOfs + LONGINT(nrTabLen);   (* end of header area *)
   (* round up to sector *)
   filePos := ((filePos + LONGINT(sectorSize) - LONGINT(1)) DIV LONGINT(sectorSize)) * LONGINT(sectorSize);
 
@@ -648,7 +658,7 @@ BEGIN
       w := Files.WriteWord(fout, 0)
     END;
     w := Files.WriteWord(fout, INTEGER(sn^.e[k].dataLen));   (* length in file *)
-    (* attributes (matches the reference NE, DOCS/NE-PLAN.MD §3): every segment
+    (* attributes (matches the reference NE, DOCS/NE-BP.MD §1.2/§1.3): every segment
        carries DPL bits (0C00H).  DATA/BSS = DATA + PRELOAD + DPL (0C41H); CODE
        = MOVEABLE + DISCARD + DPL (1C10H, no PRELOAD, matching the reference
        user-code segment).  Either kind gets the HASRELOC bit when it owns a
