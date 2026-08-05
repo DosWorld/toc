@@ -13,8 +13,8 @@
 | `BIN/RDFGREP.EXE` | `SRC/TOOLS/` (Oberon) | RDOFF/.om/.exe introspection for tests |
 | `BIN/TDINFO.EXE` | `SRC/TOOLS/` (Oberon) | TDS/TDINFO (0x52FB) debug-block inspector for `.exe` files |
 | `BIN/TOSTRIP.EXE` | `SRC/TOOLS/` (Oberon) | Strips debug info from `.exe` (TDS block) or `.om` (`.DBG` member) files |
-| `BIN/TASM.EXE` | `SRC/TASM/` (Oberon) | Self-hosted NASM-subset assembler (`.asm` → RDOFF2 `.rdf`); see `DOCS/PORTING.MD` §1.7 |
-| `BIN/TLINK.EXE` | `SRC/TLINK/` (Oberon) | Merged RDOFF2 linker: tiny-model `.COM`/`.SYS` and small-model `.EXE` output (`/T=com\|sys\|exe`) |
+| `BIN/TASM.EXE` | `SRC/TASM/` (Oberon) | Self-hosted NASM-subset assembler (`.asm` → RDOFF2 `.rdf`); see `DOCS/PORTING.MD` §1.6 |
+| `BIN/TLINK.EXE` | `SRC/TLINK/` (Oberon) | Merged RDOFF2 linker: tiny-model `.COM`/`.SYS`/`.BGI` and small-model `.EXE` output (`/T=com\|sys\|exe\|texe\|bgi2`) |
 
 All binaries are MS-DOS MZ executables that run on real MS-DOS or under `xt`.
 `BOOT/TOC.EXE`, `BOOT/TOLIB.EXE`, and `BOOT/TASM.EXE` are the only pre-built
@@ -138,7 +138,7 @@ xt run --max=50000000 -c . 'BOOT/TOC.EXE' /SYSTEM 'SRC/LIB\SYSTEM.MOD'
 **IMPORTANT — `SYSTEM.RDF` is a checked-in binary, built by TASM:**
 `SRC/LIB/SYSTEM.RDF` is the pre-assembled RDOFF2 object for `SRC/LIB/SYSTEM.ASM`,
 produced by `BOOT/TASM.EXE` (the self-hosted assembler — see
-`DOCS/PORTING.MD` §1.7), the tool of record for this `.asm`→`.rdf` step.
+`DOCS/PORTING.MD` §1.6), the tool of record for this `.asm`→`.rdf` step.
 `SRC/LIB/Makefile` has **no rule** to rebuild it automatically as part of
 `make all`/`make install` (TASM needs a fully-built `OBERON.OM` to run,
 which itself needs `SYSTEM.RDF` — see the toolchain-binaries table above for
@@ -313,7 +313,7 @@ oberonc/
     TOC.EXE              All-in-one compiler/linker/dep-scan (MS-DOS MZ)
     TOLIB.EXE            Archive manager (MS-DOS MZ)
     TASM.EXE             NASM-subset assembler; tool of record for SYSTEM.ASM/
-                          EMS.ASM -> .RDF (MS-DOS MZ, see DOCS/PORTING.MD §1.7)
+                          EMS.ASM -> .RDF (MS-DOS MZ, see DOCS/PORTING.MD §1.6)
   SRC/                Oberon source for all tools
     TOC/                Compiler + linker (Main, Parser, Link, …)
       SCAN.MOD          Scanner (Scan)
@@ -476,14 +476,15 @@ before the new one is written.
 ## Using tlink — Trubo Link (RDOFF2 linker)
 
 ```
-tlink [/T=com|sys|exe|texe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
+tlink [/T=com|sys|exe|texe|bgi2|bin] [/A=xxxx] [/N=name] [/D=descr]
+      [/C=copyright] [/ORG=xxxx] [/LOG=level] <input> ... <output>
 ```
 
 A merged linker for RDOFF2 object files, distinct from `toc.exe`'s own
-embedded smart linker: `tlink` targets **tiny model** (`.COM`/`.SYS`/`texe`,
-a single contiguous code+data+bss segment, no relocation table) and **small
-model** (`.EXE`, paragraph-aligned code/data/bss regions plus an MZ
-relocation table for `SEGRELOC` fixups) — the two memory models
+embedded smart linker: `tlink` targets **tiny model** (`.COM`/`.SYS`/`texe`/
+`bgi2`/`bin`, a single contiguous code+data+bss segment, no relocation
+table) and **small model** (`.EXE`, paragraph-aligned code/data/bss regions
+plus an MZ relocation table for `SEGRELOC` fixups) — the two memory models
 `toc.exe`'s own linker does not target. Built from `SRC/TLINK/TLINK.MOD`,
 which keeps the shared logic (module/symbol scanning, RDOFF2/RDLIB2/TAR
 format auto-detection, smart-link marking from an entry symbol) once,
@@ -494,7 +495,10 @@ absolute in-image references for both modes — differing only in the final
 output writer.
 
 - **`/T=com`** (default): produce a `.COM` image — a 3-byte `JMP start`
-  stub followed by the linked code+data.
+  stub followed by the linked code+data, **unless** `start` is already the
+  first byte of code, in which case the stub (a pure no-op jump to the very
+  next instruction) is omitted entirely and the image begins directly with
+  `start`'s own bytes. Requires a `start` GLOBAL symbol.
 - **`/T=sys`**: produce a `.SYS` device driver — an 18-byte header
   (`next`/`attribute`/`strategy`/`interrupt`/`name`) instead of the JMP
   stub. Requires both a `strategy` and an `interrupt` GLOBAL symbol
@@ -510,11 +514,44 @@ output writer.
   stub needed, unlike `/T=com`), `SP=0xFFFE`, no relocation table, and
   `MinAlloc=MaxAlloc` sized to reserve the rest of the 64K PSP segment
   after the image (matching a `.COM`'s implicit "own the whole segment").
-  Implemented in `SRC/TLINK/TEXE.MOD` (module `TExe`), called from
-  `TLINK.MOD`'s output-dispatch step.
-- **`/A:xxxx`**: device attribute word (hex, no prefix, e.g. `/A:8000`) —
+  Requires a `start` GLOBAL symbol. Implemented in `SRC/TLINK/TEXE.MOD`
+  (module `TExe`), called from `TLINK.MOD`'s output-dispatch step.
+- **`/T=bgi2`**: produce a Borland BGI v2.0 graphics driver — the linked
+  tiny-model code+data image (same layout `/T=com` uses) prefixed with the
+  0xA0-byte BGI v2.0 header (magic/banner/copyright/two header
+  blocks/driver name) instead of a JMP stub. **No `start` entry symbol
+  required at all**, and no stub of any kind is ever emitted (there is no
+  room for one in the BGI convention — the loader always far-calls image
+  offset 0 directly and requires the `'CB'` signature at image+0x0C):
+  every module given on the command line is linked in unconditionally
+  (same as `/T=bin`, no reachability tracing), so whichever module's code
+  comes first in link order is the driver's entry point, by construction
+  of the source itself — put the entry stub first in your `.asm`. Full
+  format reference: `DOCS/BGI.MD`. Implemented in `SRC/TLINK/BGI2.MOD`
+  (module `Bgi2`), called from `TLINK.MOD`'s output-dispatch step.
+- **`/T=bin`**: produce a raw binary blob — the same tiny-model layout as
+  `/T=com` (single contiguous code+data+bss segment, no relocation table)
+  with **no JMP stub ever** and **no `start` entry symbol required**: every
+  module given on the command line is linked in unconditionally, same as
+  `/T=bgi2`. The assumed load address used to resolve absolute in-image
+  references is `/ORG=` (default `0`) instead of `/T=com`'s hardcoded
+  `0x100` PSP bias — `/T=bin /ORG=100` on a `start`-first source reproduces
+  `/T=com`'s output byte-for-byte (minus the stub, which `/T=com` also
+  omits when `start` is first). Implemented in `SRC/TLINK/BIN.MOD` (module
+  `Bin`), called from `TLINK.MOD`'s output-dispatch step.
+- **`/A=xxxx`**: device attribute word (hex, no prefix, e.g. `/A=8000`) —
   implies `/T=sys`.
-- **`/N:name`**: device name, space-padded to 8 characters (`/T=sys` only).
+- **`/N=name`**: device name, space-padded to 8 characters (`/T=sys` only).
+- **`/D=descr`**: banner description, `/T=bgi2` only — appended to the BGI
+  header banner as `<NAME> BGI Device Driver - <descr>` (or just `<NAME>
+  BGI Device Driver` when omitted). Takes the entire value from one
+  command-line argument (everything after `=`); quote with `"..."` if it
+  contains spaces, since DOS itself splits an unquoted command tail on
+  whitespace before `tlink` ever sees it.
+- **`/C=copyright`**: copyright line, `/T=bgi2` only (default: a generic
+  public-domain notice). Same one-argument, quote-if-spaces rule as `/D=`.
+- **`/ORG=xxxx`**: assumed load address (hex, no prefix, e.g. `/ORG=100`),
+  `/T=bin` only (default `0`).
 - **`/LOG=level`**: `debug`/`info`/`warn`/`error`, same convention as
   `toc.exe`/`tasm.exe` (`LogErr.SetLevel`).
 - **`@listfile`**: expand a file with one input path per line (same
@@ -527,8 +564,11 @@ archive (auto-detected by content signature, not file extension). AR
 (`.a`, Unix ar format) support from the Pascal originals was intentionally
 dropped — not needed by anything in this repo.
 
-Smart linking only pulls in modules reachable from the entry symbol(s),
-same principle as `toc.exe`'s own linker. Build and install:
+Smart linking pulls in only modules reachable from the entry symbol(s) for
+`/T=com`/`/T=sys`/`/T=exe`/`/T=texe` (same principle as `toc.exe`'s own
+linker); `/T=bgi2` and `/T=bin` have no entry symbol at all, so every
+module given on the command line is linked in unconditionally instead.
+Build and install:
 
 ```bash
 cd SRC/TLINK && make && make install   # → BIN/TLINK.EXE

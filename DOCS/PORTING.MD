@@ -19,7 +19,7 @@ library modules, and the command-line toolchain.
 | `BIN/TOC.EXE` | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link |
 | `BIN/TOLIB.EXE` | `.om` archive manager (list / extract / create / merge); supports `@listfile` |
 | `BIN/TASM.EXE` | Self-hosted MS-DOS assembler, built via `SRC/TASM/Makefile` from `BOOT/TASM.EXE` |
-| `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS`/`texe` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
+| `BIN/TLINK.EXE` | Merged RDOFF2 linker for tiny-model `.COM`/`.SYS`/`texe`/`bgi2`/`bin` and small-model `.EXE`, built via `SRC/TLINK/Makefile` |
 | `BIN/RDFGREP.EXE` | RDOFF/.om/.exe introspection tool (used in tests) |
 
 ### 1.2 `toc.exe` — all-in-one build tool
@@ -210,15 +210,18 @@ for the full breakdown.
 ### 1.7 `tlink.exe` — Trubo Link (merged RDOFF2 linker)
 
 ```
-tlink [/T=com|sys|exe|texe] [/A:xxxx] [/N:name] [/LOG=level] <input> ... <output>
+tlink [/T=com|sys|exe|texe|bgi2|bin] [/A=xxxx] [/N=name] [/D=descr]
+      [/C=copyright] [/ORG=xxxx] [/LOG=level] <input> ... <output>
 ```
 
-`BIN/TLINK.EXE` links RDOFF2 objects into a tiny-model `.COM`/`.SYS`/`texe`
-image (`/T=com`, the default; `/T=sys` with `/A:`/`/N:` for a device
-driver; `/T=texe` for a tiny-model MZ `.EXE` — a 3-byte `JMP start` stub,
-an 18-byte device header, or no on-disk stub at all, respectively, all
-sharing one contiguous code+data+bss segment with no relocation table) or
-a small-model `.EXE` (`/T=exe` — a paragraph-aligned CS code segment and a
+`BIN/TLINK.EXE` links RDOFF2 objects into a tiny-model `.COM`/`.SYS`/`texe`/
+`bgi2`/`bin` image (`/T=com`, the default; `/T=sys` with `/A=`/`/N=` for a
+device driver; `/T=texe` for a tiny-model MZ `.EXE`; `/T=bgi2` for a
+Borland BGI v2.0 graphics driver; `/T=bin` for a raw binary blob — a 3-byte
+`JMP start` stub, an 18-byte device header, no on-disk stub at all, a
+0xA0-byte BGI header, or no header/stub at all, respectively, all sharing
+one contiguous code+data+bss segment with no relocation table) or a
+small-model `.EXE` (`/T=exe` — a paragraph-aligned CS code segment and a
 separate DS=SS segment holding data+bss+stack, plus an MZ relocation table).
 These are memory models `toc.exe`'s own embedded linker does not target (it
 always produces a full/large-model-style single-segment image sized to the
@@ -246,18 +249,50 @@ the 64K PSP segment after the image. Implemented in `SRC/TLINK/TEXE.MOD`
 and `/T=texe` share `TLINK.MOD`'s `OnReloc` PSP (`CS:100h`) address bias
 for absolute in-image references — `/T=sys` does not apply it (no PSP).
 
+`/T=com`'s `JMP start` stub is itself skipped whenever `start` already
+sits at code offset 0 (`CalculateLayoutTiny` checks this before laying out
+the image) — a jump to the very next instruction is a pure no-op.
+
+`/T=bgi2` produces a Borland BGI v2.0 graphics driver: the same tiny-model
+code+data image `/T=com` uses, prefixed with the 0xA0-byte BGI v2.0 header
+(magic, banner+copyright text, two 10-byte header blocks, driver name —
+full byte layout in `DOCS/BGI.MD`) instead of a JMP stub. Unlike `/T=com`,
+BGI has **no stub at all and no `start` entry symbol requirement**: the
+kernel always far-calls image offset 0 directly and requires the `'CB'`
+signature there, so — same as `/T=bin` below — every module given on the
+command line is linked in unconditionally (no reachability tracing from an
+entry symbol); the entry stub simply has to be the first thing in the
+source/link order. `/D=descr` and `/C=copyright` customize the banner
+description and copyright line (each takes the whole value from one
+command-line argument — quote with `"..."` if it contains spaces).
+Implemented in `SRC/TLINK/BGI2.MOD` (module `Bgi2`), called from
+`TLINK.MOD`'s output-dispatch step.
+
+`/T=bin` produces a raw binary blob: the same tiny-model layout as
+`/T=com`, but with **no JMP stub ever** and **no `start` entry symbol
+required at all** (every module on the command line is linked in
+unconditionally, same as `/T=bgi2`). The absolute-address bias `/T=com`
+hardcodes to `0x100` (the PSP convention) is instead `/ORG=` here,
+defaulting to `0` — a raw binary has no DOS-imposed load convention to
+assume. `/T=bin /ORG=100` on a `start`-first source reproduces `/T=com`'s
+output byte-for-byte (modulo the stub, which `/T=com` also omits when
+`start` is first — see above). Implemented in `SRC/TLINK/BIN.MOD` (module
+`Bin`), called from `TLINK.MOD`'s output-dispatch step.
+
 Keeps the logic shared between tiny and small model (module/symbol
 scanning, RDOFF2/RDLIB2/TAR auto-detection by content signature,
-smart-link marking from an entry symbol — only `start`, or both
-`strategy` and `interrupt` for `/T=sys`) once, branching only at
-layout/output time on the target mode. AR (`.a`) archive support was
-intentionally not implemented — not needed by anything in this repo.
-`/LOG=` works exactly like `toc.exe`'s/`tasm.exe`'s (`LogErr.SetLevel`).
+smart-link marking from an entry symbol — only `start` for `/T=com`/
+`/T=exe`/`/T=texe`, both `strategy` and `interrupt` for `/T=sys`, none at
+all for `/T=bgi2`/`/T=bin`) once, branching only at layout/output time on
+the target mode. AR (`.a`) archive support was intentionally not
+implemented — not needed by anything in this repo. `/LOG=` works exactly
+like `toc.exe`'s/`tasm.exe`'s (`LogErr.SetLevel`).
 
-Source: `SRC/TLINK/TLINK.MOD`, `SRC/TLINK/TEXE.MOD`. Build: `cd SRC/TLINK
-&& make && make install`. See [BUILD.MD](BUILD.MD) §"Using tlink" for the
-full CLI reference. Regression test: `TESTS/test_tlink.sh` (see
-[TESTS.MD](TESTS.MD) §"TLINK linker regression test").
+Source: `SRC/TLINK/TLINK.MOD`, `SRC/TLINK/TEXE.MOD`, `SRC/TLINK/BGI2.MOD`,
+`SRC/TLINK/BIN.MOD`. Build: `cd SRC/TLINK && make && make install`. See [BUILD.MD](BUILD.MD)
+§"Using tlink" for the full CLI reference. Regression test:
+`TESTS/test_tlink.sh` (see [TESTS.MD](TESTS.MD) §"TLINK linker regression
+test").
 
 ---
 

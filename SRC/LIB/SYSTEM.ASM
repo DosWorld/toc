@@ -211,10 +211,6 @@ dpmi_done:
         push ds
         mov  ax, [segpsp]
         mov  ds, ax
-;        mov  ax, [2ch]
-;        push ax
-;        push cs
-;        call SYSTEM_DpmiUnmapDosSeg
         pop  ds
         UNMAP_DOS_SEG seg0040
         UNMAP_DOS_SEG segb000

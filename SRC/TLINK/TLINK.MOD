@@ -1,9 +1,9 @@
 MODULE TLink;
 (*
-  Trubo Link (tlink.exe) - RDOFF2 linker for tiny-model .COM/.SYS/.EXE
-  and small-model .EXE output.
-  tiny model: .COM/.SYS/.EXE (texe), no relocation table and
-  small model: .EXE with an MZ relocation table,
+  Trubo Link (tlink.exe) - RDOFF2 linker for tiny-model .COM/.SYS/.EXE/.BGI/
+  raw-binary and small-model .EXE output.
+  tiny model: .COM/.SYS/.EXE (texe)/.BGI (bgi2)/raw blob (bin), no
+  relocation table and small model: .EXE with an MZ relocation table,
   RDOFF2/RDLIB2/TAR format detection, smart-link marking.
 
   Usage:
@@ -11,6 +11,12 @@ MODULE TLink;
     tlink /t=sys /A:xxxx [/N:name] input... output.sys
     tlink /t=exe input... output.exe
     tlink /t=texe input... output.exe                  (tiny model, MZ wrapper)
+    tlink /t=bgi2 [/D=descr] [/C=copyright] input... output.bgi
+                                                        (Borland BGI v2.0 driver,
+                                                         see DOCS/BGI.MD)
+    tlink /t=bin [/ORG=xxxx] input... output.bin        (raw binary blob,
+                                                         no JMP stub, no
+                                                         'start' required)
 
   Uses Rdoff.ScanHeader/ScanRelocs/ReadCode/ReadData (the same primitives
   SRC/TOC/LINK.MOD uses for toc.exe's own embedded linker) instead of
@@ -20,13 +26,15 @@ MODULE TLink;
   DWORD size, sequential, '.'-prefixed entries (e.g. ".sig") are metadata
   and skipped.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Strings, StrTab, Tar, TExe, Out;
+IMPORT Dos, Files, LogErr, Rdoff, Strings, StrTab, Tar, TExe, Bgi2, Bin, Out;
 
 CONST
   ModeCom = 0;
   ModeSys = 1;
   ModeExe = 2;
   ModeTExe = 3;
+  ModeBgi2 = 4;
+  ModeBin = 5;
 
   MaxPath = 128;
   MaxName = 64;
@@ -104,6 +112,9 @@ VAR
   sysName:     ARRAY 9 OF CHAR;
   headerSize:  INTEGER;
   strategyIp, interruptIp, entryIp: INTEGER;
+  bgiDescr:    ARRAY MaxPath OF CHAR;   (* /D=: BGI banner text, /T=bgi2 only *)
+  bgiCopyr:    ARRAY MaxPath OF CHAR;   (* /C=: BGI copyright line, /T=bgi2 only *)
+  orgValue:    INTEGER;   (* /ORG=: assumed load address bias, /T=bin only (default 0) *)
 
 (* ---- string / path helpers ---- *)
 
@@ -162,6 +173,8 @@ END SearchFile;
 
 (* ---- module / symbol tables ---- *)
 
+PROCEDURE FindSymbol(name: ARRAY OF CHAR; VAR e: SymEntry); FORWARD;
+
 PROCEDURE RegisterModule(fileName: ARRAY OF CHAR; libOfs: LONGINT): Module;
   VAR m: Module;
 BEGIN
@@ -177,9 +190,27 @@ BEGIN
   RETURN m
 END RegisterModule;
 
+(* AddSymbol: register a GLOBAL symbol.  Rejects a name already exported by
+   an earlier-registered module: without this check, FindSymbol would
+   silently return whichever definition happened to be scanned first (input
+   file order), so a duplicate export (stale/leftover object, or two
+   modules that both define e.g. "start" or a helper of the same name)
+   linked without any diagnostic and the winner depended on command-line
+   order alone. *)
 PROCEDURE AddSymbol(name: ARRAY OF CHAR; owner: Module; segId: INTEGER; offset: LONGINT);
-  VAR n: SymNode;
+  VAR n: SymNode; e: SymEntry; msg: ARRAY MaxPath + 64 OF CHAR;
 BEGIN
+  FindSymbol(name, e);
+  IF e.node # NIL THEN
+    Strings.Copy("tlink: duplicate symbol '", msg);
+    Strings.Append(name, msg);
+    Strings.Append("' defined in both ", msg);
+    Strings.Append(e.node.owner[e.slot].fileName, msg);
+    Strings.Append(" and ", msg);
+    Strings.Append(owner.fileName, msg);
+    LogErr.Error(msg);
+    RETURN
+  END;
   IF (symTail = NIL) OR (symTail.count >= SymChunk) THEN
     NEW(n);
     IF n = NIL THEN LogErr.Error("out of memory (symbol)"); RETURN END;
@@ -201,7 +232,7 @@ END AddSymbol;
    A name never interned (StrTab.Find returns 0) cannot be any symbol's
    name (StrTab id 0 matches nothing), so the id compare alone is exact —
    no fallback string compare needed, same as SRC/TOC/SYMS.MOD's SymFindId. *)
-PROCEDURE FindSymbol(name: ARRAY OF CHAR; VAR e: SymEntry);
+PROCEDURE FindSymbol;
   VAR n: SymNode; i: INTEGER; id: StrTab.TStrTabId;
 BEGIN
   id := StrTab.Find(name);
@@ -411,11 +442,15 @@ END MarkModule;
 
 (* SmartLink: mark every module reachable from the entry symbol(s) as
    used. .SYS mode needs both "strategy" and "interrupt"; .COM/.EXE need
-   only "start".
+   "start". /T=bin and /T=bgi2 have no entry symbol at all -- every module
+   given on the command line is linked in unconditionally (there is
+   nothing to trace reachability from; for /T=bgi2 the driver's entry
+   stub simply has to be the first thing in the source/link order, by the
+   same convention /T=bin uses).
    Parameters: none (reads `mode` and the symbol table).
    Result: none (failures latch via LogErr). *)
 PROCEDURE SmartLink;
-  VAR e: SymEntry;
+  VAR e: SymEntry; m: Module;
 BEGIN
   IF mode = ModeSys THEN
     FindSymbol("strategy", e);
@@ -424,6 +459,9 @@ BEGIN
     FindSymbol("interrupt", e);
     IF ~SymFound(e) THEN LogErr.Error("tlink: symbol 'interrupt' not found (required for SYS)"); RETURN END;
     MarkModule(SymOwner(e))
+  ELSIF (mode = ModeBin) OR (mode = ModeBgi2) THEN
+    m := modHead;
+    WHILE m # NIL DO MarkModule(m); m := m.next END
   ELSE
     FindSymbol("start", e);
     IF ~SymFound(e) THEN LogErr.Error("tlink: entry point 'start' not found"); RETURN END;
@@ -454,15 +492,39 @@ END Align16;
 
 (* CalculateLayoutTiny: contiguous code+data+bss, header bytes reserved
    up front (18 for .SYS device-driver header, 3 for a .COM JMP stub,
-   0 for texe -- its MZ header IP points at start directly, no stub).
+   0 for texe -- its MZ header IP points at start directly, no stub;
+   0 for bgi2 -- the BGI header is a separate prepended file section, not
+   part of the code image, and there is no stub of any kind: whichever
+   module is first in link order simply IS the entry, by the same "no
+   'start' required" convention /T=bin uses (see SmartLink/PerformLinking);
+   0 for bin -- a raw binary blob never gets a stub at all, no entry
+   symbol required).
+   For .COM, the 3-byte JMP stub is skipped entirely when "start" is
+   already the first byte of the first used module's code (offset 0):
+   a JMP to the very next instruction is a pure no-op, so WriteOutputTiny
+   must agree and omit it too whenever headerSize = 0 here.
    Parameters: none.
    Result: none (fatal via LogErr if the tiny-model 64KB limit is exceeded). *)
 PROCEDURE CalculateLayoutTiny;
   VAR m: Module; codeBase, dataBase, bssBase: LONGINT;
+      e: SymEntry; firstUsed: Module; startAtZero: BOOLEAN;
 BEGIN
   IF mode = ModeSys THEN headerSize := 18
-  ELSIF mode = ModeTExe THEN headerSize := 0
+  ELSIF (mode = ModeTExe) OR (mode = ModeBgi2) OR (mode = ModeBin) THEN headerSize := 0
   ELSE headerSize := 3
+  END;
+  IF mode = ModeCom THEN
+    (* optimization only: skip the JMP stub when 'start' is already the
+       first byte of the first used module's code -- a jump to the very
+       next instruction would be a pure no-op. *)
+    FindSymbol("start", e);
+    startAtZero := FALSE;
+    IF SymFound(e) & (SymSegId(e) = Rdoff.SegCode) & (SymOffset(e) = LONGINT(0)) THEN
+      firstUsed := modHead;
+      WHILE (firstUsed # NIL) & ~firstUsed.used DO firstUsed := firstUsed.next END;
+      startAtZero := firstUsed = SymOwner(e)
+    END;
+    IF startAtZero THEN headerSize := 0 END
   END;
   codeBase := LONGINT(headerSize);
   m := modHead;
@@ -639,6 +701,11 @@ BEGIN
        Relative fixups above don't need this: both sides of the
        subtraction shift by the same 0x100, so it cancels out. *)
     fixup := fixup + LONGINT(100H)
+  ELSIF mode = ModeBin THEN
+    (* /T=bin: same idea as /T=com's 0x100 bias, but the assumed load
+       address is caller-supplied via /ORG= (default 0 -- a raw binary
+       has no DOS-imposed PSP convention to assume). *)
+    fixup := fixup + LONGINT(orgValue)
   END;
   PatchMem(rseg, patchAddr, fixup, rwidth)
 END OnReloc;
@@ -661,7 +728,10 @@ BEGIN
     fixup := SYSTEM.LSR(WORD(totalCodeLen), 4)
   ELSIF rrefSeg > Rdoff.SegBss THEN
     ImpFind(rrefSeg, e);
-    IF SymFound(e) & ((SymSegId(e) = Rdoff.SegData) OR (SymSegId(e) = Rdoff.SegBss)) THEN
+    IF ~SymFound(e) THEN
+      LogErr.Error("tlink: SEGRELOC to missing import"); RETURN
+    END;
+    IF (SymSegId(e) = Rdoff.SegData) OR (SymSegId(e) = Rdoff.SegBss) THEN
       fixup := SYSTEM.LSR(WORD(totalCodeLen), 4)
     END
   END;
@@ -732,6 +802,9 @@ BEGIN
     IF ~SymFound(e) THEN LogErr.Error("tlink: /T=sys: 'interrupt' entry symbol not found"); RETURN END;
     owner := SymOwner(e);
     interruptIp := WORD(SymOffset(e) + owner.finalCodeOfs)
+  ELSIF (mode = ModeBin) OR (mode = ModeBgi2) THEN
+    (* /T=bin and /T=bgi2 have no entry symbol at all -- there is no stub
+       to patch, so entryIp is simply left unused. *)
   ELSE
     FindSymbol("start", e);
     IF ~SymFound(e) THEN LogErr.Error("tlink: 'start' entry symbol not found"); RETURN END;
@@ -772,8 +845,10 @@ BEGIN
       codeBuf^[10 + i] := BYTE(ORD(nameCh));
       INC(i)
     END
-  ELSE
-    (* .COM stub: E9 rel16 (JMP start), rel16 = start - 3 *)
+  ELSIF headerSize > 0 THEN
+    (* .COM stub: E9 rel16 (JMP start), rel16 = start - 3.  Omitted
+       entirely (headerSize = 0) when CalculateLayoutTiny already found
+       "start" sitting at code offset 0 -- see its comment. *)
     codeBuf^[0] := 0E9H;
     codeBuf^[1] := BYTE(SYSTEM.AND(entryIp - 3, 0FFH));
     codeBuf^[2] := BYTE(SYSTEM.AND(SYSTEM.LSR(entryIp - 3, 8), 0FFH))
@@ -916,11 +991,14 @@ END WriteOutputExe;
    "/A:8000") into an INTEGER.
    Parameters: s — the hex digits.
    Result: the parsed value (fatal via LogErr on a non-hex character). *)
-PROCEDURE ParseHex(s: ARRAY OF CHAR): INTEGER;
-  VAR v, i: INTEGER; c: CHAR;
+PROCEDURE ParseHex(s: ARRAY OF CHAR; label: ARRAY OF CHAR): INTEGER;
+  VAR v, i: INTEGER; c: CHAR; msg: ARRAY 64 OF CHAR;
 BEGIN
   v := 0; i := 0;
-  IF s[0] = 0X THEN LogErr.Error("tlink: /A: requires a hex value"); RETURN 0 END;
+  IF s[0] = 0X THEN
+    Strings.Copy("tlink: ", msg); Strings.Append(label, msg); Strings.Append(" requires a hex value", msg);
+    LogErr.Error(msg); RETURN 0
+  END;
   WHILE s[i] # 0X DO
     c := SYSTEM.UCASE(s[i]);
     IF (c >= "0") & (c <= "9") THEN v := v * 16 + (ORD(c) - ORD("0"))
@@ -977,11 +1055,20 @@ BEGIN
   Out.String("Options:"); Out.Ln;
   Out.Ln;
   Out.String(" /T=com      Tiny model .COM output (default)"); Out.Ln;
-  Out.String(" /T=sys      Tiny model .SYS device driver output"); Out.Ln;
   Out.String(" /T=exe      Small model .EXE output"); Out.Ln;
   Out.String(" /T=texe     Tiny model .EXE output (DS=CS=SS=PSP, no JMP stub)"); Out.Ln;
+  Out.String(" /T=sys      Tiny model .SYS device driver output"); Out.Ln;
   Out.String(" /A=xxxx     Device attribute (hex) - implies /T=sys"); Out.Ln;
   Out.String(" /N=name     Device name (max 8 chars, /T=sys only)"); Out.Ln;
+  Out.String(" /T=bgi2     Borland BGI v2.0 graphics driver output"); Out.Ln;
+  Out.String(" /D=text     Banner description, /T=bgi2 only (appended as"); Out.Ln;
+  Out.String("             '<NAME> BGI Device Driver - <text>'; quote text"); Out.Ln;
+  Out.String("             if it contains spaces)"); Out.Ln;
+  Out.String(" /C=text     Copyright line, /T=bgi2 only (default: a generic"); Out.Ln;
+  Out.String("             notice; quote text if it contains spaces)"); Out.Ln;
+  Out.String(" /T=bin      Raw binary blob output (like /T=com, but no JMP"); Out.Ln;
+  Out.String("             stub and no 'start' entry symbol required)"); Out.Ln;
+  Out.String(" /ORG=xxxx   Assumed load address (hex), /T=bin only (default 0)"); Out.Ln;
   Out.String(" /LOG=level  debug|info|warn|error"); Out.Ln;
   Out.String(" @list.lst   Process list file"); Out.Ln;
   Out.Ln;
@@ -1011,6 +1098,8 @@ BEGIN
   mode := ModeCom;
   sysAttr := 0;
   sysName := "        ";
+  bgiDescr := ""; bgiCopyr := "";
+  orgValue := 0;
   modHead := NIL; modTail := NIL;
   symHead := NIL; symTail := NIL;
   noSym.node := NIL; noSym.slot := 0;
@@ -1032,15 +1121,23 @@ BEGIN
       ELSIF Strings.EqualICase(val, "sys") THEN mode := ModeSys
       ELSIF Strings.EqualICase(val, "exe") THEN mode := ModeExe
       ELSIF Strings.EqualICase(val, "texe") THEN mode := ModeTExe
+      ELSIF Strings.EqualICase(val, "bgi2") THEN mode := ModeBgi2
+      ELSIF Strings.EqualICase(val, "bin") THEN mode := ModeBin
       ELSE LogErr.Error2("tlink: unknown /T= mode: ", val); RETURN 1
       END
     ELSIF MatchSwitchVal(arg, "/A=", val) THEN
       mode := ModeSys;
-      sysAttr := ParseHex(val)
+      sysAttr := ParseHex(val, "/A=")
     ELSIF MatchSwitchVal(arg, "/N=", val) THEN
       mode := ModeSys;
       Strings.Extract(val, 0, 8, sysName);
       WHILE Strings.Length(sysName) < 8 DO Strings.Append(" ", sysName) END
+    ELSIF MatchSwitchVal(arg, "/D=", val) THEN
+      Strings.Copy(val, bgiDescr)
+    ELSIF MatchSwitchVal(arg, "/C=", val) THEN
+      Strings.Copy(val, bgiCopyr)
+    ELSIF MatchSwitchVal(arg, "/ORG=", val) THEN
+      orgValue := ParseHex(val, "/ORG=")
     ELSIF arg[0] = "@" THEN
       Strings.Extract(arg, 1, Strings.Length(arg) - 1, val);
       ParseListFile(val)
@@ -1062,6 +1159,8 @@ BEGIN
   IF LogErr.HaveErr() THEN RETURN 1 END;
   IF mode = ModeExe THEN WriteOutputExe
   ELSIF mode = ModeTExe THEN TExe.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, entryIp, outFileName)
+  ELSIF mode = ModeBgi2 THEN Bgi2.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, outFileName, bgiDescr, bgiCopyr)
+  ELSIF mode = ModeBin THEN Bin.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, outFileName)
   ELSE WriteOutputTiny
   END;
   IF LogErr.HaveErr() THEN RETURN 1 END;

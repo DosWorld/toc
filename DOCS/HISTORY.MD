@@ -731,3 +731,58 @@ clean error, not a jump to code offset 0.  New `TESTS/FIX/TEQU.ASM`;
 Bootstrap: the maintainer refreshed `BOOT/TOC.EXE` with the three compiler fixes
 (byte-identical to the self-host-convergent gen2/gen3).  `make test`: 301
 manifest / 110 TASM / 4 TLINK, all passing.
+
+## 2026-08-05 — `tlink /T=com` no-jmp-to-next optimization + `/T=bgi2` (Borland BGI v2.0 driver) + `/T=bin` (raw binary blob)
+
+**TLINK (`SRC/TLINK/TLINK.MOD`).** `/T=com`'s 3-byte `JMP start` stub is now
+skipped whenever `start` is already the first byte of the first used
+module's code — a jump to the very next instruction is a pure no-op.
+`CalculateLayoutTiny` checks this (owner module is the first *used* module
+in `modHead`'s list, and `start`'s own symbol offset is 0) before deciding
+`headerSize`; `WriteOutputTiny` skips writing the stub bytes whenever
+`headerSize=0`. New fixture `TESTS/FIX/TLKJMPCOM.ASM` (a `helper` label
+precedes `start`) proves the stub is still correctly emitted when needed.
+
+**New `/T=bgi2` output mode** produces a Borland BGI v2.0 graphics driver
+file (full format reference: `DOCS/BGI.MD`, added this session, ported from
+a proven external `MKBGI.MOD` reference implementation) — the same
+tiny-model code+data image `/T=com` uses, prefixed with the 0xA0-byte BGI
+v2.0 header instead of a JMP stub. `/D=descr` and `/C=copyright` customize
+the banner description and copyright line (each consumes the whole value
+from one command-line argument; quote with `"..."` if the value contains
+spaces, since DOS itself splits an unquoted command tail on whitespace
+before `tlink` ever sees it). All BGI-specific logic (header-byte layout,
+banner/copyright composition) lives in a new module, `SRC/TLINK/BGI2.MOD`
+(`Bgi2`), not `TLINK.MOD` itself — `Bgi2.Write` takes the linked code/data
+buffers and lengths as plain parameters, no shared state with the linker.
+
+**New `/T=bin` output mode** produces a raw binary blob: the same
+tiny-model layout as `/T=com`, but with **no JMP stub ever** and **no
+`start` entry symbol required at all**. Implemented in a new module,
+`SRC/TLINK/BIN.MOD` (`Bin`). The absolute-address bias `/T=com` hardcodes
+to `0x100` (the PSP convention) is instead caller-supplied via `/ORG=`
+(default `0`); `/T=bin /ORG=100` on a `start`-first source reproduces
+`/T=com`'s output byte-for-byte.
+
+**`start` requirement dropped for `/T=bgi2` too** (initial design made it
+a hard, fatal requirement that `start` sit at code offset 0, mirroring the
+BGI format's real constraint that image offset 0 is always the entry point
+— but that constraint doesn't need a *symbol lookup* to enforce, since
+there's nothing else it could mean without one). `/T=bgi2` and `/T=bin`
+both now skip the entry-symbol search entirely: `SmartLink` links every
+module given on the command line unconditionally (there is nowhere to
+trace reachability from without an entry symbol), and whichever module's
+code lands first in link order is the driver's/blob's de facto entry
+point, by construction of the source itself.
+
+New fixtures: `TESTS/FIX/TLKBGI.ASM` (minimal skeleton BGI driver: entry
+stub at `start`/offset 0, `'CB'` signature at image+0x0C, a `DDOVEC`
+table) is checked structurally (magic/header-blocks/name/signature
+byte-exactness) rather than run under `xt`, since a driver file isn't
+itself an executable program. `/T=bgi2` and `/T=bin` are each additionally
+checked against a fixture with no `start` symbol at all
+(`TESTS/FIX/TLKJMPCOM.ASM`, `TESTS/FIX/TLKMOD2.ASM`) to confirm they link
+successfully where `/T=com` on the same input fails with `entry point
+'start' not found`; `/T=bin`'s `/ORG=` bias is checked by comparing
+`/T=bin /ORG=100` against `/T=com`'s output byte-for-byte. `test_tlink.sh`
+→ 13/0.

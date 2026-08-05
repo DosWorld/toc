@@ -809,7 +809,8 @@ BEGIN
   Link.InitState(ls);
   IF targetCP THEN
     LinkNE.InitState(ns);
-    LinkNE.SetModName(ns, outExe)
+    LinkNE.SetModName(ns, outExe);
+    ns^.genDebug := genDebug   (* /G: emit the TDS debug block into the .exe *)
   ELSE
     LinkMZ.InitState(ms);
     ms^.genDebug := genDebug   (* /G: emit the TDS debug block into the .exe *)
@@ -1083,10 +1084,6 @@ BEGIN
      gModFile (never in the heap), so the arena is contiguous for the linker's
      code-group buffer — no defrag round-trip is needed. *)
   IF hasEntry THEN
-    IF targetCP & genDbg THEN
-      LogErr.Error("oc: /G (debug info) is not supported with /CP (NE target)");
-      RETURN 1
-    END;
     memBefore := SYSTEM.MemAvail();
     LinkAll(outExe, genDbg, targetCP);
     FreeMods;             (* close + delete the module-graph temp after linking *)

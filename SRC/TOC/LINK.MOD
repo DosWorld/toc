@@ -50,12 +50,13 @@ TYPE
     path*:         ARRAY MaxPath OF CHAR;
     stem*:         ARRAY 10 OF CHAR;  (* member basename w/o ".RDF" (<=8) — "" when
                                          no MODNAME.DBG can exist ($L extras etc.) —
-                                         used only by LinkMZ's TDS/TDINFO debug writer *)
-    hasDbg*:       BOOLEAN;   (* non-empty MODNAME.DBG found (debug pass 1) — LinkMZ-only *)
-    dbgModName*:   INTEGER;   (* pool ordinal of the module ident (M line) — LinkMZ-only *)
-    dbgSrcName*:   INTEGER;   (* pool ordinal of the source file name (F line) — LinkMZ-only *)
-    dbgTypeBase*:  WORD;      (* this module's local TYPE indices are offset by this — LinkMZ-only *)
-    dbgMembBase*:  WORD;      (* this module's local MEMBER indices are offset by this — LinkMZ-only *)
+                                         used by both LinkMZ's and LinkNE's
+                                         TDS/TDINFO debug writers *)
+    hasDbg*:       BOOLEAN;   (* non-empty MODNAME.DBG found (debug pass 1) — LinkMZ/LinkNE *)
+    dbgModName*:   INTEGER;   (* pool ordinal of the module ident (M line) — LinkMZ/LinkNE *)
+    dbgSrcName*:   INTEGER;   (* pool ordinal of the source file name (F line) — LinkMZ/LinkNE *)
+    dbgTypeBase*:  WORD;      (* this module's local TYPE indices are offset by this — LinkMZ/LinkNE *)
+    dbgMembBase*:  WORD;      (* this module's local MEMBER indices are offset by this — LinkMZ/LinkNE *)
     libOfs*:       LONGINT;
     rawSize:       LONGINT;
     hdrSize*:      LONGINT;

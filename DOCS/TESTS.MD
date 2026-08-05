@@ -448,8 +448,8 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
 ## TLINK linker regression test
 
-`TESTS/test_tlink.sh` verifies `SRC/TLINK/` (the RDOFF2 linker, all four
-`/T=` output modes: `com`, `sys`, `exe`, `texe`).
+`TESTS/test_tlink.sh` verifies `SRC/TLINK/` (the RDOFF2 linker, all six
+`/T=` output modes: `com`, `sys`, `exe`, `texe`, `bgi2`, `bin`).
 
 1. Builds `TASM.exe` and `TLINK.exe` via `BOOT/TOC.EXE` (single-process
    `/ENTRY=Run`).
@@ -479,11 +479,67 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
    linker does (see PORTING.MD §1.8 / IMPLRULE.MD).  Regression for the
    `Align16` bug and the missing DS-setup stub (both 2026-07-29).
 
+6. Negative-path checks (`TESTS/FIX/TLKNOSTART.ASM` — no `start` global;
+   `TESTS/FIX/TLKUNRES.ASM` — `start` calls an undefined extern
+   `missing_symbol`): each links with `/T=com` and must exit nonzero,
+   print the expected `LogErr.Error`/`Error2` message (`entry point
+   'start' not found` / `unresolved external: missing_symbol`), and
+   produce **no** output file — guards against a symbol-resolution
+   failure silently linking a broken binary (e.g. a `JMP` stub pointing
+   at garbage/itself) instead of failing fast.
+7. Duplicate-symbol check (`TESTS/FIX/TLKDUPA.ASM` + `TLKDUPB.ASM`, both
+   exporting `start`): linking both with `/T=com` must exit nonzero,
+   report `tlink: duplicate symbol 'start' defined in both ...`, and
+   produce no output file. Regression for `AddSymbol` (`TLINK.MOD`):
+   without this check, `FindSymbol` silently returned whichever module's
+   export was scanned first (input file order), so two modules
+   defining the same global name linked successfully with the winner
+   picked arbitrarily by argument order — the leading suspect for a
+   reported "JMP to nowhere/self" `/T=com` symptom whenever a stale or
+   duplicate object ends up on the link line.
+8. No-jmp-to-next (`/T=com` only): links `TLINKHI.RDF` (where `start` is
+   already the first byte of code) and checks the output's first byte is
+   **not** `E9` — the 3-byte `JMP start` stub is a pure no-op in that case
+   and `CalculateLayoutTiny`/`WriteOutputTiny` must omit it entirely, not
+   just emit a jump to the very next instruction. A second fixture,
+   `TESTS/FIX/TLKJMPCOM.ASM` (a `helper` label precedes `start`), checks
+   the opposite: the stub **is** still emitted (first byte `E9`) and the
+   linked `.com` still runs correctly.
+9. `/T=bgi2` (`TESTS/FIX/TLKBGI.ASM` — a minimal skeleton BGI driver:
+   entry stub at `start`/offset 0, `'CB'` signature at image+0x0C, a
+   `DDOVEC` table): links with `/D=`/`/C=` set and checks the produced
+   `.BGI` file structurally against DOCS/BGI.MD §3 — magic `pk`,08,08 at
+   offset 0, both 10-byte header blocks, the namelen+name field at
+   0x8A/0x8B, and the `'CB'` signature at file offset 0xAC (image+0x0C).
+   A driver file isn't itself runnable, so this is a byte-layout check,
+   not a `run under xt` check. BGI header writing itself lives in
+   `SRC/TLINK/BGI2.MOD` (module `Bgi2`), not `TLINK.MOD`.
+10. `/T=bgi2` and `/T=bin` both require **no** `start` entry symbol at
+    all — unlike every other mode, `SmartLink` links every module given
+    on the command line unconditionally instead of tracing reachability
+    from an entry symbol (there is nowhere to trace from). Checked by
+    linking `TESTS/FIX/TLKJMPCOM.ASM` (whose only label reachable the
+    `/T=com` way is `start`, itself not at offset 0) with `/T=bgi2`, and
+    `TESTS/FIX/TLKMOD2.ASM` (exports only `getmsg`, no `start` at all —
+    the same fixture `/T=exe`'s multi-module check uses) with `/T=bin`:
+    both must link successfully, where `/T=com` on the same inputs
+    fails with `entry point 'start' not found`. The `/T=bin` check also
+    confirms the output's first byte is never `E9` (no JMP stub, ever —
+    not even the `/T=com`-style optional one).
+11. `/T=bin`'s `/ORG=` bias: links `TLINKHI.RDF` (where `start` is at
+    offset 0) three ways — `/T=bin` (default org 0), `/T=bin /ORG=100`,
+    and `/T=com` — and checks `/T=bin /ORG=100` is byte-identical to
+    `/T=com`'s output (both put the absolute-address bias at `0x100`;
+    `/T=com` also omits its stub here since `start` is first, matching
+    `/T=bin`'s "never emit a stub" rule) while the default-org `/T=bin`
+    output differs from both. `/T=bin` itself lives in
+    `SRC/TLINK/BIN.MOD` (module `Bin`), not `TLINK.MOD`.
+
 Run as part of `make test`, or standalone:
 
 ```bash
 bash TESTS/test_tlink.sh
-# Results: 4 passed, 0 failed
+# Results: 13 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
@@ -500,9 +556,9 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 ## TASM assembler regression test
 
 `TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
-`.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.7) by byte-diffing
-its output against expected `.rdf` files. 110 checks total as of
-2026-07-29 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
+`.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.6) by byte-diffing
+its output against expected `.rdf` files. 111 checks total as of
+2026-08-05 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
 behind each batch — the four categories below cover the original 16;
 everything added since is a per-bug or per-feature regression row, not
 worth re-narrating here row-by-row): the original 16 (below), plus
@@ -511,9 +567,17 @@ regression rows for every bug found in the 2026-07-15/16 review passes
 §C's minor-bug batch, §D's 8086-coverage additions), `§J` bin2obj-mode
 rows, `§I`'s `-D`/`%include`/`%macro` rows (15 rows: 3 `-D`, 5
 `%include`, 7 `%macro`), the `TEQU.ASM` `EQU`-constant fixture
-(2026-07-29), and the `TUNDEFJMP.ASM` `check_fails` row (a branch to an
+(2026-07-29), the `TUNDEFJMP.ASM` `check_fails` row (a branch to an
 undefined label must be a fatal "undefined symbol" error, never a wild
-jump to code offset 0).
+jump to code offset 0), and `TMACSTR.ASM` (2026-08-05: `%macro`/`%define`
+actual parameters may now be string literals — single-char `'D'` or
+multi-char `'hi there'`/`"double quoted"`, either quote style — not just
+identifiers/numbers/simple expressions; `TokToText`, the shared
+actual-parameter/`%define`-body re-serialiser in `PARSE.MOD`, previously
+rejected `TString` outright with "unsupported token in macro argument".
+`TDEFBADTOK.ASM` (the original BUG B5 regression fixture) switched its
+still-unsupported-token probe from a string literal to `(`, since a
+string literal is no longer unsupported.
 
 1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
    compiler's own self-host).
@@ -557,7 +621,7 @@ Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
 
 ```bash
 bash TESTS/test_tasm.sh
-# Results: 110 passed, 0 failed
+# Results: 111 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).

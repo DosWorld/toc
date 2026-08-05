@@ -1293,10 +1293,32 @@ END TryDirective;
    Fail already called) on a token this serializer cannot represent, or
    on growth that would truncate val. *)
 PROCEDURE TokToText(VAR val: ARRAY OF CHAR; whatBody: ARRAY OF CHAR): BOOLEAN;
-  VAR msg: ARRAY 96 OF CHAR;
+  VAR msg: ARRAY 96 OF CHAR; quote, dquote: ARRAY 2 OF CHAR; p: WORD;
 BEGIN
   IF tSym = Scan.TIdent THEN Strings.Append(tIdOrig, val)
   ELSIF tSym = Scan.TInt THEN Strings.AppendInt(tIval, val)
+  ELSIF tSym = Scan.TString THEN
+    (* Re-quote the decoded value (Scan.MOD keeps only sval, not which
+       quote char delimited it, and supports no escaping at all -- a
+       string literal ends at the first matching quote/EOL/EOF). Pick
+       whichever quote char does NOT occur in tSval so the re-serialized
+       text re-lexes back to the same TString; a value containing BOTH
+       quote characters has no representable re-quoting (this dialect has
+       no escape mechanism) and is rejected. *)
+    quote[1] := 0X;
+    dquote[0] := CHR(34); dquote[1] := 0X;
+    p := 0;
+    IF ~Strings.Pos("'", tSval, p) THEN quote[0] := "'"
+    ELSE
+      p := 0;
+      IF ~Strings.Pos(dquote, tSval, p) THEN quote[0] := CHR(34)
+      ELSE
+        Strings.Copy("string literal containing both quote characters not supported in ", msg);
+        Strings.Append(whatBody, msg);
+        Fail(msg); RETURN FALSE
+      END
+    END;
+    Strings.Append(quote, val); Strings.Append(tSval, val); Strings.Append(quote, val)
   ELSIF tSym = Scan.TColon THEN Strings.Append(":", val)
   ELSIF tSym = Scan.TLbrak THEN Strings.Append("[", val)
   ELSIF tSym = Scan.TRbrak THEN Strings.Append("]", val)
@@ -1306,10 +1328,11 @@ BEGIN
   ELSIF tSym = Scan.TStar THEN Strings.Append("*", val)
   ELSIF tSym = Scan.TSlash THEN Strings.Append("/", val)
   ELSE
-    (* BUG B5: every other token (string literals, '(' ')' '.' '%',
-       TError) was silently swallowed here -- only the separator space
-       got appended, so e.g. "%define SZ 4*2" (before the TStar/TSlash
-       cases above existed) stored "4 2 ", which a later use then
+    (* BUG B5: every other token ('(' ')' '.' '%', TError -- string
+       literals were in this class too until TString gained its own
+       re-quoting case above) was silently swallowed here -- only the
+       separator space got appended, so e.g. "%define SZ 4*2" (before the
+       TStar/TSlash cases above existed) stored "4 2 ", which a later use then
        mis-parses or re-triggers BUG A2's stray-token hang, with no
        diagnostic pointing at the %define line itself. *)
     Strings.Copy("unsupported token in ", msg); Strings.Append(whatBody, msg);

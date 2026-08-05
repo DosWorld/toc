@@ -604,4 +604,125 @@ the linker).
   sorted by offset.
 * String pool at end, 1-based, `names_pool_size` = its byte length.
 
+---
+
+## NE/DPMI16 (`/CP`) support — LinkNE's TDS/TDINFO writer (2026-08-05)
+
+`SRC/TOC/LINKNE.MOD` now supports `/G` for the `/CP` (NE) target, wired
+through `TOC.MOD`'s `LinkAll` exactly like LinkMZ (the earlier hard error
+"`/G` (debug info) is not supported with `/CP`" is gone). Tested by hand:
+`TOC.EXE /CP /G /ENTRY=Run DBGINFO.MOD` under `xt` links cleanly with 0
+heap leaks and produces a `.exe` carrying a TDINFO block. `xt` cannot
+execute NE binaries, so this path has no automated `test_dbg.sh`-style
+round-trip yet — verification is structural (byte inspection) plus the
+zero-leak build.
+
+### Design decision: same v2.08 shape as LinkMZ, not a Borland-exact NE clone
+
+`DBG/DBGPROBE.EXE` (a Borland-Pascal 7 `/CP` NE probe, built and returned by
+the maintainer 2026-08-04, alongside `DBG/DPROMZ.EXE` — the identical
+program built `/CD`/MZ for comparison) was reverse-engineered byte-by-byte
+to determine what a *real* Borland NE TDINFO block looks like (see
+"NE/DPMI16 empirical findings" below). It differs from the MZ v2.08 layout
+this project already emits in several real ways. **`LinkNE.WriteDebugInfo`
+deliberately does NOT replicate those Borland-specific quirks** — it emits
+the exact same v2.08 shape `LinkMZ.WriteDebugInfo` already writes (same
+48-byte header, same SYMBOL/MODULE/SOURCE_FILE/LINE/SCOPE/CORRELATION/TYPE/
+MEMBER record layouts described in "Practical writer summary" above), with
+ONE required adaptation:
+
+* **`SEGMENT_RECORD.code_seg`** is the module's own 1-based **NE segment
+  index** (`LinkNE.SegIndexOf(ns, m, Rdoff.SegCode)`), not an MZ `codePara`
+  paragraph — this project's `LinkNE` gives every linked module its own NE
+  CODE segment (`LINKNE.MOD`'s `BuildSegTable`), unlike Borland Pascal's
+  linker which merges multiple modules into fewer, larger NE segments (see
+  below). `code_ofs` stays 0 (one module = one whole NE CODE segment, same
+  "one module = one segment" model `LinkMZ` already uses for MZ).
+
+Rationale: our own `BIN/TDINFO.EXE` (`SRC/TOOLS/TDINFO.MOD`) is the only
+consumer of this project's debug info; there is no requirement to be
+byte-compatible with a real Borland/Turbo Debugger reading an NE `.exe`
+under DPMI16. Reusing the already-verified v2.08 shape means `TDInfo` needs
+no format-detection logic and the two linkers' debug writers stay
+structurally parallel (mirroring how `LinkMZ.OnSegReloc`/`LinkNE.OnSegReloc`
+already parallel each other for relocations).
+
+### NE/DPMI16 empirical findings (from `DBG/DBGPROBE.EXE`, reference only)
+
+These describe what a **real Borland-Pascal 7 `/CP` NE** TDINFO block
+contains — captured for reference / for anyone who later needs true
+Borland-NE compatibility (e.g. driving Turbo Debugger itself under DPMI16).
+They are **not** what this project's own `LinkNE` writer emits (see design
+decision above). Both `DBG/DBGPROBE.EXE` (NE) and `DBG/DPROMZ.EXE` (MZ) were
+built from the *same* multi-unit Pascal program (`DBGPROBE.PAS` + `UNITA/B/
+C.PAS`), which made cross-checking the two formats against each other (same
+identifiers, same source names, same timestamps) the key technique — random
+byte offsets were nearly impossible to interpret in isolation; the same
+bytes interpreted against the MZ file's already-documented v2.08 shape
+resolved almost every field.
+
+* **Block location:** found by linear scan for magic `0x52FB` (method B) —
+  it does *not* sit at a clean MZ-style `image_size` boundary the way MZ
+  files do, because the NE loader only maps the segment table's own entries
+  and BPC appends the TDINFO block after all of them plus sector padding.
+* **Version `3.0`, not `2.08`** (`major=3 minor=0`); `DPROMZ.EXE`'s own
+  block is `2.09`, one minor tick above the `2.08` case earlier in this
+  file — both leave `extension_size=16` (nonzero, unlike the `2.08`/
+  `extension_size=0` case at the top of this file), so a general reader
+  must NOT assume `extension_size` is always 0.
+* **Header is still 48 bytes fixed + `extension_size` (here 16) bytes** —
+  the same `reserved[14]` + `extension_size` WORD layout already documented
+  above, just with real (nonzero) extension bytes this time
+  (`02 00 01 00 00 00 00 00 05 00 05 00 00 00 00 00`, meaning unconfirmed).
+* **SYMBOL_RECORD is still 9 bytes, same field order** (`index, type,
+  offset, segment, bitfield`) as the documented MZ v2.08 layout — confirmed
+  by cross-referencing against `DPROMZ.EXE`'s symbol stream (both files
+  produced from the same sources, same identifiers in the same declaration
+  order). The `bitfield` byte can carry values with bits set above the
+  documented 3-bit class field (e.g. `0x18`, `0x80`+) — the extra bits'
+  meaning was not resolved; low 3 bits still decode as the documented class
+  enum in every observed case.
+* **MODULE_RECORD is still 16 bytes** (`name` WORD + 14 more bytes, itself
+  non-zero/structured — NOT simple zero padding as the "Records of
+  interest" section above implies for the older empirical case) — BUT
+  **`MODULE_RECORD.name` is the source filename with its `.PAS` extension**
+  (`DBGPROBE.PAS`, `UNITA.PAS`, …) in BOTH the NE and this newer MZ (v2.09)
+  probe, **not** the bare module identifier (`DbgProbe`, `UnitA`) the
+  original v2.08 "MODULE name vs SOURCE-FILE name" rule above documents.
+  Whether this is a BPC-version difference (v2.09/v3.0 vs the original
+  empirical v2.08 sample) or an NE-vs-MZ difference is not distinguished —
+  it was observed identically in both new probe files, so it correlates
+  with linker/BPC version, not container format.
+* **SOURCE_FILE_RECORD's own name-like field could not be fully resolved.**
+  It sits directly after MODULE_RECORD (still 4 entries, one per real
+  `.PAS`, matching `sourceFilesCount`), 6 bytes/entry, with `time`/`date`
+  words matching `DPROMZ.EXE`'s SOURCE_FILE `time`/`date` values exactly —
+  but its leading WORD is consistently `(that module's MODULE_RECORD.name
+  index) + 1`, which resolves to a plausible-but-unconfirmed nearby pool
+  string (often the unit's first declared symbol), not a repeat of the
+  filename. Left as an open question for any future from-scratch Borland-NE
+  writer.
+* **SEGMENT_RECORD**, for BPC's own `/CP` output, shows `code_seg=1` for
+  every user-Pascal-unit module and `code_seg=2` for the `System` unit —
+  i.e. **Borland's NE linker merges multiple Pascal units into a small
+  number of shared NE segments** (`code_offset` distinguishes each module's
+  slice within the shared segment), unlike this project's own `LinkNE`
+  which gives every linked Oberon module its own dedicated NE segment. This
+  is the one structural difference the writer above intentionally does not
+  replicate.
+* **A ~84-byte fixed trailer of unknown purpose** sits between the last
+  MEMBER_RECORD and the string pool in BOTH `DBGPROBE.EXE` and
+  `DPROMZ.EXE` — byte-for-byte identical content in both files
+  (`00 00 00 00 04 00 37 00 17 00 10 01 00 01 00 09 00 30 00 17 00 10 01 00
+  …`, mostly zero-padded). Not accounted for by any header count; not
+  reproduced by this project's writer (our own reader has no need for it).
+
+### `DOCS/NE-BP.MD` cross-reference
+
+`DOCS/NE-BP.MD` Part 2 (this project's own `/CP` implementation notes) does
+not need updating for this feature — the NE segment/relocation model it
+documents is unaffected; `WriteDebugInfo`'s append happens strictly after
+`WriteExe`'s existing segment-data loop, matching LinkMZ's "pure append"
+placement relative to `WriteExe`.
+
 End of specification.

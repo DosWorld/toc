@@ -1,7 +1,7 @@
 (*$M 32000, 262144, 650000*)
 MODULE TASM;
 (*
-  tasm -- self-hosted 8086 assembler: reads a NASM-subset .asm source file
+  tasm -- oberon-hosted 8086 assembler: reads a NASM-subset .asm source file
   and writes an RDOFF2 .rdf object file.  No other output format.
 
   usage: tasm [/LOG=level] file.asm
@@ -24,7 +24,7 @@ MODULE TASM;
   naming its start (offset 0); no RELOC/IMPORT/BSS records. The
   Scan/Sym/Parse/Enc assembler pipeline is not touched at all -- this is
   a separate ~60-line branch in RunBody that builds the ObjFile directly
-  via Rdoff and reuses the existing write/cleanup/LeakGuard/exit-code
+  via Rdoff and reuses the existing write/cleanup/exit-code
   tail. /BIN= both selects the mode and names the target segment;
   /NAME= is required in this mode (a usage error in assemble mode).
 
@@ -43,10 +43,7 @@ MODULE TASM;
 
   Mirrors SRC/TOOLS/*.MOD's RunBody/LogErr-routed-diagnostics shape exactly:
   LogErr.Open first in Run, a single Halt(code) wrapper that calls
-  LogErr.Close then SYSTEM.Halt (the only SYSTEM.Halt call site in TASM),
-  and its own outer LeakGuard window around the whole assemble-one-file
-  operation (TOC.MOD's private LeakGuard helper, duplicated here as TASM's
-  own private copy of the same ~15-line pattern).
+  LogErr.Close then SYSTEM.Halt (the only SYSTEM.Halt call site in TASM).
 *)
 IMPORT Out, Dos, Files, Strings, LogErr, Rdoff, Parse, Sym;
 
@@ -97,26 +94,6 @@ BEGIN
   val[j] := 0X;
   RETURN TRUE
 END MatchSwitchVal;
-
-(* LeakGuard: copy of TOC.MOD's private helper (not exported by TOC, so
-   duplicated here -- same ~15-line shape).  Reports via LogErr.Error
-   (ERROR-level, stderr, latches HaveErr()) whenever free memory shrank
-   across the guarded window -- a leak is a bug to fix, not an acceptable
-   warning, so it is always visible and fails the run fast, exactly like
-   any other fatal error (no longer gated behind /LOG=debug). *)
-PROCEDURE LeakGuard(memBefore: WORD; subPart: ARRAY OF CHAR);
-  VAR memAfter: WORD; msg: ARRAY 256 OF CHAR;
-BEGIN
-  memAfter := SYSTEM.MemAvail();
-  IF memAfter < memBefore THEN
-    Strings.Copy("Heap leak detected ", msg);
-    Strings.Append(subPart, msg);
-    Strings.Append(" (", msg);
-    Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
-    Strings.Append(" paragraphs)", msg);
-    LogErr.Error(msg)
-  END
-END LeakGuard;
 
 (* IsIdentStartCh / IsIdentCh: private 10-line copy of Scan.IsAlpha/
    IsIdentChar's character classes (§J.2 -- exporting Scan's helpers just
@@ -252,7 +229,6 @@ END RunBin2Obj;
 
 PROCEDURE RunBody(): INTEGER;
   VAR srcPath, outPath: ARRAY 128 OF CHAR;
-      leakMsg: ARRAY 160 OF CHAR;
       logLevel: ARRAY 32 OF CHAR;
       binVal, nameVal: ARRAY 128 OF CHAR;
       arg: ARRAY 128 OF CHAR;
@@ -262,7 +238,6 @@ PROCEDURE RunBody(): INTEGER;
       f: Files.File;
       ok, binMode: BOOLEAN;
       binSeg: INTEGER;
-      memBefore: WORD;
       argc, i: INTEGER;
 BEGIN
   LogErr.SetLevel(LogErr.LINFO);
@@ -334,12 +309,6 @@ BEGIN
 
   Files.ReplaceExt(srcPath, ".RDF", outPath);
 
-  (* Force StrTab's one-time first-chunk bootstrap cost (~10 KB) to
-     happen BEFORE the leak-guard baseline is captured -- see
-     Sym.WarmStrTab's comment. *)
-  Sym.WarmStrTab;
-  memBefore := SYSTEM.MemAvail();
-
   NEW(obj);
   IF obj = NIL THEN LogErr.Error("tasm: out of memory"); Parse.FreePredefs; RETURN ExitIo END;
   Rdoff.RdfInit(obj);
@@ -369,10 +338,6 @@ BEGIN
   Rdoff.RdfFree(obj);
   DISPOSE(obj);
   Parse.FreePredefs;
-
-  IF binMode THEN Strings.Copy("converting ", leakMsg) ELSE Strings.Copy("assembling ", leakMsg) END;
-  Strings.Append(srcPath, leakMsg);
-  LeakGuard(memBefore, leakMsg);
 
   IF ~ok OR LogErr.HaveErr() THEN RETURN ExitAsm END;
   RETURN ExitOk

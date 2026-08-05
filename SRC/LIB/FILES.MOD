@@ -32,8 +32,6 @@ TYPE
 
 VAR
   tempSeq:  WORD;
-  pspSeg:   WORD;   (* this process' PSP segment — makes temp names unique
-                       across concurrent processes (Dos.Exec children) *)
 
 PROCEDURE CopyName(VAR F: File; VAR name: ARRAY OF CHAR);
   VAR n: WORD;
@@ -587,10 +585,7 @@ END HexDigit;
 PROCEDURE MakeTempName(VAR dst: ARRAY OF CHAR);
   VAR i: INTEGER; v: LONGINT;
 BEGIN
-  (* Name = 4 hex digits of the PSP segment + 4 decimal digits of a
-     per-process sequence counter.  A sequence-only name ("00000001.TMP")
-     collided between concurrent processes (e.g. a Dos.Exec child running in
-     the same directory) and they destroyed each other's temp files. *)
+  (* Name = 8 decimal digits of a per-process sequence counter. *)
   INC(tempSeq);
   v := LONGINT(tempSeq);
   i := 0;

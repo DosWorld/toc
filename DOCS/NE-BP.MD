@@ -284,11 +284,14 @@ so we need not generate them.
 
 ## Part 2 — This project's implementation (`SRC/TOC/LINKNE.MOD`)
 
-**Status: CONFIRMED WORKING ON REAL DPMI16 HARDWARE (2026-08-04)**, via the
-HX-DOS extender. `BIN/TOC286.EXE` (the same compiler as `TOC.EXE`, linked
-`/CP` instead of `/CD` — see `SRC/TOC/TOC286.MOD`) compiles and links
-correctly under DPMI16, with zero heap leaks. See §2.4 for the three
-real-hardware bugs found and fixed getting here.
+**Status: ARCHIVED — CONFIRMED WORKING END-TO-END ON REAL DPMI16 HARDWARE
+(2026-08-05)**, via the HX-DOS extender. `BIN/TOC286.EXE` (the same compiler
+as `TOC.EXE`, linked `/CP` instead of `/CD` — see `SRC/TOC/TOC286.MOD`)
+compiles and links correctly under DPMI16, with zero heap leaks, and
+**self-hosts** (compiling its own sources) correctly on real DPMI16 hardware.
+See §2.4 for the five real-hardware bugs found and fixed getting here. This
+target is considered complete; no further DPMI16-specific work is planned
+unless a new bug surfaces.
 
 ### 2.1 What matches the BPC reference exactly
 
@@ -376,7 +379,7 @@ init — see §1.7).
   anything internal. BPC never emits the additive bit or import-by-name;
   neither do we.
 
-### 2.4 Real-hardware bugs found and fixed (2026-08-04)
+### 2.4 Real-hardware bugs found and fixed (2026-08-04 – 2026-08-05)
 
 `xt` (this project's dev-loop DOS emulator) **cannot execute NE binaries at
 all** — every check up to 2026-08-04 was structural byte-inspection only
@@ -384,7 +387,7 @@ all** — every check up to 2026-08-04 was structural byte-inspection only
 `ne-entry-seg`, `ne-word-at`, `ne-lfanew`, `ne-seg-attr`, `ne-has-kernel`,
 `ne-init-task`, plus the manifest `ne/cp-*` rows). A 2026-07-28 real-hardware
 smoke test confirmed a *small* NE-EXE loads and runs, but running the actual
-self-hosted compiler under DPMI16 (via HX-DOS) on 2026-08-04 surfaced three
+self-hosted compiler under DPMI16 (via HX-DOS) on 2026-08-04/05 surfaced five
 real bugs invisible to both `xt` and that earlier small-file smoke test:
 
 **Bug #1 — BSS/stack segment sizing (`LINKNE.MOD` `BuildSegTable`/`WriteExe`).**
@@ -429,11 +432,44 @@ under DPMI16:
   explicit note. Fixed by emitting `LSL DX,BX` as raw bytes (`0F 03 D3`,
   since this project's assembler — TASM, `SRC/TASM/`— only targets 8086).
 
-All three fixes verified via a purpose-built reproducer
-(`Files.ReWriteTemp`/`Files.Close` round-tripped through
-`SYSTEM.MemAvail()`, now a deterministic process-local paragraph counter
-under DPMI — see `DOCS/IMPLRULE.MD`) run on real DPMI16 hardware, confirming
-exact, full memory recovery on every free.
+Bugs #1-3 verified via a purpose-built reproducer (`Files.ReWriteTemp`/
+`Files.Close` round-tripped through `SYSTEM.MemAvail()`, now a deterministic
+process-local paragraph counter under DPMI — see `DOCS/IMPLRULE.MD`) run on
+real DPMI16 hardware, confirming exact, full memory recovery on every free.
+
+**Bug #4 — `CGEN.MOD` `Cgen.CgFree` double-free.** `CgFree` disposed the
+module-level `CgObj` pointer (`DISPOSE(CgObj)`) but never set it back to
+`NIL` afterward, so its own guard (`IF CgObj # NIL THEN ... END`) was
+permanently broken after the very first call. `Cgen.CgFree` runs once per
+compiled module (`TOC.MOD`'s per-module compile loop) and again
+unconditionally in `TOC.MOD`'s `Cleanup` (run on every exit path, by design,
+so an error partway through a multi-module compile still frees everything).
+For a single-module program (e.g. `HELLO.MOD`), the second call saw a stale
+non-NIL `CgObj` and re-entered `Rdoff.RdfFree(CgObj)` on an already-disposed
+pointer — a genuine use-after-free / double-free. Real-mode DOS's coalescing
+heap allocator silently tolerated the stale dereference (the freed block's
+memory was often still intact or reused predictably); DPMI16's
+non-coalescing per-selector LDT allocator turned it into a hard GP fault the
+moment the freed selector was reused for something else (observed as
+`EBX=EDX=<stale selector>`, faulting inside `Rdoff.RdfFree`'s first
+`Files.Close` call). Found via systematic bisection: temporary print markers
+bracketing `TOC.MOD`'s `Cleanup` calls showed the crash fell strictly between
+a successful `FreeMods` completion and the next marker, isolating it to
+`Cgen.CgFree`. Fixed by adding `CgObj := NIL` after `DISPOSE(CgObj)`, mirroring
+the guard pattern `TOC.MOD`'s own `gModOpen` flag already used correctly for
+the analogous `FreeMods`/`gModFile` double-call case.
+
+**Bug #5 — `SYSTEM.ASM` `SYSTEM_IsDPMI` wrong-segment memory read.** The
+function loaded `isDpmi`'s segment into `ES` but then read the flag with a
+bare `mov ax, [isDpmi]` operand — which defaults to `DS`, not `ES` — instead
+of the correct `[es:isDpmi]`. The read result was immediately clobbered by
+the following `int 21h/AH=62h` call anyway, making the line dead code by
+outcome, but the wrong-segment read itself could still fault under DPMI16:
+at some call sites the caller's `DS` did not point at a valid/mapped selector
+for that offset, producing a GP fault deep inside what looked like
+unrelated compiler logic (crash `EIP` landed inside `SYSTEM_IsDPMI`, called
+transitively via `EMS.EMS_Detect`, which every module's `__init` reaches).
+Fixed directly by the maintainer.
 
 ### 2.5 Building and testing `/CP`
 
@@ -451,14 +487,24 @@ HX-DOS, or a real DPMI server under DOSBox-X) — there is no automated
 in-repo test for `/CP` execution correctness, only for structural/byte-level
 conformance to this document.
 
-### 2.6 Known future work
+### 2.6 Status: archived
 
-- **Many-segment case at scale beyond what's now tested.** Bug #1-3 fixes
-  were verified with the full self-hosted compiler (49+ NE segments) under
-  real DPMI16, which supersedes the earlier "confirmed for small NE-EXEs
-  only" caveat — but a dedicated large/many-segment fixture in the
-  in-repo test suite (beyond manual real-hardware runs) would still be
-  valuable for regression coverage, since `xt` cannot exercise this path
-  at all.
-- **Segment model** remains per-module by design (not BPC's fixed 4) — see
-  §2.2.
+As of 2026-08-05 the `/CP` DPMI16 target is considered **complete and
+archived**:
+
+- The full self-hosted compiler (51+ NE segments) links, runs, and
+  **self-hosts** (compiles its own sources) correctly on real DPMI16
+  hardware via HX-DOS, with zero heap leaks confirmed across the whole run.
+- All five bugs found during bring-up (§2.4) are fixed and covered by either
+  the in-repo manifest (`ne/cp-*` structural rows, unaffected by any of
+  these bugs since they only manifest at DPMI16 runtime) or real-hardware
+  verification (heap-leak reproducer for #1-3; the double-free and
+  wrong-segment-read bugs #4-5 were only reproducible by running the actual
+  compiler under DPMI16, since `xt` cannot execute NE binaries).
+- No further DPMI16-specific work is planned unless a new bug surfaces.
+  **Segment model** remains per-module by design (not BPC's fixed 4) — see
+  §2.2 — this is a deliberate, permanent difference, not a TODO.
+- A dedicated large/many-segment fixture in the in-repo test suite (beyond
+  manual real-hardware runs) would still be a nice-to-have for future
+  regression coverage, since `xt` cannot exercise `/CP` execution at all —
+  but is not required given the target is now confirmed working end-to-end.

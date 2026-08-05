@@ -43,7 +43,7 @@ MODULE LinkNE;
   NE output cannot be run under xt (MZ-only); it is validated by structural
   byte inspection only against the BPC reference (§6, DOCS/NE-BP.MD).
 *)
-IMPORT Files, LogErr, Rdoff, Strings, Link;
+IMPORT Files, LogErr, Rdoff, Tar, Strings, Link;
 
 CONST
   NeHdrBytes  = 64;      (* fixed NE header size *)
@@ -51,6 +51,8 @@ CONST
   NeRelChunk  = 128;     (* NE relocs per chunk node (small-record rule) *)
   StabBytes   = 512;     (* size of NESTAB.BIN (embedded via $L) -> e_lfanew = 0E3EH *)
   KernelLen   = 6;       (* length of the imported module name "KERNEL" *)
+  DbgScopeChunk   = 64;  (* SCOPE_RECORD entries per chunk node (small-record rule) *)
+  DbgMaxProcDepth = 8;   (* max nested-procedure depth for scope tracking (matches Syms.MaxLevel) *)
 
   (* Segment attributes (Table 6) — measured from the reference NE
      (DOCS/NE-BP.MD Part 2 §2.2): every segment carries the 80286 DPL bits (0C00H,
@@ -123,13 +125,54 @@ TYPE
     next: SegNode
   END;
 
+  (* Chunked TDS string pool (small-record rule) — mirrors LinkMZ's PoolNode. *)
+  PoolNode = POINTER TO PoolNodeRec;
+  PoolNodeRec = RECORD
+    bytes: ARRAY 2048 OF CHAR;
+    used:  INTEGER;
+    next:  PoolNode
+  END;
+
+  (* SCOPE_RECORD chunk — mirrors LinkMZ's ScopeNode. *)
+  ScopeNode = POINTER TO ScopeNodeDesc;
+  ScopeNodeDesc = RECORD
+    symFirst: ARRAY DbgScopeChunk OF WORD;
+    symCnt:   ARRAY DbgScopeChunk OF WORD;
+    func:     ARRAY DbgScopeChunk OF WORD;
+    offset:   ARRAY DbgScopeChunk OF WORD;
+    length:   ARRAY DbgScopeChunk OF WORD;
+    count:    INTEGER;
+    next:     ScopeNode
+  END;
+
   State* = POINTER TO StateRec;
   StateRec* = RECORD
     segHead:  SegNode;   (* NE segment table chunks *)
     segTail:  SegNode;
     segCount: INTEGER;   (* number of NE segments (1-based indices 1..segCount) *)
     bssIdx:   INTEGER;   (* 1-based NE index of the shared BSS segment *)
-    modName:  ARRAY 10 OF CHAR   (* resident-names-table module name (upper) *)
+    modName:  ARRAY 10 OF CHAR;  (* resident-names-table module name (upper) *)
+
+    genDebug*:    BOOLEAN;    (* /G: append the TDS debug block to the .exe *)
+    dbgPool:      PoolNode;   (* TDS string pool chunks (head) *)
+    dbgPoolTail:  PoolNode;
+    dbgPoolBytes: LONGINT;    (* total pool bytes (names_pool_size) *)
+    dbgNames:     INTEGER;    (* pool string count (names_count) *)
+    dbgModCnt:    INTEGER;    (* modules contributing debug info *)
+    dbgSymCnt:    WORD;       (* total S records *)
+    dbgLineCnt:   WORD;       (* total L records *)
+    dbgTypeCnt:   WORD;       (* total T records *)
+    dbgMembCnt:   WORD;       (* total B records *)
+    dbgScopeCnt:  WORD;       (* total scopes (one per proc with locals) *)
+    dbgSymWritten:WORD;       (* running count of SYMBOL_RECORDs written so far *)
+    dbgScopeHead: ScopeNode;
+    dbgScopeTail: ScopeNode;
+    dbgProcTop:     INTEGER;                        (* -1 = empty *)
+    dbgProcSym:     ARRAY DbgMaxProcDepth OF WORD;
+    dbgProcOfs:     ARRAY DbgMaxProcDepth OF WORD;
+    dbgProcLocFirst:ARRAY DbgMaxProcDepth OF WORD;
+    dbgProcLocCnt:  ARRAY DbgMaxProcDepth OF WORD;
+    dbgLocalTotal:  WORD
   END;
 
 (*$L NESTAB.RDF*)
@@ -139,7 +182,17 @@ PROCEDURE InitState*(ns: State);
 BEGIN
   ns^.segHead := NIL; ns^.segTail := NIL;
   ns^.segCount := 0; ns^.bssIdx := 0;
-  ns^.modName[0] := 0X
+  ns^.modName[0] := 0X;
+
+  ns^.genDebug     := FALSE;
+  ns^.dbgPool      := NIL; ns^.dbgPoolTail := NIL;
+  ns^.dbgPoolBytes := LONGINT(0);
+  ns^.dbgNames     := 0;  ns^.dbgModCnt := 0;
+  ns^.dbgSymCnt    := 0;  ns^.dbgLineCnt := 0;
+  ns^.dbgTypeCnt   := 0;  ns^.dbgMembCnt := 0;
+  ns^.dbgScopeCnt  := 0;  ns^.dbgSymWritten := 0;
+  ns^.dbgScopeHead := NIL; ns^.dbgScopeTail := NIL;
+  ns^.dbgProcTop := -1; ns^.dbgLocalTotal := 0
 END InitState;
 
 (* ---- NE segment table ---- *)
@@ -180,7 +233,7 @@ END SegOf;
 
 (* Locate the NE segment index of (module m, seg) — walks the segment table.
    For the shared BSS, m is NIL and seg is Rdoff.SegBss. *)
-PROCEDURE SegIndexOf(ns: State; m: Link.Module; seg: INTEGER): INTEGER;
+PROCEDURE SegIndexOf*(ns: State; m: Link.Module; seg: INTEGER): INTEGER;
   VAR n: SegNode; i, k: INTEGER;
 BEGIN
   n := ns^.segHead; i := 0;
@@ -511,6 +564,392 @@ BEGIN
   out[i] := 0X
 END BuildNonresName;
 
+(* ---- TDS/TDINFO debug block (/G, NE/CP target) ----
+
+   Same TDINFO v2.08 block LinkMZ writes (48-byte header, SOURCE_FILE =
+   name+time+date, LINE = (line, offset) line-first, one CORRELATION per
+   module) — DBG/DBGPROBE.EXE (a Borland-Pascal /CP NE probe, 2026-08-05)
+   confirmed a real Borland NE debug block differs in several respects
+   (48-byte header + a nonzero 16-byte extension, v3.0 not v2.08, MODULE
+   names are the source filename not the bare identifier, per-module
+   SEGMENT_RECORDs use a single shared NE code segment) — see
+   DOCS/TD-SPEC.MD §"NE/DPMI16 empirical findings".  This writer does NOT
+   replicate those Borland-specific quirks: it emits the SAME v2.08 shape
+   LinkMZ already writes (our own TDInfo reader is the only consumer), with
+   ONE required adaptation — SEGMENT_RECORD.code_seg is the module's own
+   1-based NE segment index (SegIndexOf), not an MZ codePara, since this
+   linker gives every module its own NE CODE segment (unlike BPC's merged
+   model). *)
+
+(* Find name in the chunked pool or append it; returns the 1-based string
+   ordinal.  Identical algorithm to LinkMZ.DbgIntern. *)
+PROCEDURE DbgIntern(ns: State; VAR name: ARRAY OF CHAR): INTEGER;
+  VAR p: PoolNode; i, j, k, ord, len: INTEGER; match: BOOLEAN;
+BEGIN
+  ord := 1;
+  p := ns^.dbgPool;
+  WHILE p # NIL DO
+    i := 0;
+    WHILE i < p^.used DO
+      k := i; j := 0; match := TRUE;
+      WHILE match & (p^.bytes[k] # 0X) & (name[j] # 0X) DO
+        IF p^.bytes[k] # name[j] THEN match := FALSE ELSE INC(k); INC(j) END
+      END;
+      IF match & (p^.bytes[k] = 0X) & (name[j] = 0X) THEN RETURN ord END;
+      WHILE p^.bytes[k] # 0X DO INC(k) END;
+      i := k + 1; INC(ord)
+    END;
+    p := p^.next
+  END;
+  len := 0; WHILE name[len] # 0X DO INC(len) END;
+  IF (ns^.dbgPoolTail = NIL) OR (ns^.dbgPoolTail^.used + len + 1 > 2048) THEN
+    NEW(p);
+    IF p = NIL THEN LogErr.Error("Out of memory (debug pool)"); RETURN 0 END;
+    p^.used := 0; p^.next := NIL;
+    IF ns^.dbgPoolTail = NIL THEN ns^.dbgPool := p ELSE ns^.dbgPoolTail^.next := p END;
+    ns^.dbgPoolTail := p
+  END;
+  p := ns^.dbgPoolTail;
+  k := 0;
+  WHILE k <= len DO p^.bytes[p^.used] := name[k]; INC(p^.used); INC(k) END;
+  ns^.dbgPoolBytes := ns^.dbgPoolBytes + LONGINT(len + 1);
+  INC(ns^.dbgNames);
+  RETURN ns^.dbgNames
+END DbgIntern;
+
+PROCEDURE DbgReadLine(VAR f: Files.File; VAR s: ARRAY OF CHAR): BOOLEAN;
+  VAR b: BYTE; k: INTEGER; more: BOOLEAN;
+BEGIN
+  k := 0;
+  more := Files.ReadByte(f, b);
+  IF ~more THEN s[0] := 0X; RETURN FALSE END;
+  WHILE more & (b # BYTE(10)) DO
+    IF (b # BYTE(13)) & (k < LEN(s) - 1) THEN s[k] := CHR(b); INC(k) END;
+    more := Files.ReadByte(f, b)
+  END;
+  s[k] := 0X;
+  RETURN TRUE
+END DbgReadLine;
+
+PROCEDURE DbgHex4(VAR s: ARRAY OF CHAR; p: INTEGER): WORD;
+  VAR v: WORD; k, d: INTEGER; c: CHAR;
+BEGIN
+  v := 0; k := 0;
+  WHILE k < 4 DO
+    c := s[p + k];
+    IF (c >= "0") & (c <= "9") THEN d := ORD(c) - ORD("0")
+    ELSE d := ORD(c) - ORD("A") + 10 END;
+    v := v * 16 + WORD(d);
+    INC(k)
+  END;
+  RETURN v
+END DbgHex4;
+
+PROCEDURE DbgDec(VAR s: ARRAY OF CHAR; p: INTEGER): INTEGER;
+  VAR v: INTEGER;
+BEGIN
+  v := 0;
+  WHILE (s[p] >= "0") & (s[p] <= "9") DO
+    v := v * 10 + (ORD(s[p]) - ORD("0"));
+    INC(p)
+  END;
+  RETURN v
+END DbgDec;
+
+PROCEDURE DbgNameAt(VAR s: ARRAY OF CHAR; p: INTEGER; VAR nm: ARRAY OF CHAR);
+  VAR k: INTEGER;
+BEGIN
+  k := 0;
+  WHILE (s[p] # 0X) & (k < LEN(nm) - 1) DO nm[k] := s[p]; INC(k); INC(p) END;
+  nm[k] := 0X
+END DbgNameAt;
+
+PROCEDURE AddScope(ns: State; symFirst, symCnt, func, offset, length: WORD);
+  VAR n: ScopeNode;
+BEGIN
+  IF (ns^.dbgScopeTail = NIL) OR (ns^.dbgScopeTail^.count = DbgScopeChunk) THEN
+    NEW(n);
+    IF n = NIL THEN LogErr.Error("Out of memory (debug scope chunk)"); RETURN END;
+    n^.count := 0; n^.next := NIL;
+    IF ns^.dbgScopeTail # NIL THEN ns^.dbgScopeTail^.next := n ELSE ns^.dbgScopeHead := n END;
+    ns^.dbgScopeTail := n
+  END;
+  ns^.dbgScopeTail^.symFirst[ns^.dbgScopeTail^.count] := symFirst;
+  ns^.dbgScopeTail^.symCnt[ns^.dbgScopeTail^.count]   := symCnt;
+  ns^.dbgScopeTail^.func[ns^.dbgScopeTail^.count]     := func;
+  ns^.dbgScopeTail^.offset[ns^.dbgScopeTail^.count]   := offset;
+  ns^.dbgScopeTail^.length[ns^.dbgScopeTail^.count]   := length;
+  INC(ns^.dbgScopeTail^.count);
+  INC(ns^.dbgScopeCnt)
+END AddScope;
+
+(* One streaming pass over module m's MODNAME.DBG member — identical column
+   format and pass structure to LinkMZ.DbgPass (see LINKMZ.MOD for the full
+   column-format comment); the only NE-specific difference is the 'P' (proc)
+   symbol's segment word, which uses this module's own NE CODE segment index
+   (SegIndexOf) instead of an MZ codePara. *)
+PROCEDURE DbgPass(ns: State; m: Link.Module; pass: INTEGER; VAR fout: Files.File);
+  VAR f: Files.File;
+      s: ARRAY 96 OF CHAR;
+      memb: ARRAY 14 OF CHAR;
+      nm: ARRAY 40 OF CHAR;
+      offw, segw, typw: WORD;
+      any: BOOLEAN;
+BEGIN
+  IF m^.stem[0] = 0X THEN RETURN END;
+  Strings.Copy(m^.stem, memb); Strings.Append(".DBG", memb);
+  IF ~Tar.TarExtract(m^.path, memb, f) THEN RETURN END;
+  any := FALSE;
+  IF pass = 1 THEN m^.dbgTypeBase := ns^.dbgTypeCnt; m^.dbgMembBase := ns^.dbgMembCnt END;
+  IF (pass = 1) OR (pass = 2) THEN ns^.dbgProcTop := -1 END;
+  WHILE DbgReadLine(f, s) DO
+    IF (s[0] = "S") & (s[2] = "E") THEN
+      IF ns^.dbgProcTop >= 0 THEN
+        IF pass = 1 THEN
+          IF ns^.dbgProcLocCnt[ns^.dbgProcTop] > 0 THEN INC(ns^.dbgScopeCnt) END
+        ELSIF pass = 2 THEN
+          IF ns^.dbgProcLocCnt[ns^.dbgProcTop] > 0 THEN
+            AddScope(ns, ns^.dbgProcLocFirst[ns^.dbgProcTop], ns^.dbgProcLocCnt[ns^.dbgProcTop],
+                     ns^.dbgProcSym[ns^.dbgProcTop], ns^.dbgProcOfs[ns^.dbgProcTop], DbgHex4(s, 4))
+          END
+        END;
+        DEC(ns^.dbgProcTop)
+      END
+    ELSIF s[0] = "S" THEN
+      IF pass = 1 THEN
+        DbgNameAt(s, 16, nm);
+        DbgIntern(ns, nm);
+        INC(ns^.dbgSymCnt); any := TRUE;
+        IF s[2] = "P" THEN
+          IF ns^.dbgProcTop < DbgMaxProcDepth - 1 THEN INC(ns^.dbgProcTop) END;
+          ns^.dbgProcLocCnt[ns^.dbgProcTop] := 0
+        ELSIF s[2] = "A" THEN
+          INC(ns^.dbgLocalTotal);
+          IF ns^.dbgProcTop >= 0 THEN INC(ns^.dbgProcLocCnt[ns^.dbgProcTop]) END
+        END
+      ELSIF pass = 2 THEN
+        DbgNameAt(s, 16, nm);
+        Files.WriteWord(fout, DbgIntern(ns, nm));
+        typw := DbgHex4(s, 11);
+        IF typw # 0 THEN typw := typw + m^.dbgTypeBase END;
+        Files.WriteWord(fout, INTEGER(typw));
+        offw := DbgHex4(s, 4);
+        IF s[2] = "P" THEN                              (* proc: this module's
+             own NE CODE segment — offw is already this module's own code
+             offset, final as-is *)
+          segw := WORD(SegIndexOf(ns, m, Rdoff.SegCode))
+        ELSIF (s[2] = "Y") OR (s[2] = "A") THEN
+          IF s[2] = "Y" THEN offw := 0 END;
+          segw := 0
+        ELSE                                            (* global VAR: this
+             module's own NE DATA segment *)
+          segw := WORD(SegIndexOf(ns, m, Rdoff.SegData))
+        END;
+        Files.WriteWord(fout, INTEGER(offw));
+        Files.WriteWord(fout, INTEGER(segw));
+        INC(ns^.dbgSymWritten);
+        IF s[2] = "Y" THEN Files.WriteByte(fout, BYTE(6))
+        ELSIF s[2] = "A" THEN
+          Files.WriteByte(fout, BYTE(2));
+          IF ns^.dbgProcTop >= 0 THEN
+            IF ns^.dbgProcLocCnt[ns^.dbgProcTop] = 0 THEN
+              ns^.dbgProcLocFirst[ns^.dbgProcTop] := ns^.dbgSymWritten
+            END;
+            INC(ns^.dbgProcLocCnt[ns^.dbgProcTop])
+          END
+        ELSE
+          Files.WriteByte(fout, BYTE(0));
+          IF s[2] = "P" THEN
+            IF ns^.dbgProcTop < DbgMaxProcDepth - 1 THEN INC(ns^.dbgProcTop) END;
+            ns^.dbgProcSym[ns^.dbgProcTop] := ns^.dbgSymWritten;
+            ns^.dbgProcOfs[ns^.dbgProcTop] := offw;
+            ns^.dbgProcLocCnt[ns^.dbgProcTop] := 0
+          END
+        END
+      END
+    ELSIF s[0] = "L" THEN
+      IF pass = 1 THEN INC(ns^.dbgLineCnt); any := TRUE
+      ELSIF pass = 3 THEN
+        Files.WriteWord(fout, DbgDec(s, 7));
+        offw := DbgHex4(s, 2);
+        Files.WriteWord(fout, INTEGER(offw))
+      END
+    ELSIF s[0] = "T" THEN
+      IF pass = 1 THEN
+        DbgNameAt(s, 22, nm);
+        IF nm[0] # "-" THEN DbgIntern(ns, nm) END;
+        INC(ns^.dbgTypeCnt); any := TRUE
+      ELSIF pass = 4 THEN
+        DbgNameAt(s, 22, nm);
+        Files.WriteByte(fout, BYTE(DbgHex4(s, 2)));
+        IF nm[0] = "-" THEN Files.WriteWord(fout, 0)
+        ELSE Files.WriteWord(fout, DbgIntern(ns, nm)) END;
+        Files.WriteWord(fout, INTEGER(DbgHex4(s, 7)));
+        Files.WriteByte(fout, BYTE(DbgHex4(s, 12)));
+        typw := DbgHex4(s, 17);
+        IF typw # 0 THEN
+          IF DbgHex4(s, 2) = WORD(30) THEN typw := typw + m^.dbgMembBase
+          ELSE typw := typw + m^.dbgTypeBase END
+        END;
+        Files.WriteWord(fout, INTEGER(typw))
+      END
+    ELSIF s[0] = "B" THEN
+      IF pass = 1 THEN
+        DbgNameAt(s, 12, nm);
+        DbgIntern(ns, nm);
+        INC(ns^.dbgMembCnt); any := TRUE
+      ELSIF pass = 5 THEN
+        DbgNameAt(s, 12, nm);
+        Files.WriteByte(fout, BYTE(DbgHex4(s, 2)));
+        Files.WriteWord(fout, DbgIntern(ns, nm));
+        typw := DbgHex4(s, 7);
+        IF typw # 0 THEN typw := typw + m^.dbgTypeBase END;
+        Files.WriteWord(fout, INTEGER(typw))
+      END
+    ELSIF s[0] = "M" THEN
+      IF pass = 1 THEN
+        DbgNameAt(s, 2, nm); m^.dbgModName := DbgIntern(ns, nm); any := TRUE
+      END
+    ELSIF s[0] = "F" THEN
+      IF pass = 1 THEN
+        DbgNameAt(s, 2, nm); m^.dbgSrcName := DbgIntern(ns, nm); any := TRUE
+      END
+    END
+  END;
+  Files.Close(f);
+  IF (pass = 1) & any THEN m^.hasDbg := TRUE; INC(ns^.dbgModCnt) END
+END DbgPass;
+
+(* Append the merged TDS block to fout (which is positioned right after the
+   last segment's data + reloc block).  Pure append: without /G the output
+   is byte-identical (immediate RETURN). *)
+PROCEDURE WriteDebugInfo(ls: Link.State; ns: State; VAR fout: Files.File);
+  VAR m: Link.Module; p: PoolNode; i, k, j: INTEGER; scNode: ScopeNode;
+BEGIN
+  IF ~ns^.genDebug THEN RETURN END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.used & ~m^.dup THEN DbgPass(ns, m, 1, fout) END;
+    m := m^.next
+  END;
+  IF ns^.dbgModCnt = 0 THEN RETURN END;
+
+  Files.WriteWord(fout, 052FBH);
+  Files.WriteByte(fout, BYTE(8));
+  Files.WriteByte(fout, BYTE(2));
+  Files.WriteDWord(fout, ns^.dbgPoolBytes);
+  Files.WriteWord(fout, ns^.dbgNames);
+  Files.WriteWord(fout, INTEGER(ns^.dbgTypeCnt));
+  Files.WriteWord(fout, INTEGER(ns^.dbgMembCnt));
+  Files.WriteWord(fout, INTEGER(ns^.dbgSymCnt));
+  Files.WriteWord(fout, 0);
+  Files.WriteWord(fout, ns^.dbgModCnt);
+  Files.WriteWord(fout, INTEGER(ns^.dbgLocalTotal));
+  Files.WriteWord(fout, INTEGER(ns^.dbgScopeCnt));
+  Files.WriteWord(fout, INTEGER(ns^.dbgLineCnt));
+  Files.WriteWord(fout, ns^.dbgModCnt);
+  Files.WriteWord(fout, ns^.dbgModCnt);
+  Files.WriteWord(fout, ns^.dbgModCnt);
+  k := 0; WHILE k < 14 DO Files.WriteByte(fout, BYTE(0)); INC(k) END;
+  Files.WriteWord(fout, 0);
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN DbgPass(ns, m, 2, fout) END;
+    m := m^.next
+  END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN
+      Files.WriteWord(fout, m^.dbgModName);
+      k := 0; WHILE k < 14 DO Files.WriteByte(fout, BYTE(0)); INC(k) END
+    END;
+    m := m^.next
+  END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN
+      Files.WriteWord(fout, m^.dbgSrcName);
+      Files.WriteWord(fout, 0); Files.WriteWord(fout, 0)
+    END;
+    m := m^.next
+  END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN DbgPass(ns, m, 3, fout) END;
+    m := m^.next
+  END;
+
+  scNode := ns^.dbgScopeHead;
+  WHILE scNode # NIL DO
+    j := 0;
+    WHILE j < scNode^.count DO
+      Files.WriteWord(fout, INTEGER(scNode^.symFirst[j]));
+      Files.WriteWord(fout, INTEGER(scNode^.symCnt[j]));
+      Files.WriteWord(fout, 0);
+      Files.WriteWord(fout, INTEGER(scNode^.func[j]));
+      Files.WriteWord(fout, INTEGER(scNode^.offset[j]));
+      Files.WriteWord(fout, INTEGER(scNode^.length[j]));
+      INC(j)
+    END;
+    scNode := scNode^.next
+  END;
+
+  (* SEGMENT records: one per module — this module's own NE CODE segment
+     index (SegIndexOf), whole (one module = one NE CODE segment). *)
+  i := 1;
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN
+      Files.WriteWord(fout, i);
+      Files.WriteWord(fout, SegIndexOf(ns, m, Rdoff.SegCode));
+      Files.WriteWord(fout, 0);
+      Files.WriteWord(fout, INTEGER(m^.codeSize));
+      Files.WriteWord(fout, 0); Files.WriteWord(fout, 0);
+      Files.WriteWord(fout, 0); Files.WriteWord(fout, 0);
+      INC(i)
+    END;
+    m := m^.next
+  END;
+
+  i := 1;
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN
+      Files.WriteWord(fout, i); Files.WriteWord(fout, i);
+      Files.WriteWord(fout, i); Files.WriteWord(fout, 0007H);
+      INC(i)
+    END;
+    m := m^.next
+  END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN DbgPass(ns, m, 4, fout) END;
+    m := m^.next
+  END;
+
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    IF m^.hasDbg THEN DbgPass(ns, m, 5, fout) END;
+    m := m^.next
+  END;
+
+  p := ns^.dbgPool;
+  WHILE p # NIL DO
+    IF p^.used > 0 THEN
+      IF Files.BlockWrite(fout, p^.bytes[0], WORD(p^.used)) # WORD(p^.used) THEN
+        LogErr.Error("Write error (debug pool)")
+      END
+    END;
+    p := p^.next
+  END
+END WriteDebugInfo;
+
 PROCEDURE WriteExe*(ls: Link.State; ns: State; outPath: ARRAY OF CHAR);
   VAR fout: Files.File;
       neOfs: LONGINT;
@@ -744,6 +1183,11 @@ BEGIN
   Files.Close(ls^.spillFile);
   Files.Close(ls^.dataFile);
 
+  (* /G: append the TDS debug block after the last segment's data (debugger-
+     only tail — the NE loader only maps the segment table's own entries;
+     no header field above changes). *)
+  WriteDebugInfo(ls, ns, fout);
+
   Files.Close(fout);
   IF ~Files.Ok(fout) THEN
     LogErr.Error2("Write error (disk full?): ", outPath); RETURN
@@ -773,6 +1217,7 @@ END SetModName;
 (* Release ns's own chains (NE segment table + per-segment reloc lists). *)
 PROCEDURE LinkFree*(ns: State);
   VAR sn, snNext: SegNode; r, rNext: NeReloc; i, k: INTEGER;
+      p, pNext: PoolNode; sc, scNext: ScopeNode;
 BEGIN
   sn := ns^.segHead; i := 0;
   WHILE sn # NIL DO
@@ -785,7 +1230,15 @@ BEGIN
     END;
     snNext := sn^.next; DISPOSE(sn); sn := snNext
   END;
-  ns^.segHead := NIL; ns^.segTail := NIL; ns^.segCount := 0
+  ns^.segHead := NIL; ns^.segTail := NIL; ns^.segCount := 0;
+
+  p := ns^.dbgPool;
+  WHILE p # NIL DO pNext := p^.next; DISPOSE(p); p := pNext END;
+  ns^.dbgPool := NIL; ns^.dbgPoolTail := NIL;
+
+  sc := ns^.dbgScopeHead;
+  WHILE sc # NIL DO scNext := sc^.next; DISPOSE(sc); sc := scNext END;
+  ns^.dbgScopeHead := NIL; ns^.dbgScopeTail := NIL
 END LinkFree;
 
 END LinkNE.

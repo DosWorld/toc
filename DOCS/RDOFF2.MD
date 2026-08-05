@@ -29,7 +29,7 @@ NASM-subset assembler, `SRC/TASM/`) writes it for hand-written `.asm` sources:
     tasm.exe myfile.asm
 ```
 
-See [PORTING.MD](PORTING.MD) §1.7 for `tasm.exe`'s CLI and coverage.
+See [PORTING.MD](PORTING.MD) §1.6 for `tasm.exe`'s CLI and coverage.
 
 ---
 
