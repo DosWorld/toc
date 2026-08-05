@@ -128,6 +128,8 @@ cp "$FIXDIR/TLONGID.ASM" "$WORK/"
 cp "$FIXDIR/TLONGFIELD.ASM" "$WORK/"
 cp "$FIXDIR/TMANYJMP.ASM" "$WORK/"
 cp "$FIXDIR/TEQU.ASM" "$FIXDIR/TEQU.RDF" "$WORK/"
+cp "$FIXDIR/TDBWDD.ASM" "$FIXDIR/TDBWDD.RDF" "$WORK/"
+cp "$FIXDIR/TDBLABEL.ASM" "$WORK/"
 cp "$FIXDIR/TR1HEXB.ASM" "$WORK/"
 cp "$FIXDIR/TR2ALUM.ASM" "$WORK/"
 cp "$FIXDIR/TR3DWBSS.ASM" "$WORK/"
@@ -158,7 +160,7 @@ cp "$FIXDIR/TINC1.ASM" "$FIXDIR/TINC2.INC" "$FIXDIR/TINC1.RDF" "$WORK/"
 cp "$FIXDIR/TINCMISS.ASM" "$FIXDIR/TINCSELF.ASM" "$WORK/"
 cp "$FIXDIR/TINCDEEP.ASM" "$FIXDIR"/TINCD*.INC "$WORK/"
 cp "$FIXDIR/TINCSKIP.ASM" "$FIXDIR/TINCSKIP.RDF" "$WORK/"
-cp "$FIXDIR/TMACRO.ASM" "$FIXDIR/TMACRO.RDF" "$WORK/"
+cp "$FIXDIR/TMACRO.ASM" "$FIXDIR/TMACRO.RDF" "$FIXDIR/TMACSTR.ASM" "$WORK/"
 cp "$FIXDIR/TMACARGS.ASM" "$FIXDIR/TMACMISS.ASM" "$FIXDIR/TMACNEST.ASM" "$WORK/"
 cp "$FIXDIR/TMACRECUR.ASM" "$FIXDIR/TMACARG3.ASM" "$WORK/"
 if [ -f "$BINRDFGREP" ]; then cp "$BINRDFGREP" "$WORK/RDFGREP.EXE"; fi
@@ -281,6 +283,8 @@ check_one TJCC2.ASM TJCC2.RDF "$FIXDIR"
 check_one TNOOP4.ASM TNOOP4.RDF "$FIXDIR"
 check_one TREP.ASM TREP.RDF "$FIXDIR"
 check_one TEQU.ASM TEQU.RDF "$FIXDIR"   # EQU constants (incl. expression + RESB count) -- self-consistency baseline
+check_one TDBWDD.ASM TDBWDD.RDF "$FIXDIR"   # DB/DW/DD accepting EQU constants (+/- tail) and DD accepting a label (width=4 reloc) -- self-consistency baseline
+check_fails TDBLABEL.ASM "expected byte value in DB"   # DB must still reject a bare label (no relocation path, unlike DW/DD)
 check_fails TBADIF.ASM "%ifdef without matching %endif"
 check_one TBSS.ASM TBSS.RDF "$FIXDIR"
 check_fails TBADRES.ASM "RESB/RESW/RESD only valid in SECTION .bss"
@@ -629,6 +633,24 @@ if grep -q "Heap leak detected" "$WORK/assemble-TMACRO-leak.log"; then
 else
     echo "PASS: TMACRO.ASM -> no heap leak under /LOG=debug"
     PASS=$((PASS+1))
+fi
+
+# %macro invoked with a string-literal actual parameter (single-char
+# 'D' and multi-char 'hi there'/"double quoted", both quote styles):
+# TokToText used to reject TString outright ("unsupported token in
+# macro argument"). code-starts confirms `CMPCHAR 'D'` encoded as
+# `CMP AL,'D'` (3C 44); code-contains confirms both DB bodies encoded
+# with the literal text intact (quote char stripped, not literal-copied).
+rm -f "$WORK/TMACSTR.RDF"
+( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TMACSTR.ASM >assemble-TMACSTR.ASM.log 2>&1 ) || true
+if [ -f "$WORK/TMACSTR.RDF" ] && [ -f "$WORK/RDFGREP.EXE" ] \
+   && ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE code-starts TMACSTR.RDF "3C44" >/dev/null 2>&1 ); then
+    echo "PASS: TMACSTR.ASM -> %macro string-literal argument encodes correctly"
+    PASS=$((PASS+1))
+else
+    echo "FAIL: TMACSTR.ASM -> %macro string-literal argument did not assemble/encode as expected"
+    cat "$WORK/assemble-TMACSTR.ASM.log"
+    FAIL=$((FAIL+1))
 fi
 
 check_fails TMACARGS.ASM "macro argument count mismatch"

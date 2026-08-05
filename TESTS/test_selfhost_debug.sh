@@ -64,8 +64,9 @@ ALL_MODS="Scan Syms Cgen Def Import TDbg PExpr PStmt Parser Link TOC"
 mkdir -p "$ROOT/TMP"
 REFDIR="$(mktemp -d "$ROOT/TMP/selfhost-ref.XXXXXX")"
 WORK="$(mktemp -d "$ROOT/TMP/selfhost-work.XXXXXX")"
+echo "DEBUGWORK=$WORK"
 cleanup() { rm -rf "$REFDIR" "$WORK"; }
-trap cleanup EXIT
+#trap cleanup EXIT
 
 # The per-module recompiles finish well under a billion instructions, but the
 # final single-process TOC link (`/ENTRY=Run TOC.MOD`) of the whole compiler image
@@ -107,7 +108,7 @@ recompile_mod() {
     local src="$(echo "$m" | tr a-z A-Z).MOD"
     local out_upper="$(echo "$m" | tr a-z A-Z).OM"
     rm -f "$WORK/$out_upper" "$WORK/$m.om"
-    "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c "$WORK" SELFTOC.EXE "$src" >/dev/null 2>&1
+    "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" -c "$WORK" SELFTOC.EXE "$src" >/dev/null 2>&1
     [ -s "$WORK/$out_upper" ] || [ -s "$WORK/$m.om" ]
 }
 
@@ -118,7 +119,7 @@ done
 
 echo "  - TOC (/ENTRY=Run)"
 rm -f "$WORK/TOC.OM" "$WORK/TOC.om" "$WORK/TOC.exe" "$WORK/TOC.EXE"
-"$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c "$WORK" SELFTOC.EXE /ENTRY=Run TOC.MOD >/dev/null 2>&1 || true
+"$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" -c "$WORK" SELFTOC.EXE /ENTRY=Run TOC.MOD 2>&1 | tail -40
 
 # ── 4. Per-module byte-identity check ────────────────────────────────────
 PASS=0; FAIL=0
@@ -193,7 +194,7 @@ if [ "$TOC1_EQ_TOC2" -eq 0 ] && [ -f "$TOC2" ]; then
         local src="$(echo "$m" | tr a-z A-Z).MOD"
         local out_upper="$(echo "$m" | tr a-z A-Z).OM"
         rm -f "$WORK3/$out_upper" "$WORK3/$m.om"
-        "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c "$WORK3" SELFTOC.EXE "$src" >/dev/null 2>&1
+        "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" -c "$WORK3" SELFTOC.EXE "$src" >/dev/null 2>&1
         [ -s "$WORK3/$out_upper" ] || [ -s "$WORK3/$m.om" ]
     }
 
@@ -204,7 +205,7 @@ if [ "$TOC1_EQ_TOC2" -eq 0 ] && [ -f "$TOC2" ]; then
 
     echo "  - TOC (gen3, /ENTRY=Run)"
     rm -f "$WORK3/TOC.OM" "$WORK3/TOC.om" "$WORK3/TOC.exe" "$WORK3/TOC.EXE"
-    "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c "$WORK3" SELFTOC.EXE /ENTRY=Run TOC.MOD >/dev/null 2>&1 || true
+    "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" -c "$WORK3" SELFTOC.EXE /ENTRY=Run TOC.MOD 2>&1 | tail -40
 
     for m in $ALL_MODS; do
         REF="$GEN2DIR/$m.om"

@@ -58,7 +58,6 @@ T.$(subst /,.,$(1)):
 	cp $(RDFGREP) $$$$wd/RDFGREP.EXE; \
 	cp $(OC) $$$$wd/TOC.EXE; \
 	cp $(ROOT)/BIN/OBERON.OM $$$$wd/OBERON.OM; \
-	cp $(ROOT)/BIN/NESTUB.BIN $$$$wd/NESTUB.BIN; \
 	compile_status=0; \
 	oc_flags=""; \
 	if [ -n "$$$$cmd" ] && [ "$$$$cmd" != "fails" ]; then oc_flags="$$$$cmd"; fi; \
