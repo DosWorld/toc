@@ -26,14 +26,18 @@
 BITS 16
 CPU 8086
 
-%define IS_FAR
+SECTION .data
+
+cgaseg: dw 0
 
 SECTION .text
 
 GLOBAL Tetris_Draw, Tetris_CalcDiff
 GLOBAL Tetris_GraphMode, Tetris_TextMode, Tetris_SetCgaPalette
 GLOBAL Tetris_GetKey, Tetris_HasKey, Tetris_Scan, Tetris_WaitKey
-GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
+GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound, Tetris_SetCgaSeg
+
+%define IS_FAR
 
 %ifdef IS_FAR
 %define RSIZE 4
@@ -42,6 +46,18 @@ GLOBAL Tetris_Delay, Tetris_Sound, Tetris_NoSound
 %define RSIZE 2
 %define RETMACRO retn
 %endif
+
+Tetris_SetCgaSeg:
+        push bp
+        mov  bp, sp
+        push es
+        mov  ax, [ss:bp+RSIZE+2]
+        mov  bx, seg cgaseg
+        mov  es, bx
+        mov  [es:cgaseg], ax
+        pop  es
+        pop  bp
+        RETMACRO 2
 
 ; -----------------------------------------------------------------------------
 ; CalcDiff(VAR screen; VAR prev)  -- 2 VAR params = 8 arg bytes -> retf 8
@@ -62,8 +78,8 @@ Tetris_CalcDiff:
         push    si
         push    di
 
-        les     di, [bp+RSIZE+2]        ; ES:DI = prev   (param 2, low slot)
-        lds     si, [bp+RSIZE+6]        ; DS:SI = screen (param 1, high slot)
+        les     di, [ss:bp+RSIZE+2]        ; ES:DI = prev   (param 2, low slot)
+        lds     si, [ss:bp+RSIZE+6]        ; DS:SI = screen (param 1, high slot)
         mov     cx, 1000                ; 25*40 cells
         cld
 .cdloop:
@@ -113,11 +129,16 @@ Tetris_Draw:
         push    di
         push    bx
 
-        les     di, [bp+RSIZE+2]        ; ES:DI = spr (param 2, low slot)
-        lds     si, [bp+RSIZE+6]        ; DS:SI = buf (param 1, high slot)
+        les     di, [ss:bp+RSIZE+2]        ; ES:DI = spr (param 2, low slot)
+        lds     si, [ss:bp+RSIZE+6]        ; DS:SI = buf (param 1, high slot)
+
+        push    ds
+        mov     ax, seg cgaseg
+        mov     ds, ax
+        mov     bp, [cgaseg]            ; CGA video segment (BP scratch; frame ptr no longer needed)
+        pop     ds
         mov     dh, 25
         xor     bx, bx
-        mov     bp, 0B800h              ; CGA video segment (BP scratch here)
         cld
 .drawrow:
         push    bx
@@ -170,7 +191,6 @@ Tetris_Draw:
 ; -----------------------------------------------------------------------------
 Tetris_GraphMode:
         mov     ax, 0004h               ; INT 10h: set CGA mode 4 (320x200x4)
-;        mov     ax, 0006h               ; INT 10h: set CGA mode 6 (640x200x2)
         int     10h
         RETMACRO
 
@@ -188,7 +208,7 @@ Tetris_TextMode:
 Tetris_SetCgaPalette:
         push    bp
         mov     bp, sp
-        mov     al, [bp+RSIZE+2]        ; AL = num (low byte of arg word)
+        mov     al, [ss:bp+RSIZE+2]        ; AL = num (low byte of arg word)
         mov     bl, al                  ; BL = palette number
         mov     bh, 1                   ; BH=1: select palette
         mov     ah, 0Bh                 ; INT 10h AH=0Bh: set colour palette
@@ -242,7 +262,7 @@ Tetris_WaitKey:
 Tetris_Scan:
         push    bp
         mov     bp, sp
-        mov     ax, [bp+RSIZE+2]        ; key
+        mov     ax, [ss:bp+RSIZE+2]     ; key
         mov     al, ah                  ; scan code = high byte
         xor     ah, ah
         pop     bp
@@ -256,7 +276,7 @@ Tetris_Scan:
 Tetris_Delay:
         push    bp
         mov     bp, sp
-        mov     ax, [bp+RSIZE+2]        ; ms
+        mov     ax, [ss:bp+RSIZE+2]        ; ms
         or      ax, ax
         jle     .done                   ; ms <= 0 -> no wait (signed)
         mov     cx, 1000
@@ -277,7 +297,7 @@ Tetris_Delay:
 Tetris_Sound:
         push    bp
         mov     bp, sp
-        mov     bx, [bp+RSIZE+2]        ; hz
+        mov     bx, [ss:bp+RSIZE+2]        ; hz
         or      bx, bx
         jle     .ret                    ; hz <= 0 -> no tone
         ; divisor = 1193180 / hz  (1193180 = 0012_34DDh)

@@ -84,6 +84,8 @@ PROCEDURE NoSound; FAR; EXTERNAL;               (* PC-speaker off *)
 (* drain the keyboard buffer, then block for one keypress (result discarded) *)
 PROCEDURE WaitKey; FAR; EXTERNAL;
 
+PROCEDURE SetCgaSeg(seg : INTEGER); FAR; EXTERNAL;
+
 (*$L TETRIS.RDF*)
 
 PROCEDURE GetRandColor : BYTE;
@@ -560,6 +562,7 @@ BEGIN
   (* total width = NLetters glyphs + (NLetters-1) gaps *)
   x := (40 - (NLetters * GlyphW + (NLetters - 1) * Gap)) DIV 2;
   y := (25 - GlyphH) DIV 2;
+  WHILE HasKey() DO GetKey() END;
   WHILE ~HasKey() DO
     DrawText("TETRIS", x, y);
     CalcDiff(screen, prev);
@@ -583,6 +586,7 @@ BEGIN
   (* each word: Word glyphs + (Word-1) gaps; two lines separated by Vgap *)
   x0 := (40 - (Word * GlyphW + (Word - 1) * Gap)) DIV 2;
   y0 := (25 - (2 * GlyphH + Vgap)) DIV 2;
+  WHILE HasKey() DO GetKey() END;
   WHILE ~HasKey() DO
     DrawText("GAME", x0-1, y0);
     DrawText("OVER", x0+1, y0 + GlyphH + Vgap);
@@ -590,7 +594,7 @@ BEGIN
     Draw(screen, spr);
     Delay(10)
   END;
-  GetKey
+  GetKey;
 END GameOver;
 
 (* --- static data init (runtime does NOT zero/const-init) ---------------- *)
@@ -632,6 +636,7 @@ END InitData;
 
 PROCEDURE Run*;
 BEGIN
+  SetCgaSeg(SYSTEM.SegB800());
   InitData;
   GraphMode;
   Welcome;
