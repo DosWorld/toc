@@ -5,6 +5,13 @@
         section .data
 i87:    dw      0
 isDpmi: dw      0
+; Real-mode-only heap manager's free-list head (paragraph segment of the
+; first MEMHEADER block, or 0 if none).  Was CS-relative; moved to .data
+; per the "no write access to [cs:xxx]" rule (DOCS/NE-BP.MD §2.7) even
+; though every access site is already gated behind isDpmi and unreachable
+; under DPMI16 -- keeping it out of .text removes the write entirely
+; rather than relying on that gating staying correct.
+MemStartSeg:    dw      0
 ExitProc:       dw      0, 0
 seg0040:        dw      00040h
 segb000:        dw      0b000h
@@ -198,7 +205,9 @@ SYSTEM_INIT:
 
 dos_done:
         push    es
-        mov     ax, [cs:MemStartSeg]
+        mov     ax, seg MemStartSeg
+        mov     es, ax
+        mov     ax, [es:MemStartSeg]
         mov     es, ax
         mov     ah, 49h
         int     21h
@@ -306,7 +315,16 @@ SYSTEM_Intr:
 
 ; ---- IntrReal: real-mode body, byte-for-byte the original implementation
 ; (CS-relative saved_ss/saved_sp/int_ins+1 patch) -- do not "improve" this
-; with any DPMI16-motivated change; DPMI16 uses IntrDpmi instead. ----
+; with any DPMI16-motivated change; DPMI16 uses IntrDpmi instead.
+;
+; IntrReal (below) is the ONLY place in this codebase permitted to write
+; through [cs:xxx] -- see the "no write access to [cs:xxx]" strong rule in
+; CLAUDE.md and the audit in DOCS/NE-BP.MD §2.7.  It is safe only because
+; this whole body is reachable exclusively in real mode (never called when
+; isDpmi is set -- see SYSTEM_Intr's dispatcher above), where CS is always
+; a plain read/write segment.  Any new code elsewhere needing to persist a
+; value across a call belongs in .data, addressed through DS/ES as every
+; other global already is -- not CS. ----
 IntrReal:
         push    bp
         mov     bp, sp
@@ -609,9 +627,6 @@ SYSTEM_CallFar:
 .State  resw    1
         endstruc
 
-MemStartSeg:
-        dw      0
-
 ; -----------------------------------------------------------------------------
 ; Memory_Init
 ; Initializes the memory manager with a single large free block.
@@ -633,7 +648,11 @@ MEM_INIT:
         mov     bx, arg_size
         cmp     bx, 16
         jb      .ret
-        mov     [cs:MemStartSeg], ax
+        push    ax
+        mov     ax, seg MemStartSeg
+        mov     es, ax
+        pop     ax
+        mov     [es:MemStartSeg], ax
 
         mov     es, ax
         xor     ax, ax
@@ -687,7 +706,9 @@ SYSTEM_Alloc:
         jnz     .notfail1
         jmp     .fail
 .notfail1:
-        mov     ax, [cs:MemStartSeg]
+        mov     ax, seg MemStartSeg
+        mov     es, ax
+        mov     ax, [es:MemStartSeg]
 
 .scan:
         test    ax, ax
@@ -922,7 +943,9 @@ SYSTEM_MemAvail:
         push    bx
         push    dx
         xor     dx, dx                  ; dx = running total (paragraphs)
-        mov     ax, [cs:MemStartSeg]
+        mov     ax, seg MemStartSeg
+        mov     es, ax
+        mov     ax, [es:MemStartSeg]
 .ma_scan:
         test    ax, ax
         jz      .ma_done
@@ -957,7 +980,9 @@ SYSTEM_MemMaxAvail:
         push    bx
         push    dx
         xor     dx, dx                  ; dx = max so far (paragraphs)
-        mov     ax, [cs:MemStartSeg]
+        mov     ax, seg MemStartSeg
+        mov     es, ax
+        mov     ax, [es:MemStartSeg]
 .mm_scan:
         test    ax, ax
         jz      .mm_done
