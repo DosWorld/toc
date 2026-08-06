@@ -1,26 +1,17 @@
 MODULE Detect;
 
 CONST
+
 CPU86*  = 0;
 CPU286* = 1;
 CPU386* = 2;
 
-(* IsEga returns TRUE if an EGA or later video adapter is installed.
-   No parameters. Uses INT 10h AH=12h BL=10h (get EGA info); if the
-   returned CX (feature bits) is 0FFFFh before the probe, INC CX wraps to
-   0 -- no EGA/VGA present -- so the result is FALSE. *)
-PROCEDURE IsEga* : BOOLEAN; EXTERNAL;
+VGA* = 9;
+EGA* = 3;
+MDA* = 7;
+CGA* = 1;
 
-(* IsVga returns TRUE if a VGA adapter is installed.
-   No parameters. Uses INT 10h AX=1A00h (get display combination code);
-   requires AL=1Ah on return (function supported) and BL in [7..0FEh]
-   (a recognized VGA-class active-display code). *)
-PROCEDURE IsVga* : BOOLEAN; EXTERNAL;
-
-(* IsMonochrome returns TRUE if the current video mode is monochrome.
-   No parameters. Reads the BIOS data area byte at 0040h:0065h (current
-   video mode / CRT_MODE_SET) and tests bit 2. *)
-PROCEDURE IsMonochrome* : BOOLEAN; EXTERNAL;
+PROCEDURE Video* : INTEGER; EXTERNAL;
 
 (* IsInputRedirected returns TRUE if standard input (handle 0) has been
    redirected from a file or pipe rather than being the console.

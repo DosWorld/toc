@@ -5,7 +5,7 @@ CPU 8086
 
 SECTION .text
 
-GLOBAL Detect_IsEga, Detect_IsVga, Detect_IsFreeDos, Detect_GetFreeDosVer
+GLOBAL Detect_Video, Detect_IsFreeDos, Detect_GetFreeDosVer
 GLOBAL Detect_IsMonochrome, Detect_IsInputRedirected, Detect_IsOutputRedirected
 GLOBAL Detect_IsAnsiSys, Detect_Cpu
 EXTERN SYSTEM_Seg0040
@@ -18,32 +18,46 @@ EXTERN SYSTEM_Seg0040
 %define RETMACRO retn
 %endif
 
-Detect_IsEga:
-        MOV  AX, 1200H
-        MOV  BX, 10H
-        MOV  CX, 0FFFFH
-        INT  10H
-        INC  CX
-        MOV  AL, CL
-        OR   AL, CH
-        RETMACRO
+VIDEO_VGA  equ  9
+VIDEO_EGA  equ  3
+VIDEO_MDA  equ  7
+VIDEO_CGA  equ  1
 
-Detect_IsVga:
-        MOV  AX, 1A00H
-        INT  10H
-        CMP  AL, 1AH
-        JNE  .err
-        CMP  BL, 7
-        JB   .err
-        CMP  BL, 0FFH
-        JNE  .ok
-.err:
-        XOR  AL, AL
-        JMP  .end
-.ok:
-        MOV  AL, 1
-.end:
-        RETMACRO
+Detect_Video:
+        mov  ax, 1200h
+        mov  bl, 32h
+        int  10h
+        cmp  al, 12h
+        jne  .not_vga
+
+        mov  al, VIDEO_VGA
+        xor  ah, ah
+        retf
+
+.not_vga:
+        mov  ah, 12h
+        mov  bl, 10h
+        int  10h
+        cmp  bl, 4
+        jae  .not_ega
+
+        mov  al, VIDEO_EGA
+        retf
+
+.not_ega:
+        mov  ah, 0Fh
+        int  10h
+        cmp  al, 7
+        je   .is_mda
+
+        mov  al, VIDEO_CGA
+        xor  ah, ah
+        retf
+
+.is_mda:
+        mov  al, VIDEO_MDA
+        xor  ah, ah
+        retf
 
 Detect_IsFreeDos:
         MOV  AX, 3000H

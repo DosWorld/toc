@@ -1168,31 +1168,37 @@ BEGIN
     Rdoff.RdfAddGlobal(Cgen.CgObj, initName, Rdoff.SegCode, initOfs);
     Cgen.Emit1(BYTE(Cgen.OpRetf))
   ELSE
-    guardOfs := Cgen.CgPc();
-    Cgen.EmitW(0);
+    (* Guard word lives in THIS module's own data segment, not the code
+       segment: a DPMI16 code selector is execute-only, and the guard is
+       read AND written (CMP/INC) on every __init call — a bare [cs:xxx]
+       access there faults on real DPMI16 hardware (same class of bug as
+       SYSTEM_Intr's int_ins+1 self-patch, see DOCS/NE-BP.MD Part 2).
+       DS must therefore point at this module's data segment BEFORE the
+       guard check, not after — so the PUSH DS/MOV DS,imm/MOV DS,AX
+       sequence (originally emitted after the guard, since the old
+       CS-relative guard didn't need DS at all) moves up front here.  The
+       early-return path now needs its own matching POP DS, since RETF no
+       longer happens with DS untouched. *)
+    guardOfs := Cgen.CgDpc();
+    Cgen.EmitDataWord(0);
     initOfs := Cgen.CgPc();
     Rdoff.RdfAddGlobal(Cgen.CgObj, initName, Rdoff.SegCode, initOfs);
-    (* CS: CMP word [guardOfs], 0 *)
-    Cgen.Emit1(02EH); Cgen.Emit2(083H, 03EH);
-    addrField := Cgen.CgPc(); Cgen.EmitW(INTEGER(guardOfs));
-    Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegCode, FALSE);
-    Cgen.Emit1(000H);
-    Cgen.Emit2(074H, 001H);   (* JE .cont *)
-    Cgen.Emit1(BYTE(Cgen.OpRetf));
-    (* .cont: CS: INC word [guardOfs] *)
-    Cgen.Emit1(02EH); Cgen.Emit2(0FFH, 006H);
-    addrField := Cgen.CgPc(); Cgen.EmitW(INTEGER(guardOfs));
-    Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegCode, FALSE);
-    (* __init is FAR-called (from TOC.MOD's entry stub and from every
-       dependent module's own __init), and its own dep-init calls / module
-       body below may reference THIS module's globals via DS — same DS
-       save+reload as any other FAR procedure (see Cgen.CgPrologue), placed
-       AFTER the early-return guard above so that early RETF never needs a
-       matching POP DS (DS hasn't been touched yet at that point). *)
     Cgen.Emit1(01EH);                             (* PUSH DS *)
     Cgen.Emit1(0B8H); dsImmAt := Cgen.CgPc(); Cgen.EmitW(0);  (* MOV AX,imm16 *)
     Rdoff.RdfAddSegReloc(Cgen.CgObj, Rdoff.SegCode, dsImmAt, Rdoff.SegData);
     Cgen.Emit2(08EH, 0D8H);                       (* MOV DS, AX *)
+    (* CMP word [guardOfs], 0 *)
+    Cgen.Emit2(083H, 03EH);
+    addrField := Cgen.CgPc(); Cgen.EmitW(INTEGER(guardOfs));
+    Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegData, FALSE);
+    Cgen.Emit1(000H);
+    Cgen.Emit2(074H, 002H);   (* JE .cont (skip POP DS + RETF below) *)
+    Cgen.Emit1(01FH);                             (* POP DS *)
+    Cgen.Emit1(BYTE(Cgen.OpRetf));
+    (* .cont: INC word [guardOfs] *)
+    Cgen.Emit2(0FFH, 006H);
+    addrField := Cgen.CgPc(); Cgen.EmitW(INTEGER(guardOfs));
+    Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegData, FALSE);
     IF PExpr.modUsesFpu THEN
       req87Id := PExpr.GetSystemImport("SYSTEM_REQUIRE87");
       Cgen.CgCallFar(req87Id)

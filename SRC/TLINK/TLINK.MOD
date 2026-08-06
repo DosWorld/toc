@@ -592,6 +592,23 @@ END CalculateLayoutSmall;
 
 (* ---- relocation patching ---- *)
 
+(* PatchMem4: additive 32-bit patch at buf[o..o+3] -- the existing 4-byte
+   little-endian addend already on disk is read back into a LONGINT (so a
+   carry out of the low word correctly propagates into the high word,
+   unlike two independent 16-bit adds), added to val, then written back
+   the same way. *)
+PROCEDURE PatchMem4(buf: Rdoff.SegBuf; o: INTEGER; val: LONGINT);
+  VAR cur: LONGINT;
+BEGIN
+  cur := LONGINT(WORD(INTEGER(buf^[o]) + SYSTEM.LSL(INTEGER(buf^[o+1]), 8))) +
+         LONGINT(WORD(INTEGER(buf^[o+2]) + SYSTEM.LSL(INTEGER(buf^[o+3]), 8))) * LONGINT(65536);
+  cur := cur + val;
+  buf^[o]   := BYTE(SYSTEM.AND(cur, LONGINT(0FFH)));
+  buf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), LONGINT(0FFH)));
+  buf^[o+2] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 16), LONGINT(0FFH)));
+  buf^[o+3] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 24), LONGINT(0FFH)))
+END PatchMem4;
+
 PROCEDURE PatchMem(rseg: INTEGER; offset: LONGINT; val: LONGINT; width: INTEGER);
   VAR buf: Rdoff.SegBuf; o: INTEGER; cur: WORD;
 BEGIN
@@ -610,6 +627,15 @@ BEGIN
 
   IF width = 1 THEN
     buf^[o] := BYTE(SYSTEM.AND(INTEGER(buf^[o]) + INTEGER(BYTE(val)), 0FFH))
+  ELSIF width = 4 THEN
+    (* DD (32-bit) patch: same additive-to-existing-addend convention as
+       width 1/2 above, just twice as wide -- low word first (little-
+       endian), each byte pair combined the same way width=2's cur/buf
+       dance does. curLo/curHi are computed from a 32-bit LONGINT sum so
+       a carry out of the low 16 bits correctly propagates into the high
+       word instead of being silently dropped by two independent 16-bit
+       adds. *)
+    PatchMem4(buf, o, val)
   ELSE
     cur := WORD(INTEGER(buf^[o]) + SYSTEM.LSL(INTEGER(buf^[o+1]), 8));
     cur := cur + WORD(val);   (* 16-bit WORD arithmetic wraps mod 65536 *)

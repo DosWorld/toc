@@ -451,10 +451,10 @@ END WaitRetrace;
 BEGIN
   Dos.GetIntVec(1CH, spinnerOldInt);
   spinnerOn := FALSE;
-  vga := Detect.IsVga();
+  vga := Detect.Video = Detect.VGA;
   SavePalette;
   cursor := GetCursorAsm();
-  IF (~vga) & Detect.IsMonochrome() THEN SetVSeg(SYSTEM.SegB000())
+  IF Detect.Video = Detect.MDA THEN SetVSeg(SYSTEM.SegB000())
   ELSE SetVSeg(SYSTEM.SegB800())
   END;
   SetBlinkAsm(FALSE);

@@ -23,7 +23,7 @@
 init/1a-empty-bare-retf	EMPTY.MOD		code-starts	CB
 init/1b-empty-init-global	EMPTY.MOD		has-global	Empty__init
 init/1c-empty-no-init-deps	EMPTY.MOD		init-imports-empty
-init/1d-hasbody-guard-cmp	HASBODY.MOD		code-starts	0000 2E 83 3E
+init/1d-hasbody-guard-cmp	HASBODY.MOD		code-starts	1E B8 00 00 8E D8 83 3E
 init/1h-hasbody-no-sysinit	HASBODY.MOD		no-import	SYSTEM__init
 init/1i-empty-no-sysinit	EMPTY.MOD		no-import	SYSTEM__init
 init/1e-unused-a-not-imported	MODAB.MOD+A.OM+B.OM		no-import	a__init

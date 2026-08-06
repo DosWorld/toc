@@ -772,11 +772,62 @@ BEGIN
   EmitDataWord(INTEGER(op.disp))
 END EmitDataWordMaybeLabel;
 
-(* ParseDbList: DB val [, val ...] -- each val is a numeric byte or a
-   quoted string (each character emitted as one byte, NASM db-string
-   semantics). *)
+(* EmitDataDWord: emit a 32-bit constant as two words, low word first
+   (little-endian, matching Files.WriteWord/EmitWord's own byte order). *)
+PROCEDURE EmitDataDWord(dw: LONGINT);
+BEGIN
+  EmitDataWord(INTEGER(SYSTEM.AND(dw, LONGINT(0FFFFH))));
+  EmitDataWord(INTEGER(SYSTEM.AND(SYSTEM.LSR(dw, 16), LONGINT(0FFFFH))))
+END EmitDataDWord;
+
+(* EmitDataDWordMaybeLabel: DD val, where val may be a label -- emitted as
+   a width=4 relocation (TLINK.MOD's PatchMem/PatchMem4 handle patching
+   it), the target's own local offset zero-extended into the low 16 bits
+   (this assembler has no 32-bit address space of its own; a label's
+   "32-bit address" is just its 16-bit in-module offset with a zero high
+   word, the same convention a near pointer stored in a far-sized slot
+   would use). Structurally mirrors EmitDataWordMaybeLabel, width 4
+   throughout instead of 2, no word-range guard (the full LONGINT range
+   fits by construction: op.disp/lofs are always themselves in 16-bit
+   range, so their sum can never approach the 32-bit boundary). *)
+PROCEDURE EmitDataDWordMaybeLabel(VAR op: Enc.Operand);
+  VAR lseg: INTEGER; lofs: LONGINT; patchSeg: INTEGER; patchOfs: LONGINT; impId: INTEGER;
+BEGIN
+  IF op.hasLabel & (curPass = 2) THEN
+    IF curSeg = Sym.SegCode THEN patchSeg := Rdoff.SegCode; patchOfs := codeOfs
+    ELSE patchSeg := Rdoff.SegData; patchOfs := dataOfs
+    END;
+    IF Sym.IsExtern(op.labelName) THEN
+      impId := Enc.EnsureImportId(op.labelName);
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 4, impId, FALSE);
+      EmitDataDWord(op.disp);
+      RETURN
+    END;
+    IF ~Sym.Lookup(op.labelName, lseg, lofs) THEN Fail("undefined symbol"); RETURN END;
+    IF lseg = Sym.SegCode THEN
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 4, Rdoff.SegCode, FALSE)
+    ELSIF lseg = Sym.SegData THEN
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 4, Rdoff.SegData, FALSE)
+    ELSE
+      Rdoff.RdfAddReloc(obj, patchSeg, patchOfs, 4, Rdoff.SegBss, FALSE)
+    END;
+    EmitDataDWord(op.disp + lofs);
+    RETURN
+  END;
+  EmitDataDWord(op.disp)
+END EmitDataDWordMaybeLabel;
+
+(* ParseDbList: DB val [, val ...] -- each val is a numeric byte, a quoted
+   string (each character emitted as one byte, NASM db-string semantics),
+   or an EQU constant (e.g. "db TEXTHEIGHT" where TEXTHEIGHT equ 8). An
+   optional "+/- number" tail is accepted after an EQU constant, same as
+   ParseOperand's own EQU-constant arm (e.g. "db FOO-1"). A bare LABEL
+   (an address, not a byte-sized constant) is deliberately not accepted
+   here -- unlike DW/DD, DB has no relocation-emission path, so silently
+   truncating a 16-bit address to one byte would be a real bug, not a
+   feature; use DW/DD for label addresses. *)
 PROCEDURE ParseDbList;
-  VAR i: INTEGER; more: BOOLEAN;
+  VAR i: INTEGER; more, neg: BOOLEAN; equVal: LONGINT;
 BEGIN
   more := TRUE;
   WHILE more DO
@@ -797,6 +848,18 @@ BEGIN
         IF (tIval < 0) OR (tIval > 255) THEN Fail("DB value out of range (-128..255)"); RETURN END;
         EmitDataByte(BYTE(tIval)); TokNext
       END
+    ELSIF (tSym = Scan.TIdent) & Sym.LookupConst(tIdOrig, equVal) THEN
+      TokNext;
+      WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+        neg := (tSym = Scan.TMinus); TokNext;
+        IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
+        IF neg THEN equVal := equVal - tIval ELSE equVal := equVal + tIval END;
+        TokNext
+      END;
+      IF (equVal < LONGINT(-128)) OR (equVal > LONGINT(255)) THEN
+        Fail("DB value out of range (-128..255)"); RETURN
+      END;
+      EmitDataByte(BYTE(equVal))
     ELSE
       Fail("expected byte value in DB"); RETURN
     END;
@@ -818,6 +881,24 @@ BEGIN
     IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
   END
 END ParseDwList;
+
+(* ParseDdList: DD val [, val ...] -- val is a number, an EQU constant, or
+   a label (32-bit address: the target's own 16-bit in-module offset
+   zero-extended, with a width=4 relocation in pass 2). Delegates to the
+   same ParseOperand EQU-constant/bare-label paths DW uses -- see
+   EmitDataDWordMaybeLabel's comment for the zero-extension convention. *)
+PROCEDURE ParseDdList;
+  VAR op: Enc.Operand; more: BOOLEAN;
+BEGIN
+  more := TRUE;
+  WHILE more DO
+    ParseOperand(op, Enc.SzWord);
+    IF op.kind = Enc.OKImm THEN EmitDataDWordMaybeLabel(op)
+    ELSE Fail("expected value in DD")
+    END;
+    IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
+  END
+END ParseDdList;
 
 (* ---- STRUC field-size keywords: RESB/RESW/RESD n ---- *)
 PROCEDURE ParseStrucField(field: ARRAY OF CHAR);
@@ -1093,11 +1174,11 @@ BEGIN
   Sym.DefineMacro(name, nParams, body)
 END DoMacroRecord;
 
-(* DoTimes: TIMES n DB/DW val -- since every TIMES in both oracle files is
-   `times N db 0` (a single repeated byte), this handles exactly
-   `TIMES n DB byteval` and `TIMES n DW wordval` (single-value form only,
-   matching actual usage -- a list form `times n db a,b,c` is out of scope
-   for v1, Simplicity First). *)
+(* DoTimes: TIMES n DB/DW/DD val -- since every TIMES in both oracle files
+   is `times N db 0` (a single repeated byte), this handles exactly
+   `TIMES n DB byteval` / `TIMES n DW wordval` / `TIMES n DD dwordval`
+   (single-value form only, matching actual usage -- a list form
+   `times n db a,b,c` is out of scope for v1, Simplicity First). *)
 PROCEDURE DoTimes(count: LONGINT);
   VAR kw: ARRAY Scan.MaxIdent OF CHAR; op: Enc.Operand; i: LONGINT;
 BEGIN
@@ -1127,8 +1208,15 @@ BEGIN
     END;
     i := LONGINT(0);
     WHILE i < count DO EmitDataWord(INTEGER(op.disp)); i := i + LONGINT(1) END
+  ELSIF Strings.Equal(kw, "DD") THEN
+    ParseOperand(op, Enc.SzWord);
+    IF (op.kind # Enc.OKImm) OR op.hasLabel THEN
+      Fail("TIMES DD requires a constant value"); RETURN
+    END;
+    i := LONGINT(0);
+    WHILE i < count DO EmitDataDWord(op.disp); i := i + LONGINT(1) END
   ELSE
-    Fail("TIMES only supports DB/DW in this dialect")
+    Fail("TIMES only supports DB/DW/DD in this dialect")
   END
 END DoTimes;
 
@@ -1274,6 +1362,8 @@ BEGIN
       ParseDbList
   | Lex.DDw:
       ParseDwList
+  | Lex.DDd:
+      ParseDdList
   | Lex.DTimes:
       IF tSym # Scan.TInt THEN Fail("expected repeat count after TIMES")
       ELSE DoTimes(tIval)

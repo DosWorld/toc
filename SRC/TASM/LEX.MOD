@@ -84,7 +84,7 @@ CONST
   (* ---- directives (170..199) ---- *)
   DBits* = 170; DCpu* = 171; DSection* = 172; DGlobal* = 173;
   DStruc* = 174; DEndstruc* = 175; DDb* = 176; DDw* = 177; DTimes* = 178;
-  DResb* = 179; DResw* = 180; DResd* = 181;
+  DResb* = 179; DResw* = 180; DResd* = 181; DDd* = 182;
   DExtern* = 185;
 
   (* ---- operand qualifiers (200..209) ---- *)
@@ -329,6 +329,7 @@ BEGIN
   | "D":
       IF    Strings.Equal(name, "DB") THEN RETURN DDb
       ELSIF Strings.Equal(name, "DW") THEN RETURN DDw
+      ELSIF Strings.Equal(name, "DD") THEN RETURN DDd
       END
   | "T": IF Strings.Equal(name, "TIMES") THEN RETURN DTimes END
   | "R":
