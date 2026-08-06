@@ -9,7 +9,13 @@ XTRUN = $(XT) run
 
 STDLIB_OMS = SYSTEM.OM OUT.OM OUT87.OM IN.OM STRINGS.OM FILES.OM \
              CRT.OM DOS.OM IO.OM RDFLOAD.OM MATH.OM TEST.OM EMS.OM TIME.OM \
-             DETECT.OM WINCB.OM KMOUSE.OM SCREEN.OM BASE64.OM RANDOM.OM GRAPH.OM
+             DETECT.OM WINCB.OM RANDOM.OM GRAPH.OM
+# BASE64.MOD, KMOUSE.MOD, SCREEN.MOD, SIMPLZ77.MOD: source kept in this
+# directory but deliberately NOT built into OBERON.OM by default -- not
+# part of STDLIB_OMS, so `make all`/`install` never produces their .OM and
+# the install glob (line below) never picks them up.  Build standalone via
+# `make KMOUSE.OM` etc. if ever needed; SIMPLZ77.MOD has no Makefile rule
+# at all (never had one).
 
 all: $(STDLIB_OMS)
 

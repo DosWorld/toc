@@ -2,7 +2,7 @@
 (* Graph — Trubo Oberon implementation BGI graphics interface. *)
 MODULE Graph;
 
-IMPORT Files, Det := Detect;
+IMPORT Files, Strings, Math, Det := Detect;
 
 CONST
 
@@ -18,15 +18,26 @@ DvInstall      = 0;
 DvInit         = 1;
 DvClear        = 2;
 DvPost         = 3;
+DvMove         = 4;   (* SI 0x08 *)
+DvDraw         = 5;   (* SI 0x0A *)
 DvVect         = 6;   (* SI 0x0C *)
 DvPatbar       = 9;   (* SI 0x12 *)
+DvPalette      = 13;  (* SI 0x1A *)
+DvSetAllPal    = 14;  (* SI 0x1C *)
 DvColour       = 15;  (* SI 0x1E *)
 DvFillStyle    = 16;  (* SI 0x20 *)
+DvLineStyle    = 17;  (* SI 0x22 *)
+DvTextStyle    = 18;  (* SI 0x24 *)
+DvText         = 19;  (* SI 0x26 *)
+DvTextSize     = 20;  (* SI 0x28 *)
+DvFloodFill    = 22;  (* SI 0x2C *)
 DvDone         = 23;  (* SI 0x2E *)
 DvGetPixel     = 23;  (* SI 0x2E *)
 DvPutPixel     = 24;  (* SI 0x30 *)
 DvSaveBitmap   = 26;  (* SI 0x34 *)
 DvRestoreBitmap = 27; (* SI 0x36 *)
+DvSetClip      = 28;  (* SI 0x38 *)
+DvColourQuery  = 29;  (* SI 0x3A *)
 
 (* GraphResult error return codes *)
 grOk*             =   0;
@@ -263,6 +274,49 @@ DrvVec     : DDOVec;           (* parsed DDOVEC table *)
 CurDrawColor : WORD;
 CurFillColor : WORD;
 
+(* Current pointer (CP), tracked here since the driver's move/draw
+   routines (§5.1) do not hand it back on query -- mirrors what the real
+   BGI kernel keeps for MoveTo/LineTo/MoveRel/LineRel/GetX/GetY. *)
+CurX, CurY : INTEGER;
+
+(* Current view port, tracked here since setclip (§5.1) is set-only --
+   mirrors what the real BGI kernel keeps for GetViewSettings. Origin
+   (VpX1,VpY1) is subtracted from user coordinates before each DDOVEC
+   call, since the driver has no concept of a view-port origin of its
+   own (only an absolute clip rectangle). *)
+VpX1, VpY1, VpX2, VpY2 : INTEGER;
+VpClip : BOOLEAN;
+
+(* Current line style, tracked here since linestyle (§5.1) is set-only
+   -- mirrors what the real BGI kernel keeps for GetLineSettings. *)
+CurLineStyle, CurLinePattern, CurLineThickness : WORD;
+
+(* Current fill style, tracked here since fillstyle (§5.1) is set-only
+   -- mirrors what the real BGI kernel keeps for GetFillSettings. *)
+CurFillPattern : WORD;
+CurFillBytes : FillPatternType;
+
+(* Current text style/justification, tracked here since textstyle
+   (§5.1) is set-only -- mirrors what the real BGI kernel keeps for
+   GetTextSettings. *)
+CurFont, CurTextDir, CurCharSize : WORD;
+CurHorizJust, CurVertJust : WORD;
+
+(* Current pixel aspect ratio, tracked here since the driver exposes no
+   DDOVEC query for hardware geometry (§7's DIT is internal-only -- see
+   DOCS/BGI.MD §7). Defaults to 10000/10000 (square pixels); callers on
+   non-square hardware (e.g. CGA graphics modes) must SetAspectRatio
+   themselves for aspect-correct Circle/Ellipse/Arc, same as real BGI
+   apps that read GetAspectRatio and adjust radii by hand. *)
+AspX, AspY : WORD;
+
+(* Last Arc/Ellipse call's centre and arc endpoints, served by
+   GetArcCoords -- there is no DDOVEC query for this either (arc/
+   ellipse are software-emulated here, see Ellipse). *)
+LastArcX, LastArcY : INTEGER;
+LastArcXStart, LastArcYStart : INTEGER;
+LastArcXEnd, LastArcYEnd : INTEGER;
+
 LastResult : INTEGER;  (* last GraphResult error code, set by InitGraph *)
 
 (* *** high-level error handling *** *)
@@ -464,6 +518,13 @@ BEGIN
 
   CurDrawColor := 0;
   CurFillColor := 0;
+  CurX := 0; CurY := 0;
+  VpX1 := 0; VpY1 := 0; VpX2 := 0; VpY2 := 0; VpClip := FALSE;
+  CurLineStyle := SolidLn; CurLinePattern := 0; CurLineThickness := NormWidth;
+  CurFillPattern := SolidFill;
+  CurFont := DefaultFont; CurTextDir := HorizDir; CurCharSize := 1;
+  CurHorizJust := LeftText; CurVertJust := TopText;
+  AspX := 10000; AspY := 10000;
   LastResult := grOk
 END InitGraph;
 
@@ -531,14 +592,17 @@ BEGIN
   END
 END CloseGraph;
 
+(* GetX/GetY: the current pointer (CP), served from the CurX/CurY mirror
+   kept by MoveTo/LineTo/MoveRel/LineRel (the driver's move/draw
+   routines do not hand the CP back on query). *)
 PROCEDURE GetX*(): INTEGER;
 BEGIN
-  RETURN 0
+  RETURN CurX
 END GetX;
 
 PROCEDURE GetY*(): INTEGER;
 BEGIN
-  RETURN 0
+  RETURN CurY
 END GetY;
 
 PROCEDURE GetMaxX*(): INTEGER;
@@ -552,20 +616,55 @@ BEGIN
 END GetMaxY;
 
 (* *** Screen, viewport, page routines *** *)
+(* ClearDevice: clear the whole screen to colour 0 via the loaded
+   driver's clear routine (DDOVEC SI=0x04; no inputs -- see DOCS/BGI.MD
+   §5). No-op if no driver is loaded. *)
 PROCEDURE ClearDevice*;
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvClear, regs)
 END ClearDevice;
 
+(* SetViewPort: set the clipping rectangle used by drawing primitives
+   via the loaded driver's setclip routine (DDOVEC SI=0x38; AX,BX=UL;
+   CX,DX=LR -- see DOCS/BGI.MD §5.1), and track it locally for
+   GetViewSettings (setclip is set-only). No-op if no driver is loaded. *)
 PROCEDURE SetViewPort*(x1, y1, x2, y2: INTEGER; Clip: BOOLEAN);
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  VpX1 := x1; VpY1 := y1; VpX2 := x2; VpY2 := y2; VpClip := Clip;
+
+  regs.AX := x1; regs.BX := y1; regs.CX := x2; regs.DX := y2;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvSetClip, regs)
 END SetViewPort;
 
+(* GetViewSettings: the current view port, served from the
+   VpX1/VpY1/VpX2/VpY2/VpClip mirror kept by SetViewPort (setclip,
+   §5.1, is set-only). *)
 PROCEDURE GetViewSettings*(VAR ViewPort: ViewPortType);
 BEGIN
+  ViewPort.x1 := VpX1; ViewPort.y1 := VpY1;
+  ViewPort.x2 := VpX2; ViewPort.y2 := VpY2;
+  ViewPort.Clip := VpClip
 END GetViewSettings;
 
+(* ClearViewPort: fill the current view port via the loaded driver's
+   patbar routine (DDOVEC SI=0x12; AX,BX=UL, CX,DX=LR -- see
+   DOCS/BGI.MD §5.1), using the current fill colour/pattern -- there is
+   no dedicated DDOVEC primitive for this (mirrors how Rectangle is
+   built from Line). No-op if no driver is loaded. *)
 PROCEDURE ClearViewPort*;
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.AX := 0; regs.BX := 0;
+  regs.CX := VpX2 - VpX1; regs.DX := VpY2 - VpY1;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvPatbar, regs)
 END ClearViewPort;
 
 PROCEDURE SetVisualPage*(Page: WORD);
@@ -610,21 +709,46 @@ PROCEDURE SetWriteMode*(WriteMode: INTEGER);
 BEGIN
 END SetWriteMode;
 
-PROCEDURE LineTo*(X, Y: INTEGER);
-BEGIN
-END LineTo;
-
-PROCEDURE LineRel*(Dx, Dy: INTEGER);
-BEGIN
-END LineRel;
-
+(* MoveTo: move the current pointer (CP) to (X,Y) via the loaded driver's
+   move routine (DDOVEC SI=0x08; AX=X, BX=Y -- see DOCS/BGI.MD §5.1).
+   CP is also tracked locally for GetX/GetY, since the driver does not
+   hand it back on query. No-op if no driver is loaded. *)
 PROCEDURE MoveTo*(X, Y: INTEGER);
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.AX := X;
+  regs.BX := Y;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvMove, regs);
+  CurX := X; CurY := Y
 END MoveTo;
 
+(* MoveRel: move the CP by (Dx,Dy) relative to its current position. *)
 PROCEDURE MoveRel*(Dx, Dy: INTEGER);
 BEGIN
+  MoveTo(CurX + Dx, CurY + Dy)
 END MoveRel;
+
+(* LineTo: draw a line from the CP to (X,Y) via the loaded driver's draw
+   routine (DDOVEC SI=0x0A; AX=X, BX=Y -- see DOCS/BGI.MD §5.1), and
+   update the CP to (X,Y). No-op if no driver is loaded. *)
+PROCEDURE LineTo*(X, Y: INTEGER);
+  VAR regs: SYSTEM.Registers;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.AX := X;
+  regs.BX := Y;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvDraw, regs);
+  CurX := X; CurY := Y
+END LineTo;
+
+(* LineRel: draw a line from the CP to a point (Dx,Dy) relative to it. *)
+PROCEDURE LineRel*(Dx, Dy: INTEGER);
+BEGIN
+  LineTo(CurX + Dx, CurY + Dy)
+END LineRel;
 
 (* Line: draw a line from (x1,y1) to (x2,y2) via the loaded driver's
    vect routine (DDOVEC SI=0x0C; AX=X1, BX=Y1, CX=X2, DX=Y2 -- see
@@ -641,12 +765,33 @@ BEGIN
   CallDriver(DvVect, regs)
 END Line;
 
+(* GetLineSettings: the current line style/pattern/thickness, served
+   from the CurLineStyle/CurLinePattern/CurLineThickness mirror kept by
+   SetLineStyle (linestyle, §5.1, is set-only). *)
 PROCEDURE GetLineSettings*(VAR LineInfo: LineSettingsType);
 BEGIN
+  LineInfo.LineStyle := CurLineStyle;
+  LineInfo.Pattern := CurLinePattern;
+  LineInfo.Thickness := CurLineThickness
 END GetLineSettings;
 
+(* SetLineStyle: set the line style, user pattern, and thickness used by
+   Line/vect via the loaded driver's linestyle routine (DDOVEC SI=0x22;
+   AL=style#, BX=user pattern (if style>=UserBitLn), CX=width -- see
+   DOCS/BGI.MD §5.1). No-op if no driver is loaded. *)
 PROCEDURE SetLineStyle*(LineStyle, Pattern, Thickness: WORD);
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  CurLineStyle := LineStyle;
+  CurLinePattern := Pattern;
+  CurLineThickness := Thickness;
+
+  regs.AX := INTEGER(SYSTEM.AND(LineStyle, 0FFH));
+  regs.BX := INTEGER(Pattern);
+  regs.CX := INTEGER(Thickness);
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvLineStyle, regs)
 END SetLineStyle;
 
 (* *** polygon, fills and figures *** *)
@@ -676,24 +821,115 @@ BEGIN
   CallDriver(DvPatbar, regs)
 END Bar;
 
+(* Bar3D: draw a filled 3D bar -- front face via Bar/Rectangle (patbar,
+   §5.1), a Depth-offset back edge and connecting side lines via Line,
+   and (if Top) a top-face outline -- matching real BGI's Bar3D shape.
+   Not a DDOVEC driver primitive (only patbar/filled-bar is; 3D bars are
+   normally left as EMULATE, see DOCS/BGI.MD §4.3). No-op if no driver
+   is loaded. *)
 PROCEDURE Bar3D*(x1, y1, x2, y2: INTEGER; Depth: WORD; Top: BOOLEAN);
+  VAR d: INTEGER;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  d := INTEGER(Depth);
+  Bar(x1, y1, x2, y2);
+  Rectangle(x1, y1, x2, y2);
+  IF d # 0 THEN
+    Line(x2, y1, x2 + d, y1 - d);
+    Line(x2, y2, x2 + d, y2 - d);
+    Line(x2 + d, y1 - d, x2 + d, y2 - d);
+    IF Top THEN
+      Line(x1, y1, x1 + d, y1 - d);
+      Line(x1 + d, y1 - d, x2 + d, y1 - d)
+    END
+  END
 END Bar3D;
 
+(* DrawPoly: draw the outline of a closed polygon by connecting each
+   point to the next with Line (vect, §5.1), closing back to the first
+   point. Not a DDOVEC driver primitive -- polygon ops are not in the
+   DDOVEC table at all, so the real BGI kernel builds them from Line/
+   patbar itself; this mirrors that. No-op if no driver is loaded. *)
 PROCEDURE DrawPoly*(NumPoints: WORD; VAR PolyPoints: ARRAY OF PointType);
+  VAR i: INTEGER;
 BEGIN
+  IF (~DrvLoaded) OR (NumPoints < 2) THEN RETURN END;
+  FOR i := 0 TO INTEGER(NumPoints) - 2 DO
+    Line(PolyPoints[i].X, PolyPoints[i].Y, PolyPoints[i+1].X, PolyPoints[i+1].Y)
+  END;
+  Line(PolyPoints[INTEGER(NumPoints)-1].X, PolyPoints[INTEGER(NumPoints)-1].Y, PolyPoints[0].X, PolyPoints[0].Y)
 END DrawPoly;
 
+(* FillPoly: fill a closed polygon with the current fill colour, via a
+   scanline algorithm plotting through PutPixel (itself CallDriver-
+   backed) -- same approach as Circle. Not a DDOVEC driver primitive
+   (see DrawPoly). Also draws the outline via DrawPoly, matching real
+   BGI's FillPoly. No-op if no driver is loaded. *)
 PROCEDURE FillPoly*(NumPoints: WORD; VAR PolyPoints: ARRAY OF PointType);
+  VAR
+    minY, maxY, y, x: INTEGER;
+    i, j, k: INTEGER;
+    xs: ARRAY 64 OF INTEGER;
+    n: INTEGER;
+    tmp: INTEGER;
+    colour: WORD;
 BEGIN
+  IF (~DrvLoaded) OR (NumPoints < 3) THEN RETURN END;
+  colour := CurFillColor;
+
+  minY := PolyPoints[0].Y; maxY := PolyPoints[0].Y;
+  FOR i := 1 TO INTEGER(NumPoints) - 1 DO
+    IF PolyPoints[i].Y < minY THEN minY := PolyPoints[i].Y END;
+    IF PolyPoints[i].Y > maxY THEN maxY := PolyPoints[i].Y END
+  END;
+
+  FOR y := minY TO maxY DO
+    n := 0;
+    FOR i := 0 TO INTEGER(NumPoints) - 1 DO
+      j := (i + 1) MOD INTEGER(NumPoints);
+      IF ((PolyPoints[i].Y <= y) & (PolyPoints[j].Y > y)) OR
+         ((PolyPoints[j].Y <= y) & (PolyPoints[i].Y > y)) THEN
+        IF n < 64 THEN
+          x := PolyPoints[i].X + (y - PolyPoints[i].Y) * (PolyPoints[j].X - PolyPoints[i].X)
+                 DIV (PolyPoints[j].Y - PolyPoints[i].Y);
+          xs[n] := x; INC(n)
+        END
+      END
+    END;
+
+    k := 1;
+    WHILE k < n DO
+      tmp := xs[k]; j := k;
+      WHILE (j > 0) & (xs[j-1] > tmp) DO xs[j] := xs[j-1]; DEC(j) END;
+      xs[j] := tmp;
+      INC(k)
+    END;
+
+    k := 0;
+    WHILE k + 1 < n DO
+      FOR x := xs[k] TO xs[k+1] DO PutPixel(x, y, colour) END;
+      INC(k, 2)
+    END
+  END;
+
+  DrawPoly(NumPoints, PolyPoints)
 END FillPoly;
 
+(* GetFillSettings: the current fill pattern/colour, served from the
+   CurFillPattern/CurFillColor mirror kept by SetFillStyle/SetFillPattern
+   (fillstyle, §5.1, is set-only). *)
 PROCEDURE GetFillSettings*(VAR FillInfo: FillSettingsType);
 BEGIN
+  FillInfo.Pattern := CurFillPattern;
+  FillInfo.Color := CurFillColor
 END GetFillSettings;
 
+(* GetFillPattern: the current user-defined fill pattern, served from
+   the CurFillBytes mirror kept by SetFillPattern. *)
 PROCEDURE GetFillPattern*(VAR FillPattern: FillPatternType);
+  VAR i: INTEGER;
 BEGIN
+  FOR i := 0 TO 7 DO FillPattern[i] := CurFillBytes[i] END
 END GetFillPattern;
 
 (* SetFillStyle: set the fill pattern and colour used by Bar/patbar via
@@ -709,6 +945,7 @@ PROCEDURE SetFillStyle*(Pattern, Color: WORD);
 BEGIN
   IF ~DrvLoaded THEN RETURN END;
   CurFillColor := Color;
+  CurFillPattern := Pattern;
 
   regs.AX := INTEGER(SYSTEM.AND(Pattern, 0FFH));
   regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
@@ -720,21 +957,54 @@ BEGIN
   CallDriver(DvColour, regs)
 END SetFillStyle;
 
+(* SetFillPattern: set a caller-supplied 8-byte fill pattern used by
+   Bar/patbar via the loaded driver's fillstyle routine (DDOVEC SI=0x20;
+   AL=0FFh, ES:BX=user pattern -- see DOCS/BGI.MD §5.1) plus a colour
+   resend, mirroring SetFillStyle. No-op if no driver is loaded. *)
 PROCEDURE SetFillPattern*(Pattern: FillPatternType; Color: WORD);
+  VAR regs: SYSTEM.Registers; i: INTEGER;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  CurFillColor := Color;
+  CurFillPattern := UserFill;
+  FOR i := 0 TO 7 DO CurFillBytes[i] := Pattern[i] END;
+
+  regs.AX := 0FFH;
+  regs.BX := SYSTEM.OFS(CurFillBytes);
+  regs.ES := SYSTEM.SEG(CurFillBytes);
+  regs.DS := SYSTEM.GetDS();
+  CallDriver(DvFillStyle, regs);
+
+  regs.AX := INTEGER(SYSTEM.IOR(SYSTEM.AND(CurDrawColor, 0FFH),
+                                 SYSTEM.LSL(SYSTEM.AND(Color, 0FFH), 8)));
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvColour, regs)
 END SetFillPattern;
 
+(* FloodFill: fill a bounded region containing (X,Y) with the current
+   fill colour/pattern, via the loaded driver's floodfill routine
+   (DDOVEC SI=0x2C; AX=X, BX=Y, CL=boundary colour -- see DOCS/BGI.MD
+   §5.1). No-op if no driver is loaded. *)
 PROCEDURE FloodFill*(X, Y: INTEGER; Border: WORD);
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.AX := X;
+  regs.BX := Y;
+  regs.CX := INTEGER(SYSTEM.AND(Border, 0FFH));
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvFloodFill, regs)
 END FloodFill;
 
 (* *** arc, circle, and other curves *** *)
-PROCEDURE Arc*(X, Y: INTEGER; StAngle, EndAngle, Radius: WORD);
-BEGIN
-END Arc;
-
+(* GetArcCoords: the centre and endpoints of the last Arc/Ellipse call,
+   served from the LastArcX/Y* mirror (there is no DDOVEC query for
+   this -- arc/ellipse are software-emulated here). *)
 PROCEDURE GetArcCoords*(VAR ArcCoords: ArcCoordsType);
 BEGIN
+  ArcCoords.X := LastArcX; ArcCoords.Y := LastArcY;
+  ArcCoords.Xstart := LastArcXStart; ArcCoords.Ystart := LastArcYStart;
+  ArcCoords.Xend := LastArcXEnd; ArcCoords.Yend := LastArcYEnd
 END GetArcCoords;
 
 (* PlotCircle8: plot the 8 symmetric points of (dx,dy) around centre
@@ -776,28 +1046,142 @@ BEGIN
   END
 END Circle;
 
-PROCEDURE Ellipse*(X, Y: INTEGER; StAngle, EndAngle: WORD; XRadius, YRadius: WORD);
+(* EllipsePoint: the (dx,dy) offset from centre for a given angle (in
+   degrees, standard BGI convention: 0=east, CCW positive) around an
+   ellipse of radii XRadius/YRadius, via Math.Sin/Cos. NEAR helper for
+   Ellipse/Arc/PieSlice/Sector. *)
+PROCEDURE EllipsePoint(angleDeg: INTEGER; XRadius, YRadius: WORD; VAR dx, dy: INTEGER); NEAR;
+  VAR rad: REAL;
 BEGIN
+  rad := REAL(angleDeg) * 3.14159265 / 180.0;
+  dx := Math.Round(Math.Cos(rad) * REAL(XRadius));
+  dy := -Math.Round(Math.Sin(rad) * REAL(YRadius))
+END EllipsePoint;
+
+(* Ellipse: draw an elliptical arc from StAngle to EndAngle (degrees,
+   0=east, CCW positive) centred at (X,Y), stepping one degree at a
+   time and plotting through PutPixel (itself CallDriver-backed) --
+   same software-emulation approach as Circle, generalised to unequal
+   radii and a partial angle range (arc/ellipse are normally left as
+   EMULATE in a real driver, see DOCS/BGI.MD §4.3). Also updates the
+   GetArcCoords state. No-op if no driver is loaded. *)
+PROCEDURE Ellipse*(X, Y: INTEGER; StAngle, EndAngle: WORD; XRadius, YRadius: WORD);
+  VAR a: INTEGER; dx, dy: INTEGER; colour: WORD;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  colour := CurDrawColor;
+
+  EllipsePoint(INTEGER(StAngle), XRadius, YRadius, dx, dy);
+  LastArcX := X; LastArcY := Y;
+  LastArcXStart := X + dx; LastArcYStart := Y + dy;
+  EllipsePoint(INTEGER(EndAngle), XRadius, YRadius, dx, dy);
+  LastArcXEnd := X + dx; LastArcYEnd := Y + dy;
+
+  a := INTEGER(StAngle);
+  WHILE a <= INTEGER(EndAngle) DO
+    EllipsePoint(a, XRadius, YRadius, dx, dy);
+    PutPixel(X + dx, Y + dy, colour);
+    INC(a)
+  END;
+  EllipsePoint(INTEGER(EndAngle), XRadius, YRadius, dx, dy);
+  PutPixel(X + dx, Y + dy, colour)
 END Ellipse;
 
+(* FillEllipse: fill a full ellipse (0..360 degrees) with the current
+   fill colour via a scanline pass through PutPixel, then draw its
+   outline via Ellipse -- same approach as FillPoly. No-op if no driver
+   is loaded. *)
 PROCEDURE FillEllipse*(X, Y: INTEGER; XRadius, YRadius: WORD);
+  VAR yy, halfw, px: INTEGER; xr, yr: INTEGER; colour: WORD;
 BEGIN
+  IF (~DrvLoaded) OR (XRadius = 0) OR (YRadius = 0) THEN RETURN END;
+  colour := CurFillColor;
+  xr := INTEGER(XRadius); yr := INTEGER(YRadius);
+
+  FOR yy := -yr TO yr DO
+    halfw := Math.Round(REAL(xr) * Math.Sqrt(1.0 - (REAL(yy) * REAL(yy)) / (REAL(yr) * REAL(yr))));
+    FOR px := X - halfw TO X + halfw DO PutPixel(px, Y + yy, colour) END
+  END;
+
+  Ellipse(X, Y, 0, 360, XRadius, YRadius)
 END FillEllipse;
 
+(* Arc: draw a circular arc of the given radius from StAngle to
+   EndAngle (degrees, 0=east, CCW positive) centred at (X,Y), via
+   Ellipse with the Y radius adjusted by the current aspect ratio
+   (AspX/AspY) so the arc traces a true circle on non-square-pixel
+   hardware -- same aspect adjustment a real BGI app would apply by
+   hand (see DOCS/BGI.MD §8). No-op if no driver is loaded. *)
+PROCEDURE Arc*(X, Y: INTEGER; StAngle, EndAngle, Radius: WORD);
+  VAR yr: WORD;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  IF AspY = 0 THEN yr := Radius
+  ELSE yr := WORD((LONGINT(Radius) * LONGINT(AspX)) DIV LONGINT(AspY))
+  END;
+  Ellipse(X, Y, StAngle, EndAngle, Radius, yr)
+END Arc;
+
+(* GetAspectRatio: the current pixel aspect ratio, served from the
+   AspX/AspY mirror kept by SetAspectRatio -- the driver exposes no
+   DDOVEC query for hardware geometry, see the AspX/AspY declaration. *)
 PROCEDURE GetAspectRatio*(VAR Xasp, Yasp: WORD);
 BEGIN
+  Xasp := AspX; Yasp := AspY
 END GetAspectRatio;
 
+(* SetAspectRatio: set the pixel aspect ratio used by Circle/Arc/
+   Ellipse/PieSlice/Sector to keep curves round on non-square-pixel
+   hardware. Not a DDOVEC driver primitive -- tracked here and applied
+   by the software curve routines, mirroring the real BGI kernel. *)
 PROCEDURE SetAspectRatio*(Xasp, Yasp: WORD);
 BEGIN
+  AspX := Xasp; AspY := Yasp
 END SetAspectRatio;
 
+(* WedgePoly: build a filled-wedge polygon (centre + points along the
+   elliptical arc from StAngle to EndAngle, one every 4 degrees to stay
+   within the 64-point buffer) and fill+outline it via FillPoly/
+   DrawPoly.  NEAR helper for PieSlice/Sector. *)
+PROCEDURE WedgePoly(X, Y: INTEGER; StAngle, EndAngle, XRadius, YRadius: WORD); NEAR;
+  VAR pts: ARRAY 47 OF PointType; n: WORD; a: INTEGER; dx, dy: INTEGER;
+BEGIN
+  n := 0;
+  pts[0].X := X; pts[0].Y := Y; INC(n);
+  a := INTEGER(StAngle);
+  WHILE (a < INTEGER(EndAngle)) & (n < 46) DO
+    EllipsePoint(a, XRadius, YRadius, dx, dy);
+    pts[n].X := X + dx; pts[n].Y := Y + dy; INC(n);
+    INC(a, 4)
+  END;
+  EllipsePoint(INTEGER(EndAngle), XRadius, YRadius, dx, dy);
+  pts[n].X := X + dx; pts[n].Y := Y + dy; INC(n);
+
+  LastArcX := X; LastArcY := Y;
+  LastArcXStart := pts[1].X; LastArcYStart := pts[1].Y;
+  LastArcXEnd := pts[n-1].X; LastArcYEnd := pts[n-1].Y;
+
+  FillPoly(n, pts)
+END WedgePoly;
+
+(* PieSlice: draw and fill a pie-shaped wedge (two radii + an arc) of
+   the given radius from StAngle to EndAngle (degrees) centred at
+   (X,Y), via WedgePoly. Not a DDOVEC driver primitive (arc/pieslice
+   are normally left as EMULATE, see DOCS/BGI.MD §4.3). No-op if no
+   driver is loaded. *)
 PROCEDURE PieSlice*(X, Y: INTEGER; StAngle, EndAngle, Radius: WORD);
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  WedgePoly(X, Y, StAngle, EndAngle, Radius, Radius)
 END PieSlice;
 
+(* Sector: draw and fill an elliptical pie-shaped wedge (independent X/Y
+   radii) from StAngle to EndAngle (degrees) centred at (X,Y), via
+   WedgePoly. No-op if no driver is loaded. *)
 PROCEDURE Sector*(X, Y: INTEGER; StAngle, EndAngle, XRadius, YRadius: WORD);
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  WedgePoly(X, Y, StAngle, EndAngle, XRadius, YRadius)
 END Sector;
 
 (* *** color and palette routines *** *)
@@ -835,13 +1219,33 @@ BEGIN
   RETURN CurDrawColor
 END GetColor;
 
-PROCEDURE SetAllPalette*(VAR Palette: PaletteType);
-BEGIN
-END SetAllPalette;
-
+(* SetPalette: set one palette entry via the loaded driver's palette
+   routine (DDOVEC SI=0x1A; mode 00b -- top 2 bits of AH clear -- AX=
+   index, BX=colour -- see DOCS/BGI.MD §8). On fixed-palette hardware
+   (e.g. CGA) the driver may legitimately accept-and-ignore this. No-op
+   if no driver is loaded. *)
 PROCEDURE SetPalette*(ColorNum: WORD; Color: INTEGER);
+  VAR regs: SYSTEM.Registers;
 BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.AX := INTEGER(SYSTEM.AND(ColorNum, 0FFH));
+  regs.BX := Color;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvPalette, regs)
 END SetPalette;
+
+(* SetAllPalette: load a whole palette via the loaded driver's
+   setallpalette routine (DDOVEC SI=0x1C; ES:BX=palette table pointer
+   -- see DOCS/BGI.MD §5). No-op if no driver is loaded. *)
+PROCEDURE SetAllPalette*(VAR Palette: PaletteType);
+  VAR regs: SYSTEM.Registers;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  regs.BX := SYSTEM.OFS(Palette);
+  regs.ES := SYSTEM.SEG(Palette);
+  regs.DS := SYSTEM.GetDS();
+  CallDriver(DvSetAllPal, regs)
+END SetAllPalette;
 
 PROCEDURE GetPalette*(VAR Palette: PaletteType);
 BEGIN
@@ -856,9 +1260,17 @@ PROCEDURE GetDefaultPalette*(VAR Palette: PaletteType);
 BEGIN
 END GetDefaultPalette;
 
+(* GetMaxColor: the highest valid colour index, via the loaded driver's
+   colourquery routine (DDOVEC SI=0x3A; AL=0 -> CX=max colour -- see
+   DOCS/BGI.MD §5.1). Returns 0 if no driver is loaded. *)
 PROCEDURE GetMaxColor*(): WORD;
+  VAR regs: SYSTEM.Registers;
 BEGIN
-  RETURN 0
+  IF ~DrvLoaded THEN RETURN 0 END;
+  regs.AX := 0;
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvColourQuery, regs);
+  RETURN WORD(regs.CX)
 END GetMaxColor;
 
 PROCEDURE SetRGBPalette*(ColorNum, RedValue, GreenValue, BlueValue: INTEGER);
@@ -912,38 +1324,130 @@ BEGIN
 END PutImage;
 
 (* *** text routines *** *)
+(* GetTextSettings: the current font/direction/charsize/justification,
+   served from the CurFont/CurTextDir/CurCharSize/CurHorizJust/
+   CurVertJust mirror kept by SetTextStyle/SetTextJustify (textstyle,
+   §5.1, is set-only). *)
 PROCEDURE GetTextSettings*(VAR TextInfo: TextSettingsType);
 BEGIN
+  TextInfo.Font := CurFont;
+  TextInfo.Direction := CurTextDir;
+  TextInfo.CharSize := CurCharSize;
+  TextInfo.Horiz := CurHorizJust;
+  TextInfo.Vert := CurVertJust
 END GetTextSettings;
 
-PROCEDURE OutText*(TextString: ARRAY OF CHAR);
+(* TextWidth/TextHeight: measure a string via the loaded driver's
+   textsize routine (DDOVEC SI=0x28; ES:BX=string, CX=length -> BX=
+   width, CX=height -- see DOCS/BGI.MD §5.1). Return 0 if no driver is
+   loaded. *)
+PROCEDURE TextWidth*(TextString: ARRAY OF CHAR): WORD;
+  VAR regs: SYSTEM.Registers; len: WORD;
 BEGIN
-END OutText;
-
-PROCEDURE OutTextXY*(X, Y: INTEGER; TextString: ARRAY OF CHAR);
-BEGIN
-END OutTextXY;
-
-PROCEDURE SetTextJustify*(Horiz, Vert: WORD);
-BEGIN
-END SetTextJustify;
-
-PROCEDURE SetTextStyle*(Font, Direction, CharSize: WORD);
-BEGIN
-END SetTextStyle;
-
-PROCEDURE SetUserCharSize*(MultX, DivX, MultY, DivY: WORD);
-BEGIN
-END SetUserCharSize;
+  IF ~DrvLoaded THEN RETURN 0 END;
+  len := Strings.Length(TextString);
+  regs.BX := SYSTEM.OFS(TextString);
+  regs.ES := SYSTEM.SEG(TextString);
+  regs.CX := INTEGER(len);
+  regs.DS := SYSTEM.GetDS();
+  CallDriver(DvTextSize, regs);
+  RETURN WORD(regs.BX)
+END TextWidth;
 
 PROCEDURE TextHeight*(TextString: ARRAY OF CHAR): WORD;
+  VAR regs: SYSTEM.Registers; len: WORD;
 BEGIN
-  RETURN 0
+  IF ~DrvLoaded THEN RETURN 0 END;
+  len := Strings.Length(TextString);
+  regs.BX := SYSTEM.OFS(TextString);
+  regs.ES := SYSTEM.SEG(TextString);
+  regs.CX := INTEGER(len);
+  regs.DS := SYSTEM.GetDS();
+  CallDriver(DvTextSize, regs);
+  RETURN WORD(regs.CX)
 END TextHeight;
 
-PROCEDURE TextWidth*(TextString: ARRAY OF CHAR): WORD;
+(* OutText: render TextString at the current pointer (CP) via the
+   loaded driver's text routine (DDOVEC SI=0x26; ES:BX=string, CX=
+   length -- see DOCS/BGI.MD §5.1). Justification (SetTextJustify) is
+   not applied -- the driver always renders left/top-anchored at CP; see
+   OutTextXY for justified placement. No-op if no driver is loaded. *)
+PROCEDURE OutText*(TextString: ARRAY OF CHAR);
+  VAR regs: SYSTEM.Registers; len: WORD;
 BEGIN
-  RETURN 0
-END TextWidth;
+  IF ~DrvLoaded THEN RETURN END;
+  len := Strings.Length(TextString);
+  regs.BX := SYSTEM.OFS(TextString);
+  regs.ES := SYSTEM.SEG(TextString);
+  regs.CX := INTEGER(len);
+  regs.DS := SYSTEM.GetDS();
+  CallDriver(DvText, regs)
+END OutText;
+
+(* OutTextXY: render TextString at (X,Y), honouring the current
+   justification (CurHorizJust/CurVertJust) by offsetting the CP before
+   calling the driver's text routine -- mirrors how the real BGI kernel
+   applies justification (the driver itself always renders left/top-
+   anchored at CP, per §5.1). No-op if no driver is loaded. *)
+PROCEDURE OutTextXY*(X, Y: INTEGER; TextString: ARRAY OF CHAR);
+  VAR w, h: WORD; ox, oy: INTEGER;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  w := TextWidth(TextString);
+  h := TextHeight(TextString);
+  ox := X; oy := Y;
+  IF CurHorizJust = CenterText THEN ox := X - INTEGER(w) DIV 2
+  ELSIF CurHorizJust = RightText THEN ox := X - INTEGER(w)
+  END;
+  IF CurVertJust = CenterText THEN oy := Y - INTEGER(h) DIV 2
+  ELSIF CurVertJust = BottomText THEN oy := Y - INTEGER(h)
+  END;
+  MoveTo(ox, oy);
+  OutText(TextString)
+END OutTextXY;
+
+(* SetTextJustify: set the horizontal/vertical anchor OutTextXY applies
+   around its (X,Y) point. Not a DDOVEC driver primitive (the driver
+   always renders left/top-anchored at CP, per §5.1) -- tracked here and
+   applied by OutTextXY, mirroring the real BGI kernel. *)
+PROCEDURE SetTextJustify*(Horiz, Vert: WORD);
+BEGIN
+  CurHorizJust := Horiz;
+  CurVertJust := Vert
+END SetTextJustify;
+
+(* SetTextStyle: set the font, direction, and character size used by
+   OutText/OutTextXY/textsize via the loaded driver's textstyle routine
+   (DDOVEC SI=0x24; AL=font, AH=dir, BX=xsize, CX=ysize -- see
+   DOCS/BGI.MD §5.1). No-op if no driver is loaded. *)
+PROCEDURE SetTextStyle*(Font, Direction, CharSize: WORD);
+  VAR regs: SYSTEM.Registers;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  CurFont := Font; CurTextDir := Direction; CurCharSize := CharSize;
+
+  regs.AX := INTEGER(SYSTEM.IOR(SYSTEM.AND(Font, 0FFH),
+                                 SYSTEM.LSL(SYSTEM.AND(Direction, 0FFH), 8)));
+  regs.BX := INTEGER(CharSize);
+  regs.CX := INTEGER(CharSize);
+  regs.DS := SYSTEM.GetDS(); regs.ES := SYSTEM.GetES();
+  CallDriver(DvTextStyle, regs)
+END SetTextStyle;
+
+(* SetUserCharSize: set a custom character magnification via the ratio
+   MultX/DivX (width) and MultY/DivY (height), by resending textstyle
+   with a scale derived from MultY/DivY (the driver's textstyle only
+   accepts one scale factor -- see §5.1's "Bitmap-font size/scaling"
+   note -- so this approximates the two independent Pascal ratios with
+   one). No-op if no driver is loaded. *)
+PROCEDURE SetUserCharSize*(MultX, DivX, MultY, DivY: WORD);
+  VAR scale: WORD;
+BEGIN
+  IF ~DrvLoaded THEN RETURN END;
+  IF DivY = 0 THEN RETURN END;
+  scale := MultY DIV DivY;
+  IF scale = 0 THEN scale := 1 END;
+  SetTextStyle(CurFont, CurTextDir, scale)
+END SetUserCharSize;
 
 END Graph.
