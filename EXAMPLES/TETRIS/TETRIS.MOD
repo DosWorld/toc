@@ -1,4 +1,4 @@
-(*
+(*$D+*)(*
   Tetris for CGA (mode 4, 320x200 4-colour)
 
   The game logic is pure Oberon.  Only the per-frame CGA sprite blitter is
