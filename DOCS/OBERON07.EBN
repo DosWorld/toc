@@ -86,7 +86,13 @@ mem_spec    = integer "," integer "," integer .
                                    ($D+ — module/source/symbol/line records) or 0-byte
                                    ($D- — no debug info).  At link time `oc /G /ENTRY=...`
                                    merges the non-empty .DBG members into a Borland
-                                   TDS v2.08 block appended to the .exe (see dbg.md). *) .
+                                   TDS v2.08 block appended to the .exe (see dbg.md). *)
+            | "O" ("+" | "-") (* $O+ mark this module overlay-eligible; $O- disable
+                                   (default). State-only: parses and combines with
+                                   ',' like $A/$R/$D, but currently has no codegen
+                                   or linker effect -- see OVR-PLAN.MD for the
+                                   planned compiler/linker support this directive
+                                   is reserved for. *) .
 
 (* Keywords (all uppercase, not valid identifiers) *)
 keyword     = "ARRAY" | "BEGIN" | "BY" | "CASE" | "CONST" | "DIV" | "DO"

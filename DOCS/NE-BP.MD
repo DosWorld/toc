@@ -285,13 +285,15 @@ so we need not generate them.
 ## Part 2 — This project's implementation (`SRC/TOC/LINKNE.MOD`)
 
 **Status: ARCHIVED — CONFIRMED WORKING END-TO-END ON REAL DPMI16 HARDWARE
-(2026-08-05)**, via the HX-DOS extender. `BIN/TOC286.EXE` (the same compiler
-as `TOC.EXE`, linked `/CP` instead of `/CD` — see `SRC/TOC/TOC286.MOD`)
-compiles and links correctly under DPMI16, with zero heap leaks, and
-**self-hosts** (compiling its own sources) correctly on real DPMI16 hardware.
-See §2.4 for the five real-hardware bugs found and fixed getting here. This
-target is considered complete; no further DPMI16-specific work is planned
-unless a new bug surfaces.
+(2026-08-05, re-confirmed 2026-08-06 after bug #6)**, via the HX-DOS
+extender. `BIN/TOC286.EXE` (the same compiler as `TOC.EXE`, linked `/CP`
+instead of `/CD` — see `SRC/TOC/TOC286.MOD`) compiles and links correctly
+under DPMI16, with zero heap leaks, and **self-hosts** (compiling its own
+sources) correctly on real DPMI16 hardware. See §2.4 for the six
+real-hardware bugs found and fixed getting here (five during initial
+bring-up, a sixth found from real-hardware use after archival). This target
+is considered complete; no further DPMI16-specific work is planned unless a
+new bug surfaces.
 
 ### 2.1 What matches the BPC reference exactly
 
@@ -471,6 +473,61 @@ unrelated compiler logic (crash `EIP` landed inside `SYSTEM_IsDPMI`, called
 transitively via `EMS.EMS_Detect`, which every module's `__init` reaches).
 Fixed directly by the maintainer.
 
+**Bug #6 — `SYSTEM.ASM` `SYSTEM_Intr` and `PARSER.MOD`'s `__init` guard both
+wrote/read through the execute-only CS selector (found 2026-08-06, after
+archival; reported from real-hardware use rather than bring-up testing).**
+Two independent sites, both invisible to `xt` (same structural blind spot as
+bugs #1-5 — NE binaries cannot execute there):
+
+- `SYSTEM_Intr`'s real-mode implementation self-patched the `int_ins`
+  opcode's immediate INT-number byte via `mov [cs:int_ins+1], al`, and
+  saved/restored `SS:SP` around the `int` instruction via CS-relative
+  `saved_ss`/`saved_sp` words — both writes, both fatal under DPMI16's
+  execute-only code descriptor. An initial attempt to patch this in place
+  (routing the write through a data-segment alias of CS, `csAliasSel`, set
+  up once by `SYSTEM_DPMI_INIT`) regressed **real mode** twice: the shared
+  save/restore logic needed `DX`/`DS` as scratch registers at points where
+  they already held live caller arguments (e.g. a `Files.Create` call's
+  `DS:DX` filename pointer), silently corrupting them and producing
+  `xt`-visible real-mode crashes/parse failures — confirmed via `xt trace`
+  register dumps. Root cause of the regression: real mode and DPMI16 have
+  fundamentally different constraints here (CS is always safe in real mode,
+  never safe under DPMI16), so one shared code path trying to serve both
+  couldn't be patched incrementally without breaking one side or the other.
+  **Fix: `SYSTEM_Intr` is now a thin dispatcher over two independent
+  bodies** — `IntrReal` (byte-for-byte the original, long-proven real-mode
+  implementation, untouched) and `IntrDpmi` (a from-scratch DPMI16
+  implementation using `INT 31h/AX=0300h`, DPMI 0.9's "Simulate Real Mode
+  Interrupt" translation service — see DOCS/DPMI09.HTM §11.1). `IntrDpmi`
+  builds a Real Mode Call Structure (RMCS, a flat 50-byte in-memory
+  register-passing structure) and lets the DPMI host itself perform the
+  real-mode switch, interrupt dispatch, and register marshaling — this
+  needs no self-modifying code, no `SS:SP` save/restore, and no CS access
+  of any kind, eliminating the whole register-preservation problem rather
+  than working around it. The now-unused `csAliasSel` alias-descriptor
+  mechanism (allocation in `SYSTEM_DPMI_INIT`, teardown in `dpmi_done`) was
+  removed as dead code.
+- `PARSER.MOD`'s compiler-generated `__init` guard (present in every
+  compiled module with imports or a body — i.e. nearly universal) used a
+  CS-relative word (`CS: CMP word [guardOfs], 0` / `CS: INC word
+  [guardOfs]`) to detect re-entrant initialization, both reads *and*
+  writes. This is more severe than the `SYSTEM_Intr` bug in blast radius —
+  it fires on essentially every real DPMI16 program's very first module
+  init, not just processes that call `SYSTEM.Intr`. Fixed by moving the
+  guard word into the module's own `SegData` (accessed the same way every
+  other global is) instead of the code segment; required loading `DS` to
+  the module's own data segment *before* the guard check rather than after
+  (the original ordering relied on the early-return path never needing a
+  matching `POP DS`, since DS hadn't been touched yet at that point — the
+  new ordering adds that `POP DS` to the early-return path too).
+
+Both fixes verified: `make test` green (429 rows), `test_tasm.sh` 113/113
+including a real-NASM byte-identity check of `SYSTEM.ASM` (TASM's own
+assembly of the new `IntrReal`/`IntrDpmi` split matches real NASM's output
+exactly), self-host `toc1.exe == toc2.exe` byte-identical with all 11
+compiler module `.om`s byte-identical, and **confirmed working on real
+DPMI16 hardware** by the maintainer.
+
 ### 2.5 Building and testing `/CP`
 
 `make`/`make test`/`make testall` build and test **only** `TOC.EXE` (`/CD`,
@@ -495,16 +552,62 @@ archived**:
 - The full self-hosted compiler (51+ NE segments) links, runs, and
   **self-hosts** (compiles its own sources) correctly on real DPMI16
   hardware via HX-DOS, with zero heap leaks confirmed across the whole run.
-- All five bugs found during bring-up (§2.4) are fixed and covered by either
-  the in-repo manifest (`ne/cp-*` structural rows, unaffected by any of
-  these bugs since they only manifest at DPMI16 runtime) or real-hardware
-  verification (heap-leak reproducer for #1-3; the double-free and
-  wrong-segment-read bugs #4-5 were only reproducible by running the actual
-  compiler under DPMI16, since `xt` cannot execute NE binaries).
-- No further DPMI16-specific work is planned unless a new bug surfaces.
+- All six bugs found so far (§2.4) are fixed: the five found during initial
+  bring-up (#1-5), plus a sixth (#6, `SYSTEM_Intr`/`__init` guard CS
+  writes) found 2026-08-06 from real-hardware use after archival and fixed
+  the same day, confirmed working on real DPMI16 hardware. All are covered
+  by either the in-repo manifest (`ne/cp-*` structural rows, unaffected by
+  any of these bugs since they only manifest at DPMI16 runtime) or
+  real-hardware verification (heap-leak reproducer for #1-3; the
+  double-free, wrong-segment-read, and CS-write bugs #4-6 were only
+  reproducible by running the actual compiler under DPMI16, since `xt`
+  cannot execute NE binaries).
+- No further DPMI16-specific work is planned unless a new bug surfaces —
+  the archive-and-fix-as-found pattern from bug #6 is expected to continue
+  to apply to anything still undiscovered, since `xt`'s inability to
+  execute NE binaries means this target's dev loop cannot pre-empt every
+  DPMI16-only bug before real hardware exposes it.
   **Segment model** remains per-module by design (not BPC's fixed 4) — see
   §2.2 — this is a deliberate, permanent difference, not a TODO.
 - A dedicated large/many-segment fixture in the in-repo test suite (beyond
   manual real-hardware runs) would still be a nice-to-have for future
   regression coverage, since `xt` cannot exercise `/CP` execution at all —
   but is not required given the target is now confirmed working end-to-end.
+
+### 2.7 CS-write audit (2026-08-06, post-bug-#6)
+
+Following bug #6, a full sweep of `SRC/LIB/` and `SRC/TOC/` was done to
+confirm no other write-through-CS access exists anywhere in the runtime
+library or the compiler's own codegen — the DPMI16 hazard bug #6 fixed is a
+*class* of bug (any `[cs:xxx]` write faults under DPMI16's execute-only code
+descriptor), not a one-off, so the whole codebase needed checking, not just
+the two sites already found.
+
+**Method:** grepped every `.ASM` file in `SRC/LIB/` for `cs:` segment
+overrides, every `.MOD` file in `SRC/LIB/` and `SRC/TOC/` for the raw
+`02EH`/`0x2E` CS-prefix opcode byte (however it reaches codegen — literal
+byte emission, `EmitCodeStr`, etc.), and cross-checked every hit's call
+graph for DPMI16 reachability.
+
+**Findings — every CS-relative access in the codebase:**
+
+| Site | File | Access | DPMI16-reachable? | Verdict |
+|---|---|---|---|---|
+| `MemStartSeg` (6 sites: 1 write, 5 reads) — **moved to `.data`, 2026-08-06** | `SYSTEM.ASM` | was write + read via CS, now via `ES`/`.data` | Was already unreachable (every site sat behind an `isDpmi` check in `SYSTEM_Alloc`/`SYSTEM_Free`/`SYSTEM_MemAvail`/`SYSTEM_MemMaxAvail`/`SYSTEM_INIT`/`dos_done`), but moved anyway per the new strong rule rather than relying on that gating staying correct forever | ✅ safe, and no longer a CS access of any kind |
+| `int_ins_real`/`saved_ss_real`/`saved_sp_real` (5 sites) | `SYSTEM.ASM`, inside `IntrReal` | write + read | No — `IntrReal` is the real-mode-only body; `IntrDpmi` (the DPMI16 body) is a separate, independent implementation using the DPMI 0.9 RMCS mechanism (§2.4 bug #6) with zero CS access of any kind | ✅ safe — and, after the `MemStartSeg` move, this is now **the only place in the entire codebase permitted to write through `[cs:xxx]`**, called out explicitly in `IntrReal`'s own header comment |
+| `push cs` (3 sites, `SYSTEM_DPMI_INIT`/`SYSTEM_INIT` setup macros) | `SYSTEM.ASM` | neither — pushes the register's *value* as a plain call argument, no memory dereference through CS | both modes | ✅ safe (not a CS-relative memory access at all) |
+| `CgJmpTableCs` (CASE statement jump-table dispatch, `CGEN.MOD`, one emission site, called from `PSTMT.MOD`'s `ParseCaseTable`) | generated into every compiled module using a CASE with a dense-enough label range | **read only** (`CS: JMP [BX+tableCodeOfs]`) | Yes — this is genuine, universal, DPMI16-reachable generated code | ✅ accepted — a read through an execute-only code descriptor is permitted by the DPMI spec; only writes fault. Deliberately left as CS-relative rather than moved to `SegData`, since (unlike the `__init` guard) the jump table's entries are code offsets that only make sense interpreted relative to CS — moving it to `SegData` would need a fundamentally different indexed-jump encoding, not a straightforward segment swap |
+
+**Conclusion: zero write-through-CS access is reachable under DPMI16 anywhere
+in `SRC/LIB/` or `SRC/TOC/`**, after bug #6's fix, and (as of 2026-08-06)
+`IntrReal` is the sole site in the entire codebase permitted to write through
+`[cs:xxx]` at all — `MemStartSeg`'s six sites were moved to `.data` even
+though they were already provably unreachable under DPMI16, to make that
+guarantee structural rather than dependent on the `isDpmi` gating staying
+correct. The only DPMI16-reachable CS-relative access left anywhere is
+`CgJmpTableCs`'s read, which is spec-legal and accepted. See the new strong
+rule in `CLAUDE.md` ("No write access to `[cs:xxx]`") — this file is the
+reference this audit was measured against and should be re-run
+(`grep -rn "cs:" SRC/LIB/*.ASM` plus a `02EH`/`0x2E` sweep of
+`SRC/LIB/*.MOD` and `SRC/TOC/*.MOD`) whenever `SYSTEM.ASM` or the compiler's
+codegen changes.

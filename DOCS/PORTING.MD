@@ -137,7 +137,7 @@ Covers a practical 8086 subset: the general-purpose/segment/string instructions
 `SECTION .text|.data|.bss`/`GLOBAL`/`EXTERN` (with `IMPORT` as a TASM-added
 synonym)/`STRUC`/`ENDSTRUC`/`RESB`/`RESW`/`RESD` (valid only inside
 `SECTION .bss`)/`%DEFINE`/`%UNDEF`/`%IFDEF`/`%ELSE`/`%ENDIF`/`%INCLUDE`/
-`%MACRO`/`%ENDMACRO`/`DB`/`DW`/`TIMES`/`EQU`, plus `SEG`/`BYTE`/`WORD`/`FAR`/
+`%MACRO`/`%ENDMACRO`/`DB`/`DW`/`DD`/`TIMES`/`EQU`, plus `SEG`/`BYTE`/`WORD`/`FAR`/
 `SHORT`/`NEAR` operand qualifiers, character-literal immediates, and
 `-Dname[=value]` CLI predefines.  `EXTERN`/`IMPORT` symbols resolve through
 RDOFF2 `RDFREC_IMPORT` records, so a `.rdf` produced by `tasm` can reference
@@ -178,6 +178,18 @@ branch target is a "target must be a label" error, not a jump to its numeric
 value.  Constant-integer RHS only (no label-address or forward-reference
 arithmetic — Simplicity First; the `.asm` files this toolchain assembles use
 `EQU`/`%define` for constants, never label math).
+
+`DB`/`DW`/`DD` value lists accept numeric literals, quoted strings (`DB`
+only — each character emitted as one byte), `EQU` constants (with an
+optional `+/-N` numeric tail, e.g. `db FOO-1`), and — `DW`/`DD` only — a
+bare label address (emitted as a width=2/width=4 relocation respectively;
+`DD`'s "32-bit address" is the label's own 16-bit in-module offset
+zero-extended into the low word — this assembler has no real 32-bit address
+space). `DB` deliberately does **not** accept a bare label: unlike `DW`/`DD`
+it has no relocation-emission path, so truncating a label's address to one
+byte would corrupt data rather than just be a feature gap; use `DW`/`DD`
+for label addresses. `TIMES n DB/DW/DD val` (single-value form only) is
+also supported.
 
 `tasm` is the tool of record for six hand-written `SRC/LIB/*.asm` files:
 `SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`,

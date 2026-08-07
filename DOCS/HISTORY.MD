@@ -786,3 +786,34 @@ successfully where `/T=com` on the same input fails with `entry point
 'start' not found`; `/T=bin`'s `/ORG=` bias is checked by comparing
 `/T=bin /ORG=100` against `/T=com`'s output byte-for-byte. `test_tlink.sh`
 → 13/0.
+
+**TASM bug report #2 fixed: `DB` rejected `EQU`-constant operands; `DD`
+directive added (2026-08-05).** `db FOO` (`FOO equ 8`) failed with
+`expected byte value in DB` while the same constant worked fine as `mov
+ax, FOO` — `PARSE.MOD`'s `ParseDbList` was a closed token-type switch
+(string/number literal only) with no identifier branch at all, not a
+failed lookup. Fixed by adding an identifier branch that resolves via
+`Sym.LookupConst`, with the same optional `+/-N` tail `ParseOperand`'s
+EQU-constant arm already supports. `DB` still deliberately rejects a bare
+*label* (only `EQU` constants) — unlike `DW`/`DD`, `DB` has no
+relocation-emission path, so truncating a label's address to one byte
+would corrupt data, not just be a gap; regression-guarded by
+`TESTS/FIX/TDBLABEL.ASM`. `DW` needed no fix (already delegated to the
+shared `ParseOperand`/`EmitDataWordMaybeLabel` path, confirmed correct for
+label-minus-constant forms like `dw XRES-1` too).
+
+`DD` did not exist and was added from scratch (`Lex.DDd`, `ParseDdList`,
+`EmitDataDWord`, `EmitDataDWordMaybeLabel`, a `TIMES n DD val` branch),
+supporting constants, `EQU` constants, and full label operands (a label's
+"32-bit address" is its 16-bit in-module offset zero-extended, emitted as
+a width=4 relocation). This surfaced a real gap in `SRC/TLINK/TLINK.MOD`:
+`PatchMem` had **no `width=4` branch at all** — any non-1 width was
+silently patched as width=2, corrupting the high word of every
+`DD`-with-label relocation. Fixed by adding a `PatchMem4` helper (32-bit
+additive patch, existing addend read back as one `LONGINT` so a carry out
+of the low word propagates correctly) and a `width = 4` branch in
+`PatchMem`. `SRC/TOC/LINK.MOD` (the compiler's own embedded linker) was
+left untouched — Oberon source never emits width=4 relocations. New
+fixtures: `TESTS/FIX/TDBWDD.ASM`, `TESTS/FIX/TDBLABEL.ASM`,
+`TESTS/FIX/TLKDD.ASM` (end-to-end `/T=bin /ORG=100` PatchMem4 check,
+`0x100 + 6 = 0x106`). `test_tasm.sh` → 113/0, `test_tlink.sh` → 14/0.

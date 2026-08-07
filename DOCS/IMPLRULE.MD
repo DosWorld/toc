@@ -701,6 +701,47 @@ PSP-relative).
   branch/call target emitters (`EncJmpShort`/`EncNearRel`/`EncJmpAuto`) switched
   to it, so an undefined branch target is a clean error on every path.
 
+**Bug fixed and `DD` directive added (2026-08-05, bug report #2 — `DB`
+rejected EQU-constant operands):** `PARSE.MOD`'s `ParseDbList` was a
+hand-rolled mini-parser with a closed token-type switch (string literal /
+number literal only) that structurally excluded `Scan.TIdent` entirely — not
+a failed `Sym.LookupConst` lookup, but a missing code path, so `db FOO`
+(`FOO equ 8`) failed with `expected byte value in DB` while the identical
+constant worked fine as `mov ax, FOO`. Fixed by adding an identifier branch
+that resolves via `Sym.LookupConst`, with the same optional `+/-N` numeric
+tail `ParseOperand`'s EQU-constant arm already supports (so `db FOO-1` works
+too), range-checked to -128..255 like the existing numeric-literal branches.
+`DB` still deliberately does **not** accept a bare label (only an EQU
+constant): unlike `DW`/`DD`, `DB` has no relocation-emission path, so
+silently truncating a label's 16-bit address to one byte would corrupt data,
+not just be a feature gap — regression-guarded by `TESTS/FIX/TDBLABEL.ASM`.
+`DW` needed no fix — it already delegated to the shared `ParseOperand`/
+`EmitDataWordMaybeLabel` path, which already resolved EQU constants
+(including label-minus-constant forms like `dw XRES-1`) correctly.
+
+`DD` did not exist at all and was added from scratch: `Lex.DDd` token,
+`ParseDdList`, `EmitDataDWord` (32-bit little-endian, two words), and
+`EmitDataDWordMaybeLabel` (constants, EQU constants, and full label operands
+— a label's "32-bit address" is its 16-bit in-module offset zero-extended
+into the low word, emitted with a width=4 `Rdoff.RdfAddReloc`, mirroring
+`EmitDataWordMaybeLabel`'s width=2 shape throughout), plus a `TIMES n DD
+val` branch in `DoTimes` (single-value form only, matching the existing
+`TIMES n DB/DW val` scope). This surfaced a real gap one layer down:
+`SRC/TLINK/TLINK.MOD`'s `PatchMem` had **no `width=4` branch at all** — any
+non-1 width silently patched as if it were width=2, which would have
+corrupted the high word of every `DD`-with-label relocation. Fixed by adding
+a `PatchMem4` helper (reads the existing 4-byte little-endian addend back
+into one `LONGINT` so a carry out of the low word correctly propagates into
+the high word, adds the resolved value, writes back) and a `width = 4`
+branch in `PatchMem` that calls it. `SRC/TOC/LINK.MOD` (the compiler's own
+embedded linker) was deliberately left untouched — Oberon source compiled by
+`toc.exe` never emits width=4 relocations, so its `WORD`-only
+`PatchBuf`/`PatchDataFile` have no gap to close. Regression fixtures:
+`TESTS/FIX/TDBWDD.ASM` (DB/DW/DD with EQU constants + a DD-to-label case,
+self-consistency baseline), `TESTS/FIX/TDBLABEL.ASM` (DB-rejects-label
+negative test), `TESTS/FIX/TLKDD.ASM` (end-to-end TLINK width=4 patch,
+linked `/T=bin /ORG=100`, verified `0x100 + 6 = 0x106`).
+
 ---
 
 ## DOS memory model constraints  ← CRITICAL

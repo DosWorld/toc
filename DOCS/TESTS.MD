@@ -136,7 +136,7 @@ and `testall.exe` (T5/T6 — SYSTEM.DEF absent checks).  The old
 
 A TSV-driven test runner — one row per test, no shell heredocs.  Each row
 names a fixture in `TESTS/FIX/`, optional compiler flags, an EXPECT
-predicate, and an argument.  **301 rows, all passing.**
+predicate, and an argument.  **306 rows, all passing.**
 
 Driven by two runners:
 - **Host-side (POSIX):** `make -f TESTS/Makefile.man test` — GNU make, calls xt per row.  Per-row scratch dirs are created under the project `TMP/` (not the system tmpfs); see `TMPROOT` in `TESTS/Makefile.man`.
@@ -194,6 +194,9 @@ Test categories currently covered (selection):
 - `inc-long/*` — INC/DEC carry into LONGINT high word
 - `mz/*` — MZ header min_alloc/max_alloc/SP for various `$M stack`
 - `bounds/*` — `$R+` runtime check call
+- `overlay/*` — `$O+`/`$O-` directive: parses standalone and chained with
+  other toggles (`$O+,R+`), rejects a value with no `+`/`-`; state-only for
+  now, no codegen/linker effect (see `OVR-PLAN.MD` §3.1, §7 step 1)
 - `dbg/*` — `$D+` debug-info collection (`MODNAME.DBG` member present + contains
   the module ident; a no-`$D` module's `.DBG` has no content) and `/G` link
   (`dbg/link-g-runs`: flags column `/G /ENTRY=Run`, exe still exits 0).
@@ -210,7 +213,7 @@ form and survives all codegen reshuffles.
 
 ## Integration tests
 
-All integration tests are now in `TESTS/MANIFEST.TSV` (301 rows) or run by
+All integration tests are now in `TESTS/MANIFEST.TSV` (306 rows) or run by
 `BIN/TESTALL.EXE` (Section 17/18 executables + SYSTEM.DEF artefact checks).
 The old bash drivers (`test_src.sh`, `test_system_intrinsics.sh`) have been deleted —
 their content is fully covered by the manifest and testall.
@@ -534,12 +537,21 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
     `/T=bin`'s "never emit a stub" rule) while the default-org `/T=bin`
     output differs from both. `/T=bin` itself lives in
     `SRC/TLINK/BIN.MOD` (module `Bin`), not `TLINK.MOD`.
+12. `PatchMem4` / width=4 relocation (`TESTS/FIX/TLKDD.ASM`, 2026-08-05):
+    assembles a `dd target` (TASM's `DD`-with-label form, a width=4 RELOC —
+    see the TASM section below), links it `/T=bin /ORG=100`, and checks the
+    patched dword at the reloc site is `0x00000106` (`0x100` org bias +
+    `target`'s own nonzero in-module offset `6`). Regression for
+    `TLINK.MOD`'s `PatchMem`, which previously had no `width=4` branch at
+    all and silently treated any non-1/2 width as width=2 — corrupting the
+    high word of every DD-with-label relocation instead of patching all 4
+    bytes as one additive 32-bit sum (see `PatchMem4`).
 
 Run as part of `make test`, or standalone:
 
 ```bash
 bash TESTS/test_tlink.sh
-# Results: 13 passed, 0 failed
+# Results: 14 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
@@ -557,7 +569,7 @@ Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
 `TESTS/test_tasm.sh` verifies `SRC/TASM/` (the self-hosted NASM-subset assembler,
 `.asm`→RDOFF2 `.rdf`, see `DOCS/PORTING.MD` §1.6) by byte-diffing
-its output against expected `.rdf` files. 111 checks total as of
+its output against expected `.rdf` files. 113 checks total as of
 2026-08-05 (see `SRC/TASM/TASM.MD` for the full bug-fix/feature history
 behind each batch — the four categories below cover the original 16;
 everything added since is a per-bug or per-feature regression row, not
@@ -577,7 +589,20 @@ actual-parameter/`%define`-body re-serialiser in `PARSE.MOD`, previously
 rejected `TString` outright with "unsupported token in macro argument".
 `TDEFBADTOK.ASM` (the original BUG B5 regression fixture) switched its
 still-unsupported-token probe from a string literal to `(`, since a
-string literal is no longer unsupported.
+string literal is no longer unsupported. `TDBWDD.ASM` and `TDBLABEL.ASM`
+(2026-08-05, bug report #2: `DB` rejected EQU-constant operands —
+`ParseDbList` was a closed token-type switch (string/number only) with no
+identifier branch at all — fixed by adding one that resolves via
+`Sym.LookupConst`, same optional `+/-N` tail `DW`'s existing
+`ParseOperand`-delegated path already supported; `DD` added from scratch,
+supporting constants, EQU constants, and full label operands via a
+width=4 relocation. `TDBWDD.ASM` covers `DB`/`DW`/`DD` with EQU constants
+and a `DD`-to-label case; `TDBLABEL.ASM` is the negative-path regression
+confirming `DB` still rejects a bare label — unlike `DW`/`DD`, `DB` has no
+relocation-emission path, so silently truncating a label's address to one
+byte would corrupt data. See `DOCS/IMPLRULE.MD` §"TASM — design decisions
+and known limitations" for the full writeup and `TESTS/FIX/TLKDD.ASM`
+(TLINK regression test above) for the matching linker-side fix.
 
 1. Builds `TASM.exe` via `BOOT/TOC.EXE` (single-process `/ENTRY=Run`, same pattern as the
    compiler's own self-host).
@@ -621,7 +646,7 @@ Run as part of `make test` (see `Makefile`'s `test:` target), or standalone:
 
 ```bash
 bash TESTS/test_tasm.sh
-# Results: 111 passed, 0 failed
+# Results: 113 passed, 0 failed
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
