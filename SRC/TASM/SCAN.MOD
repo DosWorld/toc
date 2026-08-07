@@ -26,6 +26,8 @@ CONST
   TRparen*  = 20;
   TSlash*   = 21;    (* '/' -- integer division in a constant expression,
                          e.g. RESW's count operand *)
+  TShl*     = 22;    (* '<<' -- left shift in a constant expression *)
+  TShr*     = 23;    (* '>>' -- right shift in a constant expression *)
 
   TError*   = 99;
 
@@ -406,6 +408,16 @@ BEGIN
   ELSIF s.ch = 47 THEN NextCh(s); s.sym := TSlash   (* / *)
   ELSIF s.ch = 40 THEN NextCh(s); s.sym := TLparen
   ELSIF s.ch = 41 THEN NextCh(s); s.sym := TRparen
+  ELSIF s.ch = 60 THEN   (* '<' -- only meaningful doubled, as '<<' (shift) *)
+    NextCh(s);
+    IF s.ch = 60 THEN NextCh(s); s.sym := TShl
+    ELSE LogErr.ErrorInFile(s.fname, s.line, "'<' is only valid doubled as '<<'"); s.sym := TError
+    END
+  ELSIF s.ch = 62 THEN   (* '>' -- only meaningful doubled, as '>>' (shift) *)
+    NextCh(s);
+    IF s.ch = 62 THEN NextCh(s); s.sym := TShr
+    ELSE LogErr.ErrorInFile(s.fname, s.line, "'>' is only valid doubled as '>>'"); s.sym := TError
+    END
   ELSIF s.ch = 34 THEN ScanString(s, 34)   (* " *)
   ELSIF s.ch = 39 THEN ScanString(s, 39)   (* ' *)
   ELSE

@@ -386,6 +386,135 @@ BEGIN
   END
 END SingleRegAm;
 
+(* ---- shared constant/label expression evaluator ----
+   One recursive-descent evaluator (unary '-', '*'/'/' , '+'/'-', parens)
+   reused by ParseOperand's parenthesized-immediate form, ParseMemBody's
+   displacement, and ParseTopLevelRes's RESB/RESW/RESD count -- replacing
+   three previously separate ad-hoc flat +/- (or, for RESB/RESW/RESD,
+   +-*/  but no parens) parsers that each covered a different subset of
+   the same grammar.
+
+   Label handling: EvalFactor recognizes a bare identifier that is
+   neither an EQU constant nor found by Sym.LookupConst as a label
+   reference (address-valued, not a compile-time constant) -- it sets
+   hasLabel/labelName and returns v=0 for that factor, exactly like
+   ParseOperand's/ParseMemBody's old bare-label cases. Only ONE label
+   may appear anywhere in the expression (real NASM/TASM semantics:
+   label - label or label * label are not meaningful without WRT/SEG
+   support, which this dialect does not implement -- see DOCS's
+   Simplicity First note); EvalTerm rejects a label as either operand of
+   '*'/'/' outright (scaling/dividing an address is never valid), and
+   EvalExpr fails if a second label term appears in one '+'/'-' chain. *)
+
+(* EvalExpr is mutually recursive with EvalFactor (a parenthesized
+   sub-expression inside a factor is itself a full expression) --
+   forward-declared so EvalFactor can call it before its real body
+   appears below. *)
+PROCEDURE EvalExpr(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR); FORWARD;
+
+(* EvalFactor: number, EQU constant, bare label, or "( expr )". *)
+PROCEDURE EvalFactor(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
+  VAR cval: LONGINT;
+BEGIN
+  v := LONGINT(0); hasLabel := FALSE; labelName[0] := 0X;
+  IF tSym = Scan.TInt THEN
+    v := tIval; TokNext
+  ELSIF tSym = Scan.TLparen THEN
+    TokNext;
+    EvalExpr(v, hasLabel, labelName);
+    IF tSym = Scan.TRparen THEN TokNext ELSE Fail("expected ')'") END
+  ELSIF (tSym = Scan.TIdent) & Sym.LookupConst(tIdOrig, cval) THEN
+    v := cval; TokNext
+  ELSIF tSym = Scan.TIdent THEN
+    (* bare label: address-valued, not a compile-time constant -- v stays
+       0, hasLabel/labelName carry the reference (same contract as
+       ParseOperand's/ParseMemBody's pre-existing bare-label handling). *)
+    Strings.Copy(tIdOrig, labelName); hasLabel := TRUE;
+    Sym.ReserveLabel(labelName); TokNext
+  ELSE
+    Fail("expected integer, EQU constant, label, or '('")
+  END
+END EvalFactor;
+
+(* EvalTerm: left-to-right chain of '*'/'/'/'%' (multiplication,
+   division, modulo -- NASM's own precedence tier, all higher than
+   '<<'/'>>' and '+'/'-') over EvalFactor terms. A label can only ever
+   be an additive term (see header comment) -- all three operands of
+   this tier must be pure constants; a '%' reaching here is always the
+   modulo operator, never a preprocessor directive (ParseLine only ever
+   tests for a line-LEADING TPercent, dispatching to
+   TryPercentDirective before any expression parsing begins -- see
+   ParseLine's own header comment -- so a TPercent surfacing mid-
+   expression here cannot be anything else). *)
+PROCEDURE EvalTerm(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR; op: INTEGER;
+BEGIN
+  EvalFactor(v, hasLabel, labelName);
+  WHILE (tSym = Scan.TStar) OR (tSym = Scan.TSlash) OR (tSym = Scan.TPercent) DO
+    IF hasLabel THEN Fail("a label cannot be scaled, divided, or used with '%' in an expression"); RETURN END;
+    op := tSym; TokNext; EvalFactor(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN
+      Fail("a label cannot be scaled, divided, or used with '%' in an expression"); RETURN
+    END;
+    IF op = Scan.TStar THEN
+      v := v * rhs
+    ELSIF op = Scan.TSlash THEN
+      IF rhs = LONGINT(0) THEN Fail("division by zero in expression"); RETURN END;
+      v := v DIV rhs
+    ELSE
+      IF rhs = LONGINT(0) THEN Fail("modulo by zero in expression"); RETURN END;
+      v := v MOD rhs
+    END
+  END
+END EvalTerm;
+
+(* EvalShift: left-to-right chain of '<<'/'>>' over EvalTerm terms --
+   NASM's precedence tier just below '*'/'/'/'%', just above '+'/'-'.
+   A label cannot be shifted (same reasoning as EvalTerm's '*'/'/'/'%'
+   rejection). SYSTEM.LSL/SYSTEM.LSR (already used elsewhere in this
+   codebase, e.g. Turbo.MOD's Pow2) are the logical shift primitives --
+   NASM's own '<<'/'>>' are logical (unsigned), not arithmetic, shifts. *)
+PROCEDURE EvalShift(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR; isShl: BOOLEAN;
+BEGIN
+  EvalTerm(v, hasLabel, labelName);
+  WHILE (tSym = Scan.TShl) OR (tSym = Scan.TShr) DO
+    IF hasLabel THEN Fail("a label cannot be shifted in an expression"); RETURN END;
+    isShl := (tSym = Scan.TShl); TokNext; EvalTerm(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN Fail("a label cannot be shifted in an expression"); RETURN END;
+    IF isShl THEN v := SYSTEM.LSL(v, INTEGER(rhs)) ELSE v := SYSTEM.LSR(v, INTEGER(rhs)) END
+  END
+END EvalShift;
+
+(* EvalExpr: left-to-right chain of '+'/'-' over EvalShift terms, with at
+   most one label term across the whole chain (folded into
+   hasLabel/labelName; a second label term is a hard error, since this
+   dialect has no two-symbol-difference relocation support -- see
+   DOCS/IMPLRULE.MD-style Simplicity First scoping note above). Unary
+   '-' is handled here (not in EvalFactor) so "-(2+3)" and "-label" both
+   work via the same leading-minus check as the old flat parsers. *)
+PROCEDURE EvalExpr;
+  VAR rhs: LONGINT; rhsHasLabel, isPlus, leadNeg: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  leadNeg := FALSE;
+  IF tSym = Scan.TMinus THEN leadNeg := TRUE; TokNext END;
+  EvalShift(v, hasLabel, labelName);
+  IF leadNeg THEN
+    IF hasLabel THEN Fail("a label cannot be negated in an expression"); RETURN END;
+    v := -v
+  END;
+  WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+    isPlus := (tSym = Scan.TPlus); TokNext;
+    EvalShift(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN
+      IF hasLabel THEN Fail("only one label is allowed in an expression"); RETURN END;
+      IF ~isPlus THEN Fail("a label cannot be subtracted in an expression"); RETURN END;
+      hasLabel := TRUE; Strings.Copy(rhsName, labelName)
+    END;
+    IF isPlus THEN v := v + rhs ELSE v := v - rhs END
+  END
+END EvalExpr;
+
 (* ---- operand parsing ----
    ParseMemBody parses the contents of [ ... ] (after the '[' has been
    consumed by the caller, up to but not including ']'), filling `op` as
@@ -394,7 +523,12 @@ END SingleRegAm;
    NAME.field struct-offset constant (resolved via Dir.TryResolveField) or
    a %define'd numeric token (already expanded by TokNext by the time we
    see it) or a bare label (data/code address, becomes
-   hasLabel+labelName). *)
+   hasLabel+labelName). Full constant arithmetic (+-*/%<<>>, parens)
+   around the label/disp is handled per-term by EvalShift (this loop's
+   own '+'/'-' handles the top-level additive chain, matching
+   OperandExprTail's shape, since registers can appear between the
+   '+'s and are not expression terms); base/index register scanning
+   here is addressing-mode-specific and stays its own loop. *)
 PROCEDURE ParseMemBody(VAR op: Enc.Operand);
   VAR size, reg: INTEGER; isSeg: BOOLEAN;
       marker1, marker2: INTEGER;
@@ -403,6 +537,7 @@ PROCEDURE ParseMemBody(VAR op: Enc.Operand);
       negNext: BOOLEAN;
       fieldVal: LONGINT;
       firstIdent: ARRAY Scan.MaxIdent OF CHAR;
+      termVal: LONGINT; termHasLabel: BOOLEAN; termLabel: ARRAY Sym.MaxName OF CHAR;
 BEGIN
   op.kind := Enc.OKMem; op.seg := Enc.NoSeg; op.am := Enc.AmNone;
   op.disp := LONGINT(0); op.hasLabel := FALSE; op.isFar := FALSE; op.isSegOf := FALSE;
@@ -424,9 +559,20 @@ BEGIN
   WHILE (tSym # Scan.TRbrak) & (tSym # Scan.TEof) & (tSym # Scan.TEol) DO
     IF tSym = Scan.TPlus THEN negNext := FALSE; TokNext
     ELSIF tSym = Scan.TMinus THEN negNext := TRUE; TokNext
-    ELSIF tSym = Scan.TInt THEN
-      IF negNext THEN disp := disp - tIval ELSE disp := disp + tIval END;
-      negNext := FALSE; TokNext
+    ELSIF (tSym = Scan.TInt) OR (tSym = Scan.TLparen) THEN
+      (* EvalShift handles a single '*'/'/'/'%'/'<<'/'>>' chain over
+         int/EQU/label/paren factors -- e.g. "2*4", "(N-1)*2", or
+         "1<<4" as one additive term inside [ ]. A label surfacing here
+         (e.g. "[bx+(label)]", unusual but not illegal) folds in
+         exactly like the bare-identifier label case below. *)
+      EvalShift(termVal, termHasLabel, termLabel);
+      IF termHasLabel THEN
+        IF hasLabel THEN Fail("only one label is allowed in an address expression"); RETURN END;
+        IF negNext THEN Fail("'-' before register/label in address"); RETURN END;
+        hasLabel := TRUE; Strings.Copy(termLabel, labelName)
+      END;
+      IF negNext THEN disp := disp - termVal ELSE disp := disp + termVal END;
+      negNext := FALSE
     ELSIF tSym = Scan.TIdent THEN
       IF LookupReg(tId, size, reg, isSeg) & ~isSeg & (BaseIndexOf(reg) >= 0) THEN
         (* N3/M3 fix: a register can never be legally negated on 8086 --
@@ -443,7 +589,13 @@ BEGIN
              diagnostic. *)
           Fail("too many registers in address"); RETURN
         END;
-        TokNext
+        TokNext;
+        IF tSym = Scan.TStar THEN
+          (* 8086 has no scaled-index addressing (SIB-byte scaling is an
+             80386+ feature) -- parse it far enough to give a precise
+             diagnostic instead of a confusing downstream parse error. *)
+          Fail("scaled index addressing requires 386+, not available on 8086"); RETURN
+        END
       ELSIF LookupReg(tId, size, reg, isSeg) & ~isSeg THEN
         (* M2 fix: a recognized register that is NOT usable as a base/index
            (AX/CX/DX/BX's word forms are fine via BaseIndexOf above; this
@@ -480,6 +632,7 @@ BEGIN
              no "negative address" concept; "[-label]" must fail, not
              silently become "[+label]"). *)
           IF negNext THEN Fail("'-' before register/label in address"); RETURN END;
+          IF hasLabel THEN Fail("only one label is allowed in an address expression"); RETURN END;
           hasLabel := TRUE; Strings.Copy(firstIdent, labelName)
         END
       END
@@ -520,6 +673,46 @@ BEGIN
   END
 END ParseMemBody;
 
+(* OperandExprTail: consume an optional "+/- expr" tail after an
+   already-parsed EQU-constant, bare-label, or dot-local-label immediate
+   (op.disp/op.hasLabel/op.labelName already carry the leading term),
+   folding each additive term through EvalShift (full */,%,<<,>>, parens
+   per term -- the same tier EvalExpr itself chains over, so a tail term
+   gets the identical grammar a fresh top-level expression would; only
+   EvalExpr's own leading-unary-minus special case does not apply here,
+   since the tail's operator is already the explicit '+'/'-' this loop
+   consumes). A second label appearing in the tail is rejected the same
+   way EvalExpr rejects one within a single expression -- this dialect
+   supports at most one label total in any operand. *)
+PROCEDURE OperandExprTail(VAR op: Enc.Operand);
+  VAR neg: BOOLEAN; rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
+    neg := (tSym = Scan.TMinus); TokNext;
+    EvalShift(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN
+      IF op.hasLabel THEN Fail("only one label is allowed in an expression"); RETURN END;
+      IF neg THEN Fail("a label cannot be subtracted in an expression"); RETURN END;
+      op.hasLabel := TRUE; Strings.Copy(rhsName, op.labelName)
+    END;
+    IF neg THEN op.disp := op.disp - rhs ELSE op.disp := op.disp + rhs END
+  END
+END OperandExprTail;
+
+(* ParseConstExpr: full +-*/%<<>>  and parens (via EvalExpr), for a
+   context that must resolve to a pure compile-time constant --
+   RESB/RESW/RESD counts, TIMES counts, DB values, EQU right-hand
+   sides, and %assign right-hand sides. A label term would mean
+   "reserve a label's-address worth of bytes" / "EQU name equals a
+   relocatable address", neither of which is meaningful here, so it is
+   rejected rather than silently folded to 0. *)
+PROCEDURE ParseConstExpr(VAR v: LONGINT);
+  VAR hasLabel: BOOLEAN; labelName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  EvalExpr(v, hasLabel, labelName);
+  IF hasLabel THEN Fail("a label is not allowed in this constant expression") END
+END ParseConstExpr;
+
 (* ParseOperand: parse one operand (register, memory [ ... ], immediate
    number, label-as-immediate, or `far [ ... ]` / `far mem`).  `sizeHint`
    (Enc.SzByte/SzWord/SzNone) supplies the BYTE/WORD qualifier already
@@ -529,7 +722,7 @@ END ParseMemBody;
    instruction otherwise pins it (needed for MOV [x], imm and the F6/F7/
    FE/FF unary-group forms). *)
 PROCEDURE ParseOperand(VAR op: Enc.Operand; sizeHint: INTEGER);
-  VAR size, reg, qual: INTEGER; isSeg: BOOLEAN; neg: BOOLEAN;
+  VAR size, reg, qual: INTEGER; isSeg: BOOLEAN;
       name: ARRAY Scan.MaxIdent OF CHAR; nameOrig: ARRAY Scan.MaxIdent OF CHAR;
       equVal: LONGINT;
 BEGIN
@@ -573,36 +766,28 @@ BEGIN
       (* EQU constant: a plain absolute immediate, NOT a relocated label. Its
          value is known by the time it is referenced (EQU is defined before use
          in this dialect), so it resolves the same in both passes. An optional
-         "+/- disp" tail folds into the constant, matching the label path. *)
+         "+/- expr" tail folds into the constant via EvalTerm (full */, parens
+         per term, at most one label across the whole tail), matching the
+         label path below. *)
       TokNext;
       op.kind := Enc.OKImm; op.hasLabel := FALSE; op.disp := equVal;
-      WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
-        neg := (tSym = Scan.TMinus); TokNext;
-        IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
-        IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
-        TokNext
-      END;
+      OperandExprTail(op);
       IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
       RETURN
     END;
     (* bare label used as an immediate/address value -- original case, to
        match Sym.DefineLabel's storage (see the note on the [ ] path
        above: label names are never uppercased).  Optional trailing
-       "+ disp"/"- disp" (e.g. "mov ax, __data+0", ccasm's array-address
-       form) is consumed here the same way ParseMemBody does inside [ ] --
-       without this, the leftover '+'/'-' token is never advanced past by
-       ParseInstruction/ParseLine and RunPass's main loop spins forever
-       (never reaching TEol/TEof). *)
+       "+ expr"/"- expr" (e.g. "mov ax, __data+0", ccasm's array-address
+       form, or "mov ax, table+i*4") is consumed here the same way
+       ParseMemBody does inside [ ] -- without this, the leftover
+       '+'/'-' token is never advanced past by ParseInstruction/ParseLine
+       and RunPass's main loop spins forever (never reaching TEol/TEof). *)
     TokNext;
     op.kind := Enc.OKImm; op.hasLabel := TRUE; Strings.Copy(nameOrig, op.labelName);
     op.disp := LONGINT(0);
     Sym.ReserveLabel(nameOrig);
-    WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
-      neg := (tSym = Scan.TMinus); TokNext;
-      IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
-      IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
-      TokNext
-    END;
+    OperandExprTail(op);
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
     RETURN
   ELSIF tSym = Scan.TDot THEN
@@ -613,16 +798,11 @@ BEGIN
     op.kind := Enc.OKImm; op.hasLabel := TRUE; Strings.Copy(nameOrig, op.labelName);
     op.disp := LONGINT(0);
     Sym.ReserveLabel(nameOrig);
-    (* N10 fix: mirror the bare-ident branch's "+ disp"/"- disp" chain --
+    (* N10 fix: mirror the bare-ident branch's "+ expr"/"- expr" chain --
        without this, "jmp .loop+2" fell through to the generic A2
        no-progress guard ("unexpected token at start of statement")
        instead of either working or naming the real problem. *)
-    WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
-      neg := (tSym = Scan.TMinus); TokNext;
-      IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
-      IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
-      TokNext
-    END;
+    OperandExprTail(op);
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
     RETURN
   ELSIF tSym = Scan.TLbrak THEN
@@ -639,13 +819,17 @@ BEGIN
        the memory operand's. *)
     RETURN
   ELSIF (tSym = Scan.TInt) OR (tSym = Scan.TMinus) THEN
-    neg := FALSE;
-    IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
-    IF tSym # Scan.TInt THEN Fail("expected number"); RETURN END;
-    op.kind := Enc.OKImm; op.hasLabel := FALSE;
-    IF neg THEN op.disp := -tIval ELSE op.disp := tIval END;
+    (* full +-*/%<<>>/parens grammar (EvalExpr), not just a bare (or
+       unary-minus) integer literal -- e.g. "mov ax, 7*3" or
+       "mov ax, -N" now works without needing wrapping parens, matching
+       real NASM (which does not require parens for top-level operand
+       arithmetic either). No label term here: a label starts with
+       TIdent, handled by the identifier branch above, never TInt/TMinus. *)
+    op.kind := Enc.OKImm;
+    EvalExpr(op.disp, op.hasLabel, op.labelName);
+    IF op.hasLabel THEN Fail("a label is not allowed in this constant expression"); RETURN END;
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
-    TokNext; RETURN
+    RETURN
   ELSIF tSym = Scan.TString THEN
     (* single-character literal used as an immediate, e.g. cmp byte [..], 'E' *)
     (* C7 fix: an empty string '' has tSval[0]=0X too, so the old check
@@ -656,26 +840,12 @@ BEGIN
     IF op.size = Enc.SzNone THEN op.size := Enc.SzByte END;
     TokNext; RETURN
   ELSIF tSym = Scan.TLparen THEN
-    (* parenthesized constant-arithmetic immediate, e.g. "and ax, (PageSize
-       - 1)" -- PageSize is a %define already expanded to a plain number by
-       TokNext by the time we see it here, so this only needs to sum a
-       chain of +/- terms up to the closing ')'; no label references occur
-       in this form in either oracle file (Simplicity First: general
-       expression parsing is not implemented). *)
-    TokNext;
-    op.kind := Enc.OKImm; op.hasLabel := FALSE; op.disp := LONGINT(0);
-    neg := FALSE;
-    WHILE (tSym # Scan.TRparen) & (tSym # Scan.TEol) & (tSym # Scan.TEof) DO
-      IF tSym = Scan.TPlus THEN neg := FALSE; TokNext
-      ELSIF tSym = Scan.TMinus THEN neg := TRUE; TokNext
-      ELSIF tSym = Scan.TInt THEN
-        IF neg THEN op.disp := op.disp - tIval ELSE op.disp := op.disp + tIval END;
-        neg := FALSE; TokNext
-      ELSE
-        Fail("unsupported expression inside ( )"); RETURN
-      END
-    END;
-    IF tSym = Scan.TRparen THEN TokNext ELSE Fail("expected ')'"); RETURN END;
+    (* parenthesized arithmetic immediate, e.g. "and ax, (PageSize - 1)" or
+       "mov ax, (table_end-table_start)/2" -- EvalExpr handles the full
+       +-*/ / parens grammar (and, per this dialect's scope, at most one
+       label term inside). *)
+    op.kind := Enc.OKImm;
+    EvalExpr(op.disp, op.hasLabel, op.labelName);
     IF op.size = Enc.SzNone THEN op.size := Enc.SzWord END;
     RETURN
   ELSE
@@ -827,7 +997,7 @@ END EmitDataDWordMaybeLabel;
    truncating a 16-bit address to one byte would be a real bug, not a
    feature; use DW/DD for label addresses. *)
 PROCEDURE ParseDbList;
-  VAR i: INTEGER; more, neg: BOOLEAN; equVal: LONGINT;
+  VAR i: INTEGER; more: BOOLEAN; v: LONGINT;
 BEGIN
   more := TRUE;
   WHILE more DO
@@ -835,33 +1005,19 @@ BEGIN
       i := 0;
       WHILE tSval[i] # 0X DO EmitDataByte(BYTE(ORD(tSval[i]))); INC(i) END;
       TokNext
-    ELSIF (tSym = Scan.TInt) OR (tSym = Scan.TMinus) THEN
-      IF tSym = Scan.TMinus THEN
-        TokNext;
-        IF tSym # Scan.TInt THEN Fail("expected number after '-'"); RETURN END;
-        (* C5 fix: BYTE(...) silently truncates any out-of-range value --
-           reject rather than wrap, matching NASM's warning-turned-error
-           policy for this class of surprise. *)
-        IF (tIval < 0) OR (tIval > 128) THEN Fail("DB value out of range (-128..255)"); RETURN END;
-        EmitDataByte(BYTE(-tIval)); TokNext
-      ELSE
-        IF (tIval < 0) OR (tIval > 255) THEN Fail("DB value out of range (-128..255)"); RETURN END;
-        EmitDataByte(BYTE(tIval)); TokNext
-      END
-    ELSIF (tSym = Scan.TIdent) & Sym.LookupConst(tIdOrig, equVal) THEN
-      TokNext;
-      WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
-        neg := (tSym = Scan.TMinus); TokNext;
-        IF tSym # Scan.TInt THEN Fail("expected number after '+'/'-'"); RETURN END;
-        IF neg THEN equVal := equVal - tIval ELSE equVal := equVal + tIval END;
-        TokNext
-      END;
-      IF (equVal < LONGINT(-128)) OR (equVal > LONGINT(255)) THEN
+    ELSE
+      (* ParseConstExpr: full +-*/ /parens/%define/EQU-name grammar (a DB
+         value must be a pure constant, same as RESB/RESW/RESD/EQU -- no
+         label, since a repeated/individual byte has no relocation slot
+         of its own here). *)
+      ParseConstExpr(v);
+      (* C5 fix: BYTE(...) silently truncates any out-of-range value --
+         reject rather than wrap, matching NASM's warning-turned-error
+         policy for this class of surprise. *)
+      IF (v < LONGINT(-128)) OR (v > LONGINT(255)) THEN
         Fail("DB value out of range (-128..255)"); RETURN
       END;
-      EmitDataByte(BYTE(equVal))
-    ELSE
-      Fail("expected byte value in DB"); RETURN
+      EmitDataByte(BYTE(v))
     END;
     IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
   END
@@ -1174,15 +1330,17 @@ BEGIN
   Sym.DefineMacro(name, nParams, body)
 END DoMacroRecord;
 
-(* DoTimes: TIMES n DB/DW/DD val -- since every TIMES in both oracle files
-   is `times N db 0` (a single repeated byte), this handles exactly
-   `TIMES n DB byteval` / `TIMES n DW wordval` / `TIMES n DD dwordval`
-   (single-value form only, matching actual usage -- a list form
-   `times n db a,b,c` is out of scope for v1, Simplicity First). *)
-PROCEDURE DoTimes(count: LONGINT);
+(* DoTimesTail: TIMES n DB/DW/DD val, with the repeat-count expression
+   already fully parsed (ParseConstExpr, called by the caller) and the
+   token stream positioned right at the DB/DW/DD keyword -- since every
+   TIMES in both oracle files is `times N db 0` (a single repeated
+   byte), this handles exactly `TIMES n DB byteval` / `TIMES n DW
+   wordval` / `TIMES n DD dwordval` (single-value form only, matching
+   actual usage -- a list form `times n db a,b,c` is out of scope for
+   v1, Simplicity First). *)
+PROCEDURE DoTimesTail(count: LONGINT);
   VAR kw: ARRAY Scan.MaxIdent OF CHAR; op: Enc.Operand; i: LONGINT;
 BEGIN
-  TokNext;  (* consume the count *)
   IF tSym # Scan.TIdent THEN Fail("expected DB/DW after TIMES"); RETURN END;
   Strings.Copy(tId, kw); TokNext;
   IF Strings.Equal(kw, "DB") THEN
@@ -1218,7 +1376,7 @@ BEGIN
   ELSE
     Fail("TIMES only supports DB/DW/DD in this dialect")
   END
-END DoTimes;
+END DoTimesTail;
 
 (* ParseTopLevelRes: RESB/RESW/RESD n as a statement-level directive
    inside SECTION .bss (as opposed to Dir.MOD's ParseStrucField, the same
@@ -1232,57 +1390,6 @@ END DoTimes;
    RESB/RESW/RESD in .text/.data would silently do nothing useful (no
    bytes end up in the segment stream either way), so it's rejected as a
    fatal error instead of a silent no-op. *)
-(* ParseResTerm: one signed integer literal -- the leaf of the count
-   expression grammar below. *)
-PROCEDURE ParseResTerm(VAR v: LONGINT);
-  VAR neg: BOOLEAN; cval: LONGINT;
-BEGIN
-  neg := FALSE;
-  IF tSym = Scan.TMinus THEN neg := TRUE; TokNext END;
-  IF tSym = Scan.TInt THEN
-    v := tIval; TokNext
-  ELSIF (tSym = Scan.TIdent) & Sym.LookupConst(tIdOrig, cval) THEN
-    (* an EQU constant is a legal term in a count/EQU expression *)
-    v := cval; TokNext
-  ELSE
-    Fail("expected integer or EQU constant"); RETURN
-  END;
-  IF neg THEN v := -v END
-END ParseResTerm;
-
-(* ParseResMulDiv: left-to-right chain of '*'/'/' over integer terms,
-   e.g. "32*1024/16". *)
-PROCEDURE ParseResMulDiv(VAR v: LONGINT);
-  VAR rhs: LONGINT;
-BEGIN
-  ParseResTerm(v);
-  WHILE (tSym = Scan.TStar) OR (tSym = Scan.TSlash) DO
-    IF tSym = Scan.TStar THEN
-      TokNext; ParseResTerm(rhs); v := v * rhs
-    ELSE
-      TokNext; ParseResTerm(rhs);
-      IF rhs = LONGINT(0) THEN Fail("division by zero in RESB/RESW/RESD count"); RETURN END;
-      v := v DIV rhs
-    END
-  END
-END ParseResMulDiv;
-
-(* ParseResExpr: left-to-right chain of '+'/'-' over ParseResMulDiv terms,
-   e.g. "32*1024/16+1" -- the full count-operand grammar RESB/RESW/RESD
-   accept (bare integers, optionally combined with +, -, *, / at NASM's
-   usual precedence -- no parens, matching Simplicity First: this dialect
-   only needs to size .bss buffers from simple constant arithmetic). *)
-PROCEDURE ParseResExpr(VAR v: LONGINT);
-  VAR rhs: LONGINT; isPlus: BOOLEAN;
-BEGIN
-  ParseResMulDiv(v);
-  WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
-    isPlus := (tSym = Scan.TPlus); TokNext;
-    ParseResMulDiv(rhs);
-    IF isPlus THEN v := v + rhs ELSE v := v - rhs END
-  END
-END ParseResExpr;
-
 PROCEDURE ParseTopLevelRes(d: INTEGER);
   VAR szBytes, count: LONGINT;
 BEGIN
@@ -1293,7 +1400,7 @@ BEGIN
   ELSIF d = Lex.DResw THEN szBytes := LONGINT(2)
   ELSE szBytes := LONGINT(4)
   END;
-  ParseResExpr(count);
+  ParseConstExpr(count);
   (* C6 fix: a negative count silently SHRINKS bssOfs (later labels then
      overlap earlier reservations) instead of erroring. *)
   IF count < LONGINT(0) THEN Fail("RESB/RESW/RESD count must not be negative"); RETURN END;
@@ -1307,6 +1414,7 @@ PROCEDURE TryDirective(kw: ARRAY OF CHAR): BOOLEAN;
   VAR strucName: ARRAY Sym.MaxName OF CHAR;
       more: BOOLEAN; d: INTEGER;
       fn: ARRAY 128 OF CHAR;
+      timesCount: LONGINT;
 BEGIN
   CurFname(fn);
   d := Lex.LookupDirective(kw);
@@ -1365,9 +1473,11 @@ BEGIN
   | Lex.DDd:
       ParseDdList
   | Lex.DTimes:
-      IF tSym # Scan.TInt THEN Fail("expected repeat count after TIMES")
-      ELSE DoTimes(tIval)
-      END
+      (* count is a full constant expression (ParseConstExpr: +-*/ ,
+         parens, %define/EQU names) -- e.g. "times (SIZE-1) db 0" or
+         "times ROWS*COLS dw 0", not just a bare integer literal. *)
+      ParseConstExpr(timesCount);
+      DoTimesTail(timesCount)
   | Lex.DResb, Lex.DResw, Lex.DResd:
       ParseTopLevelRes(d)
   ELSE RETURN FALSE
@@ -1442,6 +1552,27 @@ BEGIN
   RETURN TRUE
 END TokToText;
 
+(* AssignExprTail: "%assign NAME expr" -- name already consumed and
+   copied (original case) by the caller, current token is the first
+   token of expr (already macro-expanded via TokNext). Stores via
+   Sym.AssignConst (freely redefinable, unlike DoEqu's Sym.DefineConst)
+   so a %assign name is usable in a later expression exactly like an
+   EQU constant (EvalFactor's Sym.LookupConst does not distinguish the
+   two -- same SegConst storage). Skip-branch guarded the same way
+   %define is: dead code inside an untaken %ifdef/%else must not assign. *)
+PROCEDURE AssignExprTail(name: ARRAY OF CHAR);
+  VAR v: LONGINT; fn: ARRAY 128 OF CHAR;
+BEGIN
+  ParseConstExpr(v);
+  IF LogErr.HaveErr() OR anyErr THEN RETURN END;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after %assign expression"); RETURN
+  END;
+  IF ~CurrentlySkipping() THEN
+    CurFname(fn); Sym.AssignConst(name, v, fn, tLine)
+  END
+END AssignExprTail;
+
 (* ---- %-preprocessor line dispatch (a leading '%' token; consumes the
    directive keyword itself since Scan yields TPercent as a separate
    token from the following identifier). ---- *)
@@ -1469,6 +1600,17 @@ BEGIN
        reference -- the tokens must still be consumed above (to keep the
        scanner in sync) even while skipped, just not stored. *)
     IF ~CurrentlySkipping() THEN Sym.Define(name, val) END;
+    RETURN TRUE
+  ELSIF Strings.Equal(kw, "ASSIGN") THEN
+    IF tSym # Scan.TIdent THEN Fail("expected name after %assign"); RETURN TRUE END;
+    Strings.Copy(tIdOrig, name);
+    (* Unlike %define's verbatim TokToText capture, %assign's RHS is a
+       real constant expression (ParseConstExpr's full +-*/%<<>>/parens
+       grammar) and must go through the macro-expanding TokNext (not
+       RawTokNext) the same way DoEqu's RHS does, so a %define'd or
+       another %assign'd name in the RHS resolves correctly. *)
+    TokNext;
+    AssignExprTail(name);
     RETURN TRUE
   ELSIF Strings.Equal(kw, "UNDEF") THEN
     IF tSym # Scan.TIdent THEN Fail("expected name after %undef"); RETURN TRUE END;
@@ -1522,8 +1664,9 @@ BEGIN
 END IsEquNext;
 
 (* DoEqu: "NAME EQU expr" -- define NAME as a constant equal to the value of a
-   constant integer expression (the same +,-,*,/ integer grammar RESB/RESW/RESD
-   counts accept).  Implemented over the %define table: the evaluated value is
+   constant integer expression (ParseConstExpr's +-*/ /parens grammar, the
+   same one RESB/RESW/RESD counts accept -- see ParseConstExpr).  Implemented
+   over the %define table: the evaluated value is
    stored as its decimal text, so every existing reference-substitution path
    (scanner-level %define expansion) resolves NAME to the number with no new
    symbol kind, segment, or relocation needed.  `name` is the already-consumed
@@ -1536,7 +1679,7 @@ PROCEDURE DoEqu(name, nameOrig: ARRAY OF CHAR);
   VAR v: LONGINT; fn: ARRAY 128 OF CHAR;
 BEGIN
   TokNext;   (* consume EQU *)
-  ParseResExpr(v);
+  ParseConstExpr(v);
   IF LogErr.HaveErr() OR anyErr THEN RETURN END;
   IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
     Fail("unexpected text after EQU expression"); RETURN
@@ -1603,12 +1746,20 @@ BEGIN
        punctuation, not part of the name) so a later "STRUCT.field"
        lookup (also structName + "." + field, no double dot) matches. *)
     Strings.Copy(tIdOrig, nameOrig); TokNext;
+    (* An optional ':' immediately after the field name -- real NASM
+       struc syntax writes ".field: resb n" (colon required by real
+       NASM); TASM's own dialect never had the colon (".field resb n").
+       Accept both: skip it here if present, so a real-NASM-shaped
+       source (e.g. TURBO.MOD's TASM->NASM converter output) assembles
+       without a "TASM-flavor-only" hand edit. *)
+    IF tSym = Scan.TColon THEN TokNext END;
     ParseStrucField(nameOrig)
   ELSIF tSym = Scan.TIdent THEN
     IF Lex.LookupDirective(tId) = Lex.DEndstruc THEN
       TokNext; CurFname(fn); Dir.EndStruc(fn, tLine)
     ELSE
       Strings.Copy(tIdOrig, nameOrig); TokNext;
+      IF tSym = Scan.TColon THEN TokNext END;
       ParseStrucField(nameOrig)
     END
   ELSE

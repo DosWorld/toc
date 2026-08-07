@@ -22,14 +22,17 @@ XT       = xt
 # No -c: xt uses process CWD (SRC/TASM/) as the C:\ mount root, matching
 # SRC/TOC/Makefile's own rationale — the stdlib OBERON.OM lives outside
 # this dir, so it's copied locally rather than reached via a DOS path.
-XTRUN  = $(XT) run --max=300000000
+# TURBO.MOD (Turbo Assembler 5.0 -> NASM syntax converter, ~2500 lines of
+# dense line-classification logic) needs a much bigger instruction budget
+# to compile than the rest of TASM's sources.
+XTRUN  = $(XT) run --max=2000000000
 TOC = TOC.EXE
 
 # Every TASM source — dep-scan (TOC.MOD's FindSrc, CWD-only) resolves
 # these to each other automatically; Rdoff/LogErr/Strings/Files/etc. are
 # stdlib, resolved via the copied OBERON.OM only (never found as local
 # source, so treated as .OM-only imports, same as every other tool).
-TASM_SRCS = SCAN.MOD SYM.MOD ENC.MOD DIR.MOD PARSE.MOD TASM.MOD
+TASM_SRCS = SCAN.MOD SYM.MOD ENC.MOD DIR.MOD PARSE.MOD TURBO.MOD TASM.MOD
 
 all: TASM.EXE
 

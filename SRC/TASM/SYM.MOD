@@ -303,6 +303,35 @@ BEGIN
   END
 END DefineConst;
 
+(* AssignConst: register or REDEFINE a %assign constant NAME = value --
+   same SegConst storage/lookup as DefineConst (so LookupConst/EvalFactor
+   see no difference between an EQU name and a %assign name), but unlike
+   DefineConst a differing value on redefinition is NOT an error: %assign
+   is NASM's explicitly-redefinable numeric constant (distinct from
+   EQU's one-shot-per-name and %define's pure text substitution). Both
+   passes redefine identically since the RHS is evaluated fresh each
+   time from the same source text (§I.0's two-pass replay rule), so no
+   cross-pass staleness risk. A clash with a real LABEL (seg # SegConst)
+   is still rejected -- %assign redefines only its own kind. *)
+PROCEDURE AssignConst*(name: ARRAY OF CHAR; value: LONGINT; fname: ARRAY OF CHAR; line: LONGINT);
+  VAR node: LabelNode; idx: INTEGER;
+BEGIN
+  IF FindNode(name, node, idx) THEN
+    IF node^.defined[idx] & (node^.seg[idx] # SegConst) THEN
+      LogErr.ErrorInFile(fname, line, "%assign name clashes with an existing label/EQU"); RETURN
+    END;
+    node^.seg[idx] := SegConst; node^.offset[idx] := value; node^.defined[idx] := TRUE;
+    IF node^.defOrder[idx] = 0 THEN node^.defOrder[idx] := nextDefOrder; INC(nextDefOrder) END
+  ELSE
+    IF ~AppendLabelSlot(name, node, idx) THEN RETURN END;
+    node^.seg[idx] := SegConst; node^.offset[idx] := value;
+    node^.defined[idx] := TRUE; node^.isGlobal[idx] := FALSE;
+    node^.defOrder[idx] := nextDefOrder; INC(nextDefOrder);
+    node^.isExtern[idx] := FALSE; node^.importId[idx] := 0;
+    INC(node^.count); INC(nLabels)
+  END
+END AssignConst;
+
 (* LookupConst: if NAME is an EQU constant, return its value and TRUE. *)
 PROCEDURE LookupConst*(name: ARRAY OF CHAR; VAR value: LONGINT): BOOLEAN;
   VAR node: LabelNode; idx: INTEGER;
