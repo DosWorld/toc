@@ -105,8 +105,7 @@ END FindCommentStart;
 
 PROCEDURE IsIdentChar(ch: CHAR): BOOLEAN;
 BEGIN
-  RETURN (ch >= "A") & (ch <= "Z") OR (ch >= "a") & (ch <= "z")
-       OR (ch >= "0") & (ch <= "9") OR (ch = "_") OR (ch = "$")
+  RETURN SYSTEM.ISALPHA(ch) OR SYSTEM.ISDIGIT(ch) OR (ch = "_") OR (ch = "$")
        OR (ch = "?") OR (ch = "@") OR (ch = ".")
 END IsIdentChar;
 
