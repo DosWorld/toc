@@ -3,12 +3,6 @@ MODEL Small
 ;
 ; TETRIS.ASM -- CGA blitter + BIOS/port helpers for the Oberon Tetris
 ; port, written in genuine Borland Turbo Assembler 5.0 (Ideal mode) syntax.
-; This is a hand-conversion of TETRIS.ASM (NASM subset) into real TASM
-; dialect, meant as a round-trip fixture for `tasm /LNG=turbo`: converting
-; this file back should reproduce TETRIS.ASM's behavior (not its exact
-; bytes -- PROC/ARG/RET's automatic PASCAL prologue/epilogue and TURBO.MOD's
-; own translation choices don't guarantee byte-identical output, only the
-; same external calling convention and the same instructions per routine).
 ;
 ; Routines (all FAR PASCAL, matching TETRIS.MOD's `PROCEDURE ...; FAR;
 ; EXTERNAL;` declarations -- see DOCS/OBERLANG.MD "Calling convention:
@@ -29,13 +23,6 @@ MODEL Small
 ;   NoSound                         speaker gate off
 ;   SetCgaSeg(seg: INTEGER)         stash the CGA video segment for Draw
 ;
-; PROC ... PASCAL FAR + ARG generates the [bp+6..]-based ARG offsets and the
-; matching `RETF argBytes` epilogue automatically (Chapter 10 "Declaring
-; procedures" / "Calling procedures with stack frames") -- no RSIZE/RETMACRO
-; %define plumbing needed the way the NASM subset version required, since
-; TASM's own PROC header already knows FAR means a 4-byte return address.
-; ARG's VAR-param entries are declared DWORD (a 4-byte far pointer: offset
-; word then segment word, matching Oberon's VAR-param push order).
 
 DATASEG
 
@@ -44,9 +31,12 @@ cgaseg  DW  0
 CODESEG
 
 PUBLIC  Tetris_Draw, Tetris_CalcDiff
-PUBLIC  Tetris_GraphMode, Tetris_TextMode, Tetris_SetCgaPalette
-PUBLIC  Tetris_GetKey, Tetris_HasKey, Tetris_Scan, Tetris_WaitKey
-PUBLIC  Tetris_Delay, Tetris_Sound, Tetris_NoSound, Tetris_SetCgaSeg
+
+PUBLIC  Tetris_GraphMode, Tetris_TextMode
+PUBLIC  Tetris_SetCgaSeg, Tetris_SetCgaPalette
+
+PUBLIC  Tetris_HasKey, Tetris_GetKey, Tetris_Scan, Tetris_WaitKey
+PUBLIC  Tetris_Sound, Tetris_Delay, Tetris_NoSound
 
 ; -----------------------------------------------------------------------
 ; SetCgaSeg(seg: INTEGER) -- 1 scalar arg -> RETF 2.
@@ -96,7 +86,6 @@ PROC Tetris_CalcDiff PASCAL FAR
 @@cdnext:
     dec     cx
     jnz     @@cdloop
-
     RET
 ENDP
 
@@ -166,7 +155,6 @@ PROC Tetris_Draw PASCAL FAR
     add     bx, 320
     dec     dh
     jnz     @@drawrow
-
     RET
 ENDP
 
