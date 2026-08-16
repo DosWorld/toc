@@ -1,3 +1,4 @@
+(*$D-,R-,A-*)
 MODULE Base64;
 
 IMPORT Strings;

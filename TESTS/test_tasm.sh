@@ -69,6 +69,11 @@ LIBDIR="$ROOT/SRC/LIB"
 FIXDIR="$ROOT/TESTS/FIX"
 XT="${XT:-xt}"
 MAX=300000000
+# TURBO.MOD/TURBODIR.MOD (Turbo Assembler 5.0 -> NASM syntax converter,
+# backing TA2NASM.exe) need a much bigger instruction budget to COMPILE
+# than MAX is; running TASM.exe/TA2NASM.exe afterward (every check below)
+# still uses the smaller MAX.
+BUILDMAX=2000000000
 
 if ! command -v "$XT" >/dev/null 2>&1; then
     echo "SKIP: xt emulator not found — set XT=/path/to/xt to enable the TASM test"
@@ -166,9 +171,14 @@ cp "$FIXDIR/TMACRECUR.ASM" "$FIXDIR/TMACARG3.ASM" "$WORK/"
 if [ -f "$BINRDFGREP" ]; then cp "$BINRDFGREP" "$WORK/RDFGREP.EXE"; fi
 
 echo "[tasm] building TASM.exe via BOOT/TOC.EXE ..."
-( cd "$WORK" && "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build.log 2>&1 ) \
+( cd "$WORK" && "$XT" run --max=$BUILDMAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build.log 2>&1 ) \
     || { echo "FAIL: TASM.exe did not build"; cat "$WORK/build.log"; exit 1; }
 [ -f "$WORK/TASM.exe" ] || { echo "FAIL: TASM.exe not produced"; cat "$WORK/build.log"; exit 1; }
+
+echo "[tasm] building TA2NASM.exe via BOOT/TOC.EXE ..."
+( cd "$WORK" && "$XT" run --max=$BUILDMAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TA2NASM.MOD >build-ta2nasm.log 2>&1 ) \
+    || { echo "FAIL: TA2NASM.exe did not build"; cat "$WORK/build-ta2nasm.log"; exit 1; }
+[ -f "$WORK/TA2NASM.exe" ] || { echo "FAIL: TA2NASM.exe not produced"; cat "$WORK/build-ta2nasm.log"; exit 1; }
 
 PASS=0; FAIL=0
 
@@ -284,7 +294,7 @@ check_one TNOOP4.ASM TNOOP4.RDF "$FIXDIR"
 check_one TREP.ASM TREP.RDF "$FIXDIR"
 check_one TEQU.ASM TEQU.RDF "$FIXDIR"   # EQU constants (incl. expression + RESB count) -- self-consistency baseline
 check_one TDBWDD.ASM TDBWDD.RDF "$FIXDIR"   # DB/DW/DD accepting EQU constants (+/- tail) and DD accepting a label (width=4 reloc) -- self-consistency baseline
-check_fails TDBLABEL.ASM "expected byte value in DB"   # DB must still reject a bare label (no relocation path, unlike DW/DD)
+check_fails TDBLABEL.ASM "a label is not allowed in this constant expression"   # DB must still reject a bare label (no relocation path, unlike DW/DD) -- message now comes from the shared ParseConstExpr evaluator
 check_fails TBADIF.ASM "%ifdef without matching %endif"
 check_one TBSS.ASM TBSS.RDF "$FIXDIR"
 check_fails TBADRES.ASM "RESB/RESW/RESD only valid in SECTION .bss"
@@ -309,8 +319,14 @@ check_fails TBADINC.ASM "register or memory operand required"
 check_fails TBADPUSH.ASM "register or memory operand required"
 check_fails TBADMOVDS.ASM "register or memory operand required"
 check_fails TBADRETIMM.ASM "RET immediate must be a constant"
-# BUG A4: short branch to EXTERN symbol has no relocation -- must be fatal
-check_fails TEXTSHORT.ASM "short branch to EXTERN symbol"
+# BUG A4 / Jcc auto-widen: a Jcc to an EXTERN symbol has no rel8 relocation,
+# but EncJccAuto's auto-widen path (added alongside %rep/seg:[...]) now
+# retargets it through the widened invert+JMP-near form, which DOES have a
+# relocation (EncNearRel's existing extern-reloc support) -- matches real
+# NASM, which auto-widens here too rather than erroring. An explicit "Jcc
+# SHORT externsym" still hits EncJmpShort's own extern check and is still a
+# hard "short branch to EXTERN symbol is impossible" error (unchanged).
+check_reloc_for TEXTSHORT.ASM TEXTSHORT.RDF ExternalRoutine
 # BUG A5: dw referencing EXTERN symbol must reloc against the import, not
 # this module's own segment
 check_reloc_for TEXTDW.ASM TEXTDW.RDF ExternalProc
@@ -333,8 +349,14 @@ fi
 # BUG B1: unsized memory operand must be fatal, not a silent WORD default
 check_fails TNOSIZE.ASM "operation size not specified"
 check_fails TNOSIZEMOV.ASM "operation size not specified"
-# BUG B2: TIMES with a label value must be fatal, not a silently dropped reloc
-check_fails TTIMESLBL.ASM "TIMES DW requires a constant value"
+# BUG B2 / TIMES DW label support: "times N dw LABEL" now emits N
+# independent relocated words (EmitDataWordMaybeLabel called N times, added
+# alongside %rep/seg:[...]/CGA2.ASM support -- CGA2.ASM's own "times 16 dw
+# NotImpNear" dispatch-table-fill idiom needs exactly this) instead of the
+# old fatal "TIMES DW requires a constant value". "times N db LABEL"/
+# "times N dd LABEL" remain fatal -- DB has no relocation-emission path at
+# all (byte-sized truncation risk) and DD's label case was never requested.
+check_reloc_to_seg TTIMESLBL.ASM TTIMESLBL.RDF 1
 # BUG B4: three base/index registers in [ ] must be fatal
 check_fails T3REGADDR.ASM "too many registers in address"
 # BUG B5: %define body with an unrepresentable token must be fatal
@@ -671,6 +693,100 @@ check_fails TMACARG3.ASM "macro parameter %n beyond nParams"
     echo "Foo:"; echo "    big"; echo "    ret"
 } > "$WORK/TMACBIG.ASM"
 check_fails TMACBIG.ASM "macro body too long"
+
+# ---------------------------------------------------------------------
+# TA2NASM.EXE (TURBO.MOD/TURBODIR.MOD, Chapter 2/4/5/6/7/8/9/10/11/13/14/15
+# of the Borland TASM 5.0 User's Guide -> NASM subset).  TA2NASM.EXE
+# converts a Borland-TASM-syntax .asm to a .NAS (NASM subset) file; TASM.exe
+# itself only ever accepts NASM-subset source (see TASM.MOD's own header
+# comment). TA2NASM.EXE used to be reached in-process via TASM.exe's own
+# /LNG=turbo switch -- moved out to its own standalone .EXE 2026-08-11 (see
+# TA2NASM.MOD's own header comment for why), so these checks now run the
+# two tools as separate pipeline steps: TA2NASM.exe SRC.ASM (auto-derives SRC.NAS), then
+# TASM.exe SRC.NAS.
+# ---------------------------------------------------------------------
+
+# A plain TASM-syntax file (IDEAL mode, EQU, CODESEG) converts and
+# assembles to a real .rdf via the two-step pipeline.
+cat > "$WORK/TLNGSIMPLE.ASM" <<'EOF'
+IDEAL
+MODEL small
+CODESEG
+MYCONST EQU 5
+GLOBAL start
+start:
+    mov ax, MYCONST
+    mov ah, 4Ch
+    int 21h
+EOF
+rm -f "$WORK/TLNGSIMPLE.RDF" "$WORK/TLNGSIMPLE.NAS"
+if ( cd "$WORK" && "$XT" run --max=$MAX TA2NASM.exe TLNGSIMPLE.ASM >convert-TLNGSIMPLE.ASM.log 2>&1 ) \
+   && [ -f "$WORK/TLNGSIMPLE.NAS" ] \
+   && ( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TLNGSIMPLE.NAS >assemble-TLNGSIMPLE.ASM.log 2>&1 ) \
+   && [ -f "$WORK/TLNGSIMPLE.RDF" ] \
+   && ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE has-global TLNGSIMPLE.RDF start >/dev/null 2>&1 ); then
+    echo "PASS: TLNGSIMPLE.ASM -> TA2NASM.exe converts, TASM.exe assembles"
+    PASS=$((PASS+1))
+else
+    echo "FAIL: TLNGSIMPLE.ASM -> TA2NASM.exe/TASM.exe pipeline did not produce the expected .rdf"
+    cat "$WORK/convert-TLNGSIMPLE.ASM.log" "$WORK/assemble-TLNGSIMPLE.ASM.log" 2>/dev/null || true
+    FAIL=$((FAIL+1))
+fi
+
+# TA2NASM.exe's own failure path: a TASM file with a real assembly error
+# (bad mnemonic) converts fine (TA2NASM.exe does not run any assembler
+# pipeline itself) but must then fail to assemble (no .rdf) when fed into
+# TASM.exe.
+cat > "$WORK/TLNGBAD.ASM" <<'EOF'
+SECTION .text
+GLOBAL start
+start:
+    bogusinstr ax, bx
+EOF
+rm -f "$WORK/TLNGBAD.RDF" "$WORK/TLNGBAD.NAS"
+( cd "$WORK" && "$XT" run --max=$MAX TA2NASM.exe TLNGBAD.ASM >convert-TLNGBAD.ASM.log 2>&1 ) || true
+( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TLNGBAD.NAS >assemble-TLNGBAD.ASM.log 2>&1 ) || true
+if [ ! -f "$WORK/TLNGBAD.RDF" ] && [ -f "$WORK/TLNGBAD.NAS" ]; then
+    echo "PASS: TLNGBAD.ASM -> converts to .NAS, TASM.exe assembly fails as expected, no .rdf"
+    PASS=$((PASS+1))
+else
+    echo "FAIL: TLNGBAD.ASM -> TA2NASM.exe/TASM.exe failure path did not match (.rdf/.NAS state wrong)"
+    cat "$WORK/convert-TLNGBAD.ASM.log" "$WORK/assemble-TLNGBAD.ASM.log" 2>/dev/null || true
+    FAIL=$((FAIL+1))
+fi
+
+# STRUC: TASM's "NAME STRUC / .field TYPE ? / ENDS" form must convert to
+# NASM's "struc/.field: resX n/endstruc" AND actually close the struc
+# (TURBO.MOD historically emitted a bare comment for ENDS here, leaving
+# Parse.MOD's struc-mode open forever -- every line for the rest of the
+# file silently misparsed as a struc field; fixed 2026-08-07 by emitting
+# a real "endstruc" and resetting TURBO.MOD's own inStruc flag).
+# The DUP(?) field additionally exercises PARSE.MOD's ParseStrucLine
+# accepting an optional ':' after the field name (real NASM struc syntax,
+# ".field: resb n") alongside TASM's own colon-less form (fixed same day).
+cat > "$WORK/TLNGSTRUC.ASM" <<'EOF'
+foo STRUC
+    f1 DW ?
+    f2 DB 4 DUP(?)
+ENDS
+SECTION .text
+GLOBAL start
+start:
+    mov ah, 4Ch
+    int 21h
+EOF
+rm -f "$WORK/TLNGSTRUC.RDF" "$WORK/TLNGSTRUC.NAS"
+if ( cd "$WORK" && "$XT" run --max=$MAX TA2NASM.exe TLNGSTRUC.ASM >convert-TLNGSTRUC.ASM.log 2>&1 ) \
+   && ( cd "$WORK" && "$XT" run --max=$MAX TASM.exe TLNGSTRUC.NAS >assemble-TLNGSTRUC.ASM.log 2>&1 ) \
+   && [ -f "$WORK/TLNGSTRUC.RDF" ] \
+   && ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE has-global TLNGSTRUC.RDF start >/dev/null 2>&1 ); then
+    echo "PASS: TLNGSTRUC.ASM -> STRUC closes properly, code after it still assembles"
+    PASS=$((PASS+1))
+else
+    echo "FAIL: TLNGSTRUC.ASM -> STRUC handling regressed"
+    cat "$WORK/convert-TLNGSTRUC.ASM.log" "$WORK/assemble-TLNGSTRUC.ASM.log" 2>/dev/null || true
+    FAIL=$((FAIL+1))
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

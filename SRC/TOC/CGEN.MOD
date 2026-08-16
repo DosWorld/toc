@@ -397,6 +397,34 @@ BEGIN
   Rdoff.RdfAddSegReloc(CgObj, Rdoff.SegCode, segAt, importId)
 END CgCallFar;
 
+(* Same as CgCallFar, plus 5 bytes of NOP padding immediately after the
+   CALL FAR (DOCS/OVR.MD §9).  Callers (PEXPR.MOD/PSTMT.MOD) gate this on
+   isImp & isFr & overlayMode & ~targetCP: an imported far call made from
+   inside an overlay unit's own code MIGHT later be rewritten by the
+   linker (Link.OnReloc) into an INT 3Fh trampoline if the target turns
+   out to be another overlay unit -- and if so, Link.AddOvrReturnTrampoline
+   needs 5 spare bytes right after the call to install a SECOND trampoline
+   (the return-address resume point) without clobbering real caller code.
+   The padding is reserved unconditionally at codegen time within a /CD
+   compile (codegen doesn't know yet whether the target will resolve to an
+   overlay unit -- only the linker knows that, much later); it is dead NOP
+   if the call turns out to target a resident procedure, since only
+   Link.OnReloc's isOverlayCall branch ever touches it.  The ~targetCP
+   half of the gate (added 2026-08-11) skips reserving it AT ALL when this
+   whole compile is building the /CP target: $O+ has no effect at all
+   under /CP (Link.CalculateLayout clears every module's own isOverlay
+   unconditionally regardless of source, DOCS/OVR.MD §2), so the padding
+   would be PERMANENTLY dead in that binary -- found via LINKNE.MOD
+   becoming $O+ (DOCS/OVR.MD's own /CD-hot-path memory-pressure fix) and
+   baking pointless padding into every one of its own far calls when
+   compiled for TOC286.EXE (/CP) too, since compile-time overlayMode has
+   no visibility into the link target on its own. *)
+PROCEDURE CgCallFarOvr*(importId: INTEGER);
+BEGIN
+  CgCallFar(importId);
+  EmitCodeStr("90,90,90,90,90")            (* 5x NOP -- resume-trampoline slot *)
+END CgCallFarOvr;
+
 (* Load the FAR address of an imported procedure into DX:AX.
    Used by SYSTEM.ADR(ImportedProc) — the linker fills in both placeholder
    words at link time, the same way it fills CALL FAR. *)
@@ -1586,7 +1614,7 @@ BEGIN
 END CgLoadItem;
 
 PROCEDURE CgStoreItem*(VAR item: Item);
-  VAR isPtr, isByte, isLong, isReal, isLreal: BOOLEAN;
+  VAR isPtr, isByte, isLong, isReal, isLreal, isAddr: BOOLEAN;
       tForm: INTEGER; tFar: BOOLEAN;
 BEGIN
   tForm := -1; tFar := FALSE;
@@ -1599,10 +1627,16 @@ BEGIN
   isLong  := tForm = Syms.TFLongint;
   isReal  := tForm = Syms.TFReal;
   isLreal := tForm = Syms.TFLongreal;
+  isAddr  := tForm = Syms.TFAddress;
 
   IF item.mode = MLocal THEN
     IF isReal THEN CgFstpRealBp(item.adr); RETURN
     ELSIF isLreal THEN CgFstpLongrealBp(item.adr); RETURN
+    ELSIF item.isRef & isAddr THEN
+      (* Typeless VAR param: its slot holds a far address and the DX:AX being
+         stored IS the new address (e.g. INC(s)) — store into the 4-byte
+         slot itself, do NOT deref-store through it. *)
+      CgStorePtrBp(item.adr)
     ELSIF item.isRef THEN
       IF isLong OR isPtr THEN
         Emit1(052H); Emit1(BYTE(OpPushAx)); CgLesBxBp(item.adr);
@@ -1619,7 +1653,10 @@ BEGIN
   ELSIF item.mode = MGlobal THEN
     IF isReal THEN CgFstpRealMem(WORD(item.adr)); RETURN END;
     IF isLreal THEN CgFstpLongrealMem(WORD(item.adr)); RETURN END;
-    IF item.isRef THEN
+    IF item.isRef & isAddr THEN
+      (* Typeless VAR param: store the new address into the slot itself. *)
+      CgStorePtrMem(WORD(item.adr))
+    ELSIF item.isRef THEN
       IF isLong OR isPtr THEN
         Emit1(052H); Emit1(BYTE(OpPushAx)); CgLesBxMem(WORD(item.adr));
         Emit1(BYTE(OpPopAx)); Emit1(05AH); CgStoreDerefFarLong()

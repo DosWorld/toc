@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,R-,A-,O-*)
 MODULE IO;
 
 CONST

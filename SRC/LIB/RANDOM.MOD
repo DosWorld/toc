@@ -1,3 +1,4 @@
+(*$R-,D-,A-*)
 MODULE Random;
 
 (* Pseudo-random generator via Marsaglia's 32-bit xorshift.

@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,R-,O-,A-*)
 MODULE EMS;
 
 CONST

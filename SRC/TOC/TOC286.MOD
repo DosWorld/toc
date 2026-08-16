@@ -6,11 +6,11 @@ MODULE TOC286;
    (DPMI16 protected-mode) TOC286.EXE alongside the MZ (/CD) TOC.EXE.
    Stack size mirrors TOC.MOD's own $M directive: the linker takes the
    stack size from the ENTRY module, which is TOC286 here, not TOC. *)
-IMPORT TOC;
+IMPORT TocMain;
 
 PROCEDURE Run*;
 BEGIN
-  TOC.Run
+  TocMain.Run
 END Run;
 
 END TOC286.

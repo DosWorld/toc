@@ -75,7 +75,7 @@ That means:
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
-- **301-row regression manifest** plus DOS-side executable and unit-test
+- **311-row regression manifest** plus DOS-side executable and unit-test
   suites — every codegen change is checked against real compiled/linked/run
   output, not just "it compiled."
 - **Turbo Debugger-compatible debug info.** Compile with `(*$D+*)`, link with
@@ -248,7 +248,7 @@ regression test, not just a one-time milestone.
 
 ## Standard library
 
-Twenty-one modules, merged into one `BIN/OBERON.OM` archive:
+Twenty-two modules, merged into one `BIN/OBERON.OM` archive:
 
 | Module | Purpose |
 |--------|---------|
@@ -272,6 +272,7 @@ Twenty-one modules, merged into one `BIN/OBERON.OM` archive:
 | `WinCB` | Windows 3.x clipboard access (WinOldAp INT 2Fh) |
 | `KMouse` | Extended keyboard (101/102/122-key) + Microsoft Mouse (INT 33h) driver |
 | `Screen` | Text-mode shadow-buffer driver: colour print/scroll, cursor, background spinner, VGA palette fades |
+| `Overlay` | `$O+` overlay manager: load/evict/patch overlaid code on demand, disk- or EMS-backed (`/CD` only) — see `DOCS/OVR.MD` |
 
 `Detect`/`WinCB`/`KMouse`/`Screen` are ports of small Turbo Pascal `UNIT`s —
 see `DOCS/PORTING.MD` §16.1 for the porting conventions (companion NASM
@@ -283,7 +284,7 @@ see `DOCS/PORTING.MD` §16.1 for the porting conventions (companion NASM
 ## Test suite
 
 ```bash
-make test     # 301-row manifest + TASM (110) & TLINK (4) regressions — codegen
+make test     # 311-row manifest + TASM (116) & TLINK (14) regressions — codegen
               # bytes, RDOFF structure, error messages, exit codes
 make testall  # + DOS-side executables (Section 17) and unit tests (Section 18)
 ```
@@ -309,6 +310,7 @@ itself?).
 | [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) | RDOFF2 object file format specification |
 | [`DOCS/TD-SPEC.MD`](DOCS/TD-SPEC.MD) | Turbo Debugger TDS/TDINFO format notes |
 | [`DOCS/PORTING.MD`](DOCS/PORTING.MD) | Guide for porting code from C/Pascal |
+| [`DOCS/OVR.MD`](DOCS/OVR.MD) | Overlay feature: `$O+` directive, `.OVR` format, `Overlay` runtime module |
 | [`DOCS/HISTORY.MD`](DOCS/HISTORY.MD) | Dated changelog of resolved bugs, refactors, and features |
 
 ---

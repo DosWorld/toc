@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,O-*)
 MODULE PExpr;
 IMPORT Scan, Syms, Cgen, Rdoff, Strings, LogErr, StrTab;
 
@@ -23,6 +23,20 @@ VAR
   sc*:         Scan.Scanner;
   modUsesFpu*: BOOLEAN;
   boundsChk*:  BOOLEAN;
+  overlayMode*: BOOLEAN;  (* $O+/$O- : module compiled overlay-eligible (DOCS/OVR.MD §4). *)
+  targetCP*:   BOOLEAN;   (* TRUE iff this whole compile is building the /CP (NE/DPMI16)
+                              target -- set once by TOCMAIN.MOD (mirrors its own private
+                              gTargetCP) right after parsing /CD vs /CP, before any module
+                              compiles.  $O+ has NO effect at all under /CP
+                              (Link.CalculateLayout clears every module's own isOverlay
+                              unconditionally, DOCS/OVR.MD §2) -- CgCallFarOvr's own 5-byte
+                              resume-trampoline padding would therefore be permanently dead
+                              NOP in a /CP build (found 2026-08-11, LinkNE.MOD's own $O+
+                              flag baking padding into TOC286.EXE for no reason); gating the
+                              padding decision on ~targetCP too, alongside overlayMode,
+                              avoids emitting it at all when the link target that will
+                              actually consume this .rdf is already known to make it
+                              pointless. *)
   modName*:    ARRAY 33 OF CHAR;
   condBpOomNode: CondBpNode;  (* OOM fallback, mirrors PSTMT.bpOomNode *)
   (* condBpList: the CURRENT condition's pending-jump list, threaded through
@@ -495,18 +509,22 @@ BEGIN
 END CheckParamCompat;
 
 (* Push a far pointer held in a local BP slot {ofs:2, seg:2}: segment then
-   offset (Pascal l-to-r push order, segment deepest). *)
+   offset (Pascal l-to-r push order, segment deepest).  LES loads both words
+   in one instruction (ES:BX := seg:ofs) instead of two separate MOV AX,[..]
+   loads. *)
 PROCEDURE PushFarSlotBp(adr: LONGINT);
 BEGIN
-  Cgen.CgLoadBp(adr + 2); Cgen.Emit1(BYTE(Cgen.OpPushAx));   (* PUSH segment *)
-  Cgen.CgLoadBp(adr);     Cgen.Emit1(BYTE(Cgen.OpPushAx))    (* PUSH offset *)
+  Cgen.CgLesBxBp(adr);
+  Cgen.Emit1(006H);                  (* PUSH ES (segment) *)
+  Cgen.Emit1(BYTE(Cgen.OpPushBx))    (* PUSH BX (offset) *)
 END PushFarSlotBp;
 
 (* Push a far pointer held in a global data slot {ofs:2, seg:2}. *)
 PROCEDURE PushFarSlotMem(adr: LONGINT);
 BEGIN
-  Cgen.CgLoadMem(WORD(adr + 2)); Cgen.Emit1(BYTE(Cgen.OpPushAx));  (* PUSH segment *)
-  Cgen.CgLoadMem(WORD(adr));     Cgen.Emit1(BYTE(Cgen.OpPushAx))   (* PUSH offset *)
+  Cgen.CgLesBxMem(WORD(adr));
+  Cgen.Emit1(006H);                  (* PUSH ES (segment) *)
+  Cgen.Emit1(BYTE(Cgen.OpPushBx))    (* PUSH BX (offset) *)
 END PushFarSlotMem;
 
 (* Push the far address currently in ES:BX (pointer deref / indexed element). *)
@@ -1565,7 +1583,14 @@ BEGIN
         pt2 := item.type;
         IF pt2 = NIL THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
         ParseActualParameters(pt2);
-        IF isImp & isFr THEN Cgen.CgCallFar(rdId)
+        (* DOCS/OVR.MD §9: an imported far call made from
+           inside $O+ code MIGHT be rewritten by the linker into an overlay
+           trampoline whose call site later needs a return-address resume
+           trampoline installed right after it (Link.AddOvrReturnTrampoline)
+           -- reserve the 5 spare bytes now, since codegen doesn't yet know
+           whether this call's target will resolve to an overlay unit. *)
+        IF isImp & isFr & overlayMode & ~targetCP THEN Cgen.CgCallFarOvr(rdId)
+        ELSIF isImp & isFr THEN Cgen.CgCallFar(rdId)
         ELSIF isImp THEN Cgen.CgCallNear(rdId)
         ELSIF item.fwdSym # Syms.NoSym THEN FwdEmitCall(item.fwdSym, isFr)
         ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)

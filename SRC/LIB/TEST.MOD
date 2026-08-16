@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,R-,A-,O-*)
 MODULE Test;
 
 IMPORT Out := Out87, Math;

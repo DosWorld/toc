@@ -1299,7 +1299,13 @@ BEGIN
       IF pt2 = Syms.NoType THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
       IF (PExpr.sc.sym = Scan.TLparen) OR (pt2.tagIdOrNParams > 0) THEN
         PExpr.ParseActualParameters(pt2) END;
-      IF isImp & isFr THEN Cgen.CgCallFar(rdId)
+      (* DOCS/OVR.MD §9: mirrors PEXPR.MOD ParseFactor's
+         own isImp & isFr & overlayMode gate -- a procedure called as a bare
+         statement (no assignment/expression context, e.g. "Ovrdemo2.Run;")
+         is parsed HERE, not there, so it needs the same 5-byte
+         resume-trampoline padding reservation. *)
+      IF isImp & isFr & PExpr.overlayMode & ~PExpr.targetCP THEN Cgen.CgCallFarOvr(rdId)
+      ELSIF isImp & isFr THEN Cgen.CgCallFar(rdId)
       ELSIF isImp THEN Cgen.CgCallNear(rdId)
       ELSIF item.fwdSym # Syms.NoSym THEN PExpr.FwdEmitCall(item.fwdSym, isFr)
       ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)

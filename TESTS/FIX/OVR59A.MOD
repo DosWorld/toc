@@ -1,0 +1,6 @@
+(*$O+*)
+MODULE Ovr59a;
+PROCEDURE Foo*;
+BEGIN
+END Foo;
+END Ovr59a.

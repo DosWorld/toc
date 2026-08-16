@@ -198,6 +198,33 @@ BEGIN
   Files.Close(f)
 END LoadExplicitImport;
 
+(* TRUE iff modName's own .om archive carries a MODNAME.OVR member whose
+   first line is "OVERLAY=1" -- i.e. modName was compiled $O+ (DOCS/OVR.MD §11.2).
+   Reuses FindImportFile's own three-way search (CWD, exe dir, OBERON_LIB,
+   OBERON.OM) so this agrees with however modName's own .def was actually
+   found, rather than assuming CWD.  Used by PARSER.MOD to decide whether a
+   direct import's __init call should be emitted (an $O+ module has none —
+   DOCS/OVR.MD §4) — always called AFTER modName's own .om is known to exist
+   (Import.LoadExplicitImport already succeeded for it), so a search miss
+   here just means "no .OVR member", not "module not found". *)
+PROCEDURE IsOverlayModule*(modName: ARRAY OF CHAR): BOOLEAN;
+  VAR ovrfile: ARRAY NameLen OF CHAR;
+      f: Files.File;
+      line: ARRAY 40 OF CHAR;
+      isOvr: BOOLEAN;
+BEGIN
+  Strings.Copy(modName, ovrfile);
+  Strings.Append(".OVR", ovrfile);
+  isOvr := FALSE;
+  IF FindImportFile(ovrfile, f) THEN
+    IF Files.ReadLine(f, line, WORD(LEN(line))) > 0 THEN
+      isOvr := Strings.Equal(line, "OVERLAY=1")
+    END;
+    Files.Close(f)
+  END;
+  RETURN isOvr
+END IsOverlayModule;
+
 PROCEDURE AddImplicitImport*(modName: ARRAY OF CHAR);
   VAR deffile: ARRAY NameLen OF CHAR;
       f: Files.File;

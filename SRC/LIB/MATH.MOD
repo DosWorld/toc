@@ -1,4 +1,4 @@
-(*$R-*)(*$D-*)
+(*$R-,D-,O-,A-*)
 MODULE Math;
 (*
   8087-based math primitives, implemented as INLINE byte patterns.

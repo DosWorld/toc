@@ -62,7 +62,7 @@ T.$(subst /,.,$(1)):
 	oc_flags=""; \
 	if [ -n "$$$$cmd" ] && [ "$$$$cmd" != "fails" ]; then oc_flags="$$$$cmd"; fi; \
 	stderr_file=$$$$wd/_stderr.txt; \
-	( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture >$$$$stderr_file 2>&1 ) || compile_status=$$$$?; \
+	( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture >$$$$stderr_file 2>&1 ) || compile_status=$$$$?; \
 	base=$$$$(echo $$$$fixture | sed -E 's/\.[mM][oO][dD]$$$$//' | tr '[:lower:]' '[:upper:]'); \
 	diag_file=$$$$wd/output.log; \
 	[ -f $$$$diag_file ] || diag_file=$$$$stderr_file; \
@@ -106,36 +106,36 @@ T.$(subst /,.,$(1)):
 	rc=0; \
 	case "$$$$expect" in \
 	    om-has-file|om-no-file) \
-	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$om "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$om "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	    om-member-contains|om-member-no-contains) \
-	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	    om-member-equals) \
-	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE om-member-equals $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE om-member-equals $$$$om $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	    errorlevel) \
 	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
 	        actual=0; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 $$$$exe >/dev/null 2>&1 ) || actual=$$$$?; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 $$$$exe >/dev/null 2>&1 ) || actual=$$$$?; \
 	        if [ "$$$$actual" = "$$$$arg" ]; then rc=0; else echo "FAIL: $$$$row_name (errorlevel expected=$$$$arg actual=$$$$actual)"; exit 1; fi ;; \
 	    mz-sp|mz-min-alloc|mz-max-alloc) \
 	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	    ne-signature|ne-seg-count|ne-entry-seg|ne-word-at|ne-lfanew|ne-seg-attr|ne-has-kernel|ne-init-task) \
 	        exe=$$$$(echo $$$$base | tr '[:lower:]' '[:upper:]').EXE; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
-	        ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 -c $$$$wd TOC.EXE $$$$oc_flags $$$$fixture $$$$exe >/dev/null 2>&1 ) || { echo "FAIL: $$$$row_name (link failed)"; exit 1; }; \
+	        ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$exe $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	    *) \
 	        ( cd $$$$wd && tar xf $$$$om ) 2>/dev/null || true; \
 	        if [ -n "$$$$member" ]; then rdf=$$$$member; else rdf=$$$$(cd $$$$wd && ls *.RDF 2>/dev/null | head -1); fi; \
 	        if [ -z "$$$$rdf" ] || [ ! -f $$$$wd/$$$$rdf ]; then echo "FAIL: $$$$row_name (no $$$$rdf in $$$$om)"; exit 1; fi; \
 	        case "$$$$expect" in \
 	            init-imports-empty|has-segreloc|no-segreloc|has-reloc-and-segreloc) \
-	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	                ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$rdf >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	            no-import|has-import|no-global|has-global|code-starts|code-contains|no-code-contains|has-reloc-for|has-reloc-to-seg) \
-	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	                ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$rdf "$$$$arg" >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	            code-count|code-byte-at) \
-	                ( cd $$$$wd && $(XT) run --max=50000000 RDFGREP.EXE $$$$expect $$$$rdf $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
+	                ( cd $$$$wd && $(XT) run --max=50000000 --memkb=640 RDFGREP.EXE $$$$expect $$$$rdf $$$$arg >/dev/null 2>&1 ) || rc=$$$$? ;; \
 	            *) \
 	                echo "FAIL: $$$$row_name — unknown EXPECT '$$$$expect'"; exit 1 ;; \
 	        esac ;; \

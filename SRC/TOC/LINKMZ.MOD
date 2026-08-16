@@ -177,6 +177,23 @@ PROCEDURE OnSegReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
 BEGIN
   ls := Link.CurrentState();
   m  := Link.CurrentModule();
+
+  (* CgCallFar (CGEN.MOD:396-397) always emits a RELOC (offset word) AND a
+     SEGRELOC (segment word) for the same CALL FAR site.  When Link.OnReloc
+     recognises that RELOC as targeting an overlay entry point, it rewrites
+     the WHOLE 5-byte call site (opcode + both operand words) into the
+     trampoline form (Link.PatchOverlayCallSite) — this SEGRELOC, arriving
+     for the very same site's segment-operand half, must be skipped
+     entirely rather than patching over those bytes (which is exactly the
+     [opAddr+3..+4] entryOfs field the trampoline just got).
+     Link.IsOverlayCallSiteSegReloc holds the exact suppression condition,
+     shared with Link.OnSegRelocOverlay's own copy (this predicate has
+     already diverged once, 2026-08-07/2026-08-08 — see that function's
+     own comment) so the two paths cannot silently disagree again. *)
+  IF Link.IsOverlayCallSiteSegReloc(ls, rseg, rwidth, rrefSeg) THEN
+    RETURN
+  END;
+
   IF rseg = Rdoff.SegCode THEN patchAddr := rofs
   ELSE patchAddr := Link.DataFileOffsetOf(ls, m, rofs) END;
 
@@ -185,7 +202,34 @@ BEGIN
   IF rseg = Rdoff.SegCode THEN Link.PatchBuf(patchAddr, fixup, 2)
   ELSE Link.PatchDataFile(patchAddr, fixup, 2) END;
 
-  (* add MZ reloc entry (offset in load image, 0-based from image start) *)
+  (* add MZ reloc entry (offset in load image, 0-based from image start).
+     KNOWN ISSUE, STILL OPEN (2026-08-07, this project's maintainer;
+     status not re-verified since -- code review, 2026-08-08): a
+     CALL FAR to Out__init inside EXAMPLES/OVRDEMO's OVRMAIN.EXE is
+     correctly baked absolute as 068E:0865 by PatchBuf above, but this
+     unconditional AddReloc ALSO records an MZ loader-relocation entry for
+     that same site, and DOS's own MZ contract ("read the word already
+     there, ADD the program's load segment, write it back") then
+     double-applies the load segment (068E+00A0=072E, matching the
+     observed runtime crash address exactly). THREE attempted narrowings
+     have all regressed plain (non-overlay) BIN/TASM.EXE: removing
+     AddReloc unconditionally; gating on fixup=0; and gating on fixup=0
+     again after confirming via real instrumentation of SRC/TASM.MOD's own
+     link that only 2 of ~2248 SEGRELOCs there ever have fixup=0 (both
+     self-CODE, and by inspection unrelated to the crash) -- meaning
+     TASM.EXE's breakage under a fixup=0 guard is NOT explained by losing
+     a loader-add it needs; the actual cause of that regression is still
+     unknown. Restored to this long-working unconditional form. Do not
+     re-attempt narrowing this guard without first bisecting exactly which
+     instruction TASM.EXE crashes at under a fixup=0 guard (the same way
+     the overlay demo's own crash was root-caused via xt trace) --
+     guessing at guard conditions from reasoning about MZ semantics alone
+     has now failed three times.  NOTE: the IsOverlayCallSiteSegReloc
+     guard above does NOT suppress this specific site -- __init targets
+     are deliberately excluded from IsOverlayImport (they are never
+     trampolined), so whatever mechanism is or isn't still causing this
+     is independent of that guard and unaffected by any cross-overlay-
+     calls work done since this comment was written. *)
   IF rseg = Rdoff.SegCode THEN
     mzSeg := m^.codePara;
     mzOfs := WORD(rofs)
@@ -653,8 +697,7 @@ END WriteDebugInfo;
 
 (* Copy n bytes of the linked code image from the spill file into fout, then
    close (and so delete) the spill file.  The spill file is the one opened in
-   Link.PerformLinking and left open + rewound; it is never reopened by name.
-   The chunked copy itself lives in Link.CopySpan (shared with LinkNE). *)
+   Link.PerformLinking and left open + rewound; it is never reopened by name. *)
 PROCEDURE CopyCodeImage(ls: Link.State; VAR fout: Files.File; n: LONGINT);
 BEGIN
   IF n > LONGINT(0) THEN Files.BlockCopy(ls^.spillFile, fout, n) END;

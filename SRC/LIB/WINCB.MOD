@@ -1,3 +1,4 @@
+(*$D-,R-,A-,O-*)
 MODULE WinCB;
 
 (*$L WINCB.RDF*)

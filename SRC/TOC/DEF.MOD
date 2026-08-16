@@ -1,9 +1,23 @@
-(*$D-*)
+(*$D-,O+*)
 MODULE Def;
 (*
   Port of def.c/def.h to Oberon-07.
   .def file writer (DefWrite) and reader (DefRead).
   Text I/O via Files.File with byte-level helpers.
+
+  $O+ (overlay-eligible, 2026-08-11): called from exactly two narrow
+  boundaries -- PARSER.MOD's own end-of-module DefWrite call (once per
+  compiled module) and IMPORT.MOD's DefRead call (once per resolved
+  import) -- unlike PEXPR/CGEN/SYMS/SCAN, which are touched on nearly
+  every token/statement and would pay overlay-trap overhead on every
+  call if made $O+. Marking Def $O+ removes ~800 lines of code from
+  toc.exe's permanent RAM footprint during the COMPILE phase (as
+  opposed to LINKNE.MOD's own $O+, which only helps the LINK phase) --
+  this was the second, compile-phase half of the self-hosting memory-
+  pressure investigation that started with "cannot create .rdf temp"
+  compiling PARSER.MOD at --memkb=544 (LinkNE.MOD's own $O+ header
+  comment has the link-phase half of this story). See DOCS/OVR.MD for
+  the overlay mechanism.
 *)
 IMPORT Files, LogErr, Syms, Strings, StrTab;
 
@@ -24,10 +38,37 @@ VAR
   curAlias: ARRAY NameLen OF CHAR;
   (* primFormName[form] = keyword for a primitive scalar type form, or "" if
      form is not a simple primitive (ARRAY/RECORD/POINTER/PROC/... need
-     structural handling in WriteType).  Filled in the module body below —
-     no CONST arrays. *)
+     structural handling in WriteType).  Filled by InitPrimFormNames,
+     lazily called from DefWrite/DefRead's own entry — an $O+ module may
+     not have a BEGIN block at all (DOCS/OVR.MD §4), so this can no
+     longer be a module-body initializer the way it was before Def
+     became overlay-eligible. *)
   primFormName: ARRAY 16 OF ARRAY 12 OF CHAR;
+  primFormNamesInit: BOOLEAN;
   i: INTEGER;
+
+(* InitPrimFormNames: fill primFormName once.  Idempotent (checked by
+   both call sites via primFormNamesInit) so DefWrite and DefRead can
+   each call it unconditionally without needing to know whether the
+   other one already ran first in this process. *)
+PROCEDURE InitPrimFormNames;
+BEGIN
+  IF primFormNamesInit THEN RETURN END;
+  i := 0;
+  WHILE i < 16 DO primFormName[i][0] := 0X; INC(i) END;
+  primFormName[Syms.TFInteger]  := "INTEGER";
+  primFormName[Syms.TFBoolean]  := "BOOLEAN";
+  primFormName[Syms.TFChar]     := "CHAR";
+  primFormName[Syms.TFByte]     := "BYTE";
+  primFormName[Syms.TFWord]     := "WORD";
+  primFormName[Syms.TFLongint]  := "LONGINT";
+  primFormName[Syms.TFReal]     := "REAL";
+  primFormName[Syms.TFLongreal] := "LONGREAL";
+  primFormName[Syms.TFSet]      := "SET";
+  primFormName[Syms.TFAddress]  := "ADDRESS";
+  primFormName[Syms.TFNotype]   := "VOID";
+  primFormNamesInit := TRUE
+END InitPrimFormNames;
 
 (* ---- write helpers ---- *)
 
@@ -204,6 +245,7 @@ PROCEDURE DefWrite*(VAR f: Files.File; modName: ARRAY OF CHAR);
       pt: Syms.TypeDesc; nd: Syms.InlineNode;
       ki: INTEGER;
 BEGIN
+  InitPrimFormNames;
   scope := Syms.TopScope;
   Files.Write(f, "MODULE "); Files.Write(f, modName); Files.WriteLn(f);
 
@@ -518,6 +560,7 @@ PROCEDURE DefRead*(VAR f: Files.File; alias: ARRAY OF CHAR);
       isVar: BOOLEAN; ofs, v: LONGINT;
       modSeen: BOOLEAN;
 BEGIN
+  InitPrimFormNames;
   Strings.Copy(alias, curAlias);
   modname[0] := 0X; modSeen := FALSE;
   curRec := Syms.NoType; curRecSize := 0;
@@ -796,18 +839,4 @@ BEGIN
   END
 END DefRead;
 
-BEGIN
-  i := 0;
-  WHILE i < 16 DO primFormName[i][0] := 0X; INC(i) END;
-  primFormName[Syms.TFInteger]  := "INTEGER";
-  primFormName[Syms.TFBoolean]  := "BOOLEAN";
-  primFormName[Syms.TFChar]     := "CHAR";
-  primFormName[Syms.TFByte]     := "BYTE";
-  primFormName[Syms.TFWord]     := "WORD";
-  primFormName[Syms.TFLongint]  := "LONGINT";
-  primFormName[Syms.TFReal]     := "REAL";
-  primFormName[Syms.TFLongreal] := "LONGREAL";
-  primFormName[Syms.TFSet]      := "SET";
-  primFormName[Syms.TFAddress]  := "ADDRESS";
-  primFormName[Syms.TFNotype]   := "VOID"
 END Def.

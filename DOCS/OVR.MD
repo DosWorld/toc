@@ -832,7 +832,9 @@ call-site patching, cross-overlay calls (§9), real eviction of an idle
 caller mid-call including repeated evict/reload cycles on the same site
 (§10), EMS-backed storage (§13.6/§13.7), `OvrClearBuf` mid-run (§13.5),
 and the appended-to-EXE overlay file format (§12) all confirmed working,
-correct output, clean exit, zero heap leaks.
+correct output, clean exit, zero heap leaks. **Also verified on the
+compiler's own real, non-fixture use** — `$O+` on `DEF.MOD`/`LINKNE.MOD`,
+see below.
 
 **Not implemented:**
 - **DPMI16 (`/CP`)** — overlays are `/CD`-only (§2, §14).
@@ -840,10 +842,10 @@ correct output, clean exit, zero heap leaks.
   to "a string/set constant passed by pointer from code-segment-resident
   storage across an `$O+`-to-`$O+` call" is not yet audited against
   `PEXPR.MOD`'s literal-actual codegen path.
-- **`$O+` on the compiler's own `DEF.MOD`/`LINKNE.MOD` (real-use, not a
-  fixture) — blocked on an unresolved runtime bug in `OVERLAY.ASM`, not
-  correctness of the linker/compiler side.** Three rounds of
-  investigation, 2026-08-14 through 2026-08-16:
+- ~~`$O+` on the compiler's own `DEF.MOD`/`LINKNE.MOD`~~ **DONE
+  (2026-08-16) — see below.** Three rounds of investigation,
+  2026-08-14 through 2026-08-16, the last two resolving what earlier
+  looked like an `OVERLAY.ASM`-level bug:
 
   **Round 1 (2026-08-14/15): performance.** An initial apparent second
   crash ("bug #5") turned out to be a self-hosting bootstrap-generation
@@ -918,66 +920,111 @@ correct output, clean exit, zero heap leaks.
   signature comes from the current file's own fresh parse, never
   round-tripped through a `.def`.
 
-  **Round 3 (2026-08-16): a third, NOT YET FIXED bug — isolated to
-  `OVERLAY.ASM` itself.** With rounds 1-2 landed, real self-hosting
-  (`toc.exe /ENTRY=Run TOC.MOD /M` compiling its own ~26 modules, `Def`
-  and `LinkNE` both `$O+`) still crashes — "Invalid opcode", `RETF`
-  landing mid-instruction inside what turns out to be string/text data,
-  not code. Confirmed real (not a `--memkb=544` artifact, not a stale
-  `.TMP`-file collision — both ruled out during this investigation) via
-  a clean, from-`BOOT/TOC.EXE` bootstrap at `--memkb=640`. **Isolated
-  precisely, with direct instrumentation, to `OVERLAY.ASM`'s own
-  `Ovr_TrapEntry`/`Ovr_DispatchStub`, NOT `Overlay.OvrDispatch` (Oberon)
-  or anything in `LINK.MOD`/`Def`/`LinkNE`:**
-    - The crash happens on the very FIRST real dispatch of the whole
-      run (`ovrTrapCount=1` at crash time, confirmed via a temporary
-      `Overlay.DbgCounts`-style probe) — the one that does `Def`'s first
-      real disk load.
-    - `Overlay.OvrDispatch` was instrumented directly (temporary
-      `Out.String`/`Out.Int` prints of its own local values, since
-      removed) and confirmed to compute and return **fully correct**
-      values every time: `targetSeg:targetOfs` matched `Def.DefRead`'s
-      real, verified entry point (`destParas:0x28CA`, cross-checked
-      against the entry offset seen independently via `xt trace` at the
-      callee's own `push bp / mov bp,sp / sub sp,0x436` prologue); and
-      `retSegOut:retOfsOut` matched the expected `siteSeg:siteOfs+5`
-      exactly.
-    - A canary probe (a plain `INTEGER` local in `LoadModule`, set
-      before and re-checked after the real `Files.BlockRead` disk load)
-      survived unchanged — ruling out the plausible theory that
-      `SYSTEM.Intr`'s real-mode `INT 21h` path disturbs `SS:SP` in a way
-      that corrupts the Oberon-level call stack during the first disk
-      read (the project's own maintainer independently confirmed
-      `SYSTEM.ASM` is not implicated).
-    - Despite `Overlay.OvrDispatch`'s return values being verified
-      correct at the Oberon level, the eventual `RETF` (several
-      procedure-calls deep inside `Def.DefRead`'s own body, once it
-      finally returns) lands on a `CS:IP` that is neither the expected
-      resident return address nor any recognizable code — it decodes as
-      literal text bytes (`.om): ` and similar), meaning the corruption
-      happens strictly inside `OVERLAY.ASM`'s own handling of the
-      already-correct `DX:AX`/`DI:SI` values `Ovr_DispatchStub` reads
-      back from `Overlay_OvrDispatch`'s `call far` return, or in
-      `Ovr_TrapEntry`'s own frame-synthesis using them
-      (`.frame_done`, lines ~594-621).
-    - A manual instruction-by-instruction re-derivation of
-      `Ovr_TrapEntry`'s/`Ovr_DispatchStub`'s push/pop balance (both the
-      ordinary-entry path and the VAR-out-param `SS:[bp-N]` addressing)
-      found no discrepancy on paper — the arithmetic is internally
-      consistent — which is exactly why this needs either a real
-      hardware-level single-step debugger or the maintainer's own
-      first-hand reading of `OVERLAY.ASM`, not more `xt trace`
-      log-mining. This file requires the same "propose the change and
-      get sign-off before editing" treatment `CLAUDE.md` mandates for
-      `SYSTEM.ASM`, even though it isn't literally that file.
+  **Round 3 (2026-08-16): RESOLVED — two real bugs, neither in
+  `OVERLAY.ASM`.** The session that first isolated Round 3's crash to
+  `OVERLAY.ASM`'s `Ovr_TrapEntry`/`Ovr_DispatchStub` (see the git history
+  for that investigation's own detailed notes — the crash signature,
+  canary probes, and manual push/pop re-derivation described there were
+  all real observations) never got to a hardware-level debugger or
+  maintainer sign-off on `OVERLAY.ASM` before the actual root causes
+  were found completely outside that file, by re-verifying the whole
+  bootstrap methodology from scratch:
 
-  **Status:** `Def`/`LinkNE` remain at `$O-` and `TOC.MOD`'s `SetupOvr`
-  call stays commented out (not removed) pending this third bug's
-  resolution. Rounds 1-2's fixes are landed permanently regardless —
-  they are real, independently verified, and already benefit every
-  other overlay call site (`EXAMPLES/OVRDEMO/`'s own fixtures still pass
-  make test's full suite). Round 3 is the sole remaining blocker to
-  re-enabling `$O+` on the compiler's own two largest modules.
+  1. **`TOC.MOD`'s `SetupOvr` called `Overlay.WarmModuleCaches` BEFORE
+     `Overlay.OvrSetBuf`.** `OvrSetBuf` refuses to (re)size the overlay
+     heap buffer once `ovrLoadList # NIL` (its own "don't resize an
+     in-use buffer" guard — see `OvrSetBuf`'s header comment) —
+     `WarmModuleCaches` populates `ovrLoadList` via `RegisterModule`, so
+     calling them in this order left `ovrHeapOrgParas`/`ovrHeapEndParas`
+     at `0` for the whole run: `OvrSetBuf`'s own call silently no-op'd
+     through that guard. The first real `LoadModule` call then always
+     failed its own `needParas > buffer size` check (with
+     `heapOrg=0 heapEnd=0`), surfacing as `SYSTEM.Halt(209)` — a
+     different, cleaner failure than Round 3's "Invalid opcode" crash,
+     which is what first exposed that the two investigations had never
+     actually been testing the same binary (see point 3). **Fixed** by
+     swapping the two calls' order in `SetupOvr`.
+  2. **`Overlay.OvrDispatch` called `CacheEntryOfs` unconditionally on
+     every dispatch, with no dedup.** `CacheEntryOfs` itself has no
+     "already cached" check — it always appends a fresh
+     `(entryId, entryOfs)` slot (see `EntryOfsNodeRec`, `EntryOfsChunk`
+     = 8 entries/chunk). A module called repeatedly through the same
+     entry point (this file's own §9 already documents the
+     "`Def.DefWrite` once per compiled module — structurally a loop"
+     case) therefore grew `entryOfsCache` by one entry per dispatch,
+     forever, for the life of the process — a real unbounded heap leak,
+     not a false-positive leak-guard artifact. Confirmed via direct
+     instrumentation: self-hosting reported "heap leak ... in
+     Cgen.CgFree() (5 paragraphs)" on whichever source file happened to
+     be compiling when the 9th (then 17th, ...) chunk-overflow `NEW`
+     landed. **Fixed** by gating the call on the existing
+     `CachedEntryOfs` lookup first — `IF ~CachedEntryOfs(...) THEN
+     CacheEntryOfs(...) END` — restoring the cache to its intended
+     "each distinct entryId costs one node, once" shape. (A companion
+     fix moved `RegisterModule`'s own one-time `entryOfsCache` chunk
+     `NEW` to registration time instead of on-first-`CacheEntryOfs`,
+     mirroring the existing `WarmModuleCaches`-before-baseline pattern
+     for `siteCache`/`resumeCache` — otherwise a module's FIRST dispatch
+     still paid that one-time cost inside whatever source file's
+     leak-guard window happened to be open, the exact "WHEN, not IF"
+     false-positive `WarmModuleCaches`'s own header comment already
+     describes for the module-list-registration cost.)
+  3. **The real methodology bug that let Round 3's crash go unexplained:
+     the two-generation bootstrap this feature needs was not being
+     followed consistently.** Enabling `$O+` on `Def`/`LinkNE` requires
+     building in two passes — gen1 with `Def`/`LinkNE` at `$O-` and
+     `SetupOvr`'s call to `Overlay.Init` commented out (so `_TOC.EXE`,
+     the binary that does the compiling, is itself safe to run and
+     behaves as a pure linker), then gen2 from that `_TOC.EXE` with
+     `$O+`/`SetupOvr` restored, producing the real `TOC.EXE`+`TOC.OVR`
+     under test. Multiple times during this investigation, `_TOC.EXE`
+     was found to be nothing more than an unmodified copy of
+     `BOOT/TOC.EXE` — meaning a "fixed" source tree was still being
+     exercised through the OLD, unfixed linker logic. This was only
+     caught by adding a throw-away debug print inside `LINK.MOD`'s own
+     overlay-relocation handler and observing it never fired across
+     several supposedly-fixed test runs.
+  4. **A genuine DOS conventional-memory shortfall, once the above three
+     were fixed.** Enabling real `$O+` overlay code inside `TOC.EXE`
+     itself measurably grew the compiler's own runtime memory
+     footprint — several build/test scripts that invoke the
+     overlay-carrying `TOC.EXE` (or, for the compiler's own build step,
+     `_TOC.EXE` compiling the larger `LINK.MOD`/`OVERLAY.MOD`-aware
+     source) at the default or `--memkb=580` budget started failing
+     with `oc: cannot create .def temp` / `oc: cannot create .dbg temp`
+     — DOS out of handles/heap for the compiler's own temp-file
+     machinery, not a compiler or overlay bug. **Fixed** by raising
+     every affected `xt run --memkb=` to `640` (the real DOS
+     conventional-memory ceiling): `SRC/TOC/Makefile`,
+     `SRC/TASM/Makefile`, `SRC/TLINK/Makefile`, `SRC/TOOLS/Makefile`,
+     `SRC/MD/Makefile`, `TESTS/Makefile.man`, `TESTS/test_tasm.sh`,
+     `TESTS/test_tlink.sh`, `TESTS/test_selfhost_debug.sh`
+     (`TESTS/test_selfhost.sh` already used 640 throughout).
+
+  **`OVERLAY.ASM` was NOT the bug.** While investigating, `OVERLAY.ASM`
+  was refactored to add `%define`/`%undef` symbolic BP-relative offsets
+  to every procedure's parameters/locals (Pascal calling-convention
+  clarity, at the maintainer's own request) and one genuine
+  pre-existing-but-latent bug was fixed in passing —
+  `Overlay_ReadTrampolineId` referenced undefined `ri_siteSeg`/
+  `ri_siteOfs` symbols (never actually reassembled since whatever change
+  first introduced that reference). The reassembled `OVERLAY.RDF` was
+  verified **byte-for-byte identical** to the checked-in one (`make
+  regen-asm` + `cmp`), proving the refactor changed no behavior and the
+  calling convention itself was always correct — confirming Round 3's
+  crash could never have been an `OVERLAY.ASM` bug in the first place.
+
+  **Status: DONE.** `Def`/`LinkNE` are `$O+`, `TOC.MOD`'s `SetupOvr` is
+  active (calls `Overlay.Init`, then `Overlay.OvrSetBuf`, then
+  `Overlay.WarmModuleCaches`, in that order), and a full clean
+  `make test` from `BOOT/TOC.EXE` (two consecutive independent runs)
+  came back **311/311 manifest, 116/116 TASM, 14/14 TLINK, zero
+  FAIL/ERROR lines, zero heap leaks** with this overlay code live
+  throughout the entire build (`BOOT/TOC.EXE` bootstraps `TOC.EXE`
+  itself, which then bootstraps every other tool). A full self-hosting
+  compile+link+append cycle (`toc.exe /ENTRY=Run TOC.MOD /M` compiling
+  its own ~26 modules) was independently verified gen2==gen3
+  byte-identical for `TOC.EXE`, `TOC.OVR`, and every individual `.OM`.
 
 Every implemented piece is independently testable and leaves
 non-overlaid programs untouched — a program with no `$O+` module makes

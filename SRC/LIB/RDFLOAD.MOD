@@ -1,4 +1,4 @@
-(*$R-*)(*$D-*)
+(*$R-,D-,A-,O-*)
 MODULE RdfLoad;
 
 (* Minimal dynamic-loader for RDOFF2 object files.

@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,O+*)
 MODULE LinkNE;
 (*
   NE-specific consumer of Link's target-agnostic core: writes a Windows/OS-2
@@ -6,6 +6,23 @@ MODULE LinkNE;
   LinkMZ as a second, mutually-exclusive consumer of Link's generic core —
   same seam (a segRelocProc callback on Link.PerformLinking), different output
   format.
+
+  $O+ (overlay-eligible, 2026-08-11): reached from exactly one call site
+  (TOCMAIN.MOD's targetCP branch), never from LINK.MOD/LINKMZ.MOD/anything
+  in the ordinary /CD hot path -- on every /CD compile (the default; /CP
+  DPMI16 is archived, "no further work planned" per CLAUDE.md), this
+  entire module's ~1200 lines of code would otherwise sit resident for
+  nothing. Making it $O+ removes that dead weight from toc.exe's
+  permanent RAM footprint on the hot path, at the cost of one INT 3Fh
+  trampoline hit (load-on-first-use) the rare times /CP actually links.
+  See DOCS/OVR.MD for the overlay mechanism; toc.exe calls Overlay.Init/
+  OvrSetBuf itself (TOC.MOD) to enable this. NOTE: since /CP itself
+  clears every module's own isOverlay unconditionally at link time
+  (Link.CalculateLayout, DOCS/OVR.MD §2 -- $O+ is /CD-only regardless of
+  which module carries the directive), this module links fully resident
+  when IT IS the actual /CP target being built (TOC286.EXE) -- $O+ only
+  has a real effect on THIS module's own callers when THEY link /CD,
+  i.e. TOC.EXE's own build, never TOC286.EXE's.
 
   Segment model (DOCS/NE-BP.MD Part 2 §2.2): one NE CODE segment per used module's
   own CODE segment, one NE DATA segment per used module's own DATA segment, and

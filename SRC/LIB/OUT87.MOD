@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,A-,R-,O-*)
 MODULE Out87;
 
 IMPORT Out;

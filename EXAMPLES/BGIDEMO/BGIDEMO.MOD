@@ -55,21 +55,41 @@ END Delay;
 
 PROCEDURE InitTables;
 BEGIN
-  Fonts[0] := "DefaultFont"; Fonts[1] := "TriplexFont"; Fonts[2] := "SmallFont";
-  Fonts[3] := "SansSerifFont"; Fonts[4] := "GothicFont";
+  Fonts[0] := "DefaultFont";
+  Fonts[1] := "TriplexFont";
+  Fonts[2] := "SmallFont";
+  Fonts[3] := "SansSerifFont";
+  Fonts[4] := "GothicFont";
 
-  LineStyles[0] := "SolidLn"; LineStyles[1] := "DottedLn"; LineStyles[2] := "CenterLn";
-  LineStyles[3] := "DashedLn"; LineStyles[4] := "UserBitLn";
+  LineStyles[0] := "SolidLn";
+  LineStyles[1] := "DottedLn";
+  LineStyles[2] := "CenterLn";
+  LineStyles[3] := "DashedLn";
+  LineStyles[4] := "UserBitLn";
 
-  FillStyles[0] := "EmptyFill"; FillStyles[1] := "SolidFill"; FillStyles[2] := "LineFill";
-  FillStyles[3] := "LtSlashFill"; FillStyles[4] := "SlashFill"; FillStyles[5] := "BkSlashFill";
-  FillStyles[6] := "LtBkSlashFill"; FillStyles[7] := "HatchFill"; FillStyles[8] := "XHatchFill";
-  FillStyles[9] := "InterleaveFill"; FillStyles[10] := "WideDotFill"; FillStyles[11] := "CloseDotFill";
+  FillStyles[0] := "EmptyFill";
+  FillStyles[1] := "SolidFill";
+  FillStyles[2] := "LineFill";
+  FillStyles[3] := "LtSlashFill";
+  FillStyles[4] := "SlashFill";
+  FillStyles[5] := "BkSlashFill";
+  FillStyles[6] := "LtBkSlashFill";
+  FillStyles[7] := "HatchFill";
+  FillStyles[8] := "XHatchFill";
+  FillStyles[9] := "InterleaveFill";
+  FillStyles[10] := "WideDotFill";
+  FillStyles[11] := "CloseDotFill";
 
-  TextDirect[0] := "HorizDir"; TextDirect[1] := "VertDir";
+  TextDirect[0] := "HorizDir";
+  TextDirect[1] := "VertDir";
 
-  HorizJust[0] := "LeftText"; HorizJust[1] := "CenterText"; HorizJust[2] := "RightText";
-  VertJust[0] := "BottomText"; VertJust[1] := "CenterText"; VertJust[2] := "TopText"
+  HorizJust[0] := "LeftText";
+  HorizJust[1] := "CenterText";
+  HorizJust[2] := "RightText";
+
+  VertJust[0] := "BottomText";
+  VertJust[1] := "CenterText";
+  VertJust[2] := "TopText"
 END InitTables;
 
 PROCEDURE Int2Str(L: LONGINT; VAR s: ARRAY OF CHAR);

@@ -37,7 +37,7 @@ TASMDIR="$ROOT/SRC/TASM"
 TLINKDIR="$ROOT/SRC/TLINK"
 FIXDIR="$ROOT/TESTS/FIX"
 XT="${XT:-xt}"
-MAX=300000000
+MAX=500000000
 
 if ! command -v "$XT" >/dev/null 2>&1; then
     echo "SKIP: xt emulator not found — set XT=/path/to/xt to enable the TLINK test"
@@ -61,12 +61,12 @@ cp "$FIXDIR/TLINKHI.ASM" "$FIXDIR/TLINKDRV.ASM" "$FIXDIR/TLKMAIN.ASM" "$FIXDIR/T
 PASS=0; FAIL=0
 
 echo "[tlink] building TASM.exe via BOOT/TOC.EXE ..."
-( cd "$WORK" && "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build-tasm.log 2>&1 ) \
+( cd "$WORK" && "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TASM.MOD >build-tasm.log 2>&1 ) \
     || { echo "FAIL: TASM.exe did not build"; cat "$WORK/build-tasm.log"; exit 1; }
 [ -f "$WORK/TASM.exe" ] || { echo "FAIL: TASM.exe not produced"; cat "$WORK/build-tasm.log"; exit 1; }
 
 echo "[tlink] building TLINK.exe via BOOT/TOC.EXE ..."
-( cd "$WORK" && "$XT" run --max=$MAX -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TLINK.MOD >build-tlink.log 2>&1 ) \
+( cd "$WORK" && "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" TOC_BOOT.EXE /LOG=debug /M /ENTRY=Run TLINK.MOD >build-tlink.log 2>&1 ) \
     || { echo "FAIL: TLINK.exe did not build"; cat "$WORK/build-tlink.log"; exit 1; }
 [ -f "$WORK/TLINK.exe" ] || { echo "FAIL: TLINK.exe not produced"; cat "$WORK/build-tlink.log"; exit 1; }
 

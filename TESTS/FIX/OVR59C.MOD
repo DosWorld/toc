@@ -1,0 +1,8 @@
+(*$O+,R+*)
+MODULE Ovr59c;
+VAR a: ARRAY 5 OF INTEGER;
+PROCEDURE Foo*;
+BEGIN
+  a[0] := 1
+END Foo;
+END Ovr59c.

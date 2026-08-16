@@ -32,6 +32,14 @@ TYPE
     next: InitImpNode
   END;
 
+  (* DOCS/OVR.MD §5: exported, module-level ($O+ region) procedures,
+     collected for the MODNAME.OVR archive member (§11.2). *)
+  OvrEntryNode = POINTER TO OvrEntryNodeDesc;
+  OvrEntryNodeDesc = RECORD
+    name: ARRAY NameLen OF CHAR;
+    next: OvrEntryNode
+  END;
+
   FwdRef = RECORD
     name: ARRAY NameLen OF CHAR;
     ptr:  Syms.TypeDesc
@@ -41,6 +49,18 @@ VAR
   parserModName*:   ARRAY NameLen OF CHAR;
   parserSystemMode*: BOOLEAN;
   parserEntryProc*: ARRAY NameLen OF CHAR;
+  (* Extra __init calls for the ENTRY module only, appended via AddExtraInit
+     (TOC.MOD calls it before ParseModule, for the root module's own compile
+     alone — see TOC.MOD's own TransitiveResidentInits comment for why this
+     exists). Each name
+     here is merged onto initImpsHead's own list, right after the IMPORT
+     clause is parsed, exactly as if it had been a direct IMPORT of this
+     module — the existing __init-call codegen loop then treats it
+     identically to a real import, with no separate code path. Consumed and
+     cleared by ParseModule; TOC.MOD repopulates it fresh before every
+     entry-module compile. *)
+  parserExtraInits: InitImpNode;
+  parserExtraInitsTail: InitImpNode;
   parserStackSize*:   LONGINT;
   parserMinMemPara*:  LONGINT;  (* $M min, rounded up to paragraphs; default 8192 = 128 KiB *)
   parserMaxMemPara*:  LONGINT;  (* $M max, rounded up to paragraphs; default 16384 = 256 KiB *)
@@ -50,6 +70,10 @@ VAR
   initImpsHead:     InitImpNode;
   initImpsTail:     InitImpNode;
   nInitImps:        INTEGER;
+  ovrEntriesHead:   OvrEntryNode;
+  ovrEntriesTail:   OvrEntryNode;
+  nOvrEntries:      INTEGER;
+  modIsOverlay:     BOOLEAN;  (* TRUE iff $O+ was active at any PROCEDURE decl seen *)
   fwdRefs:          ARRAY MaxFwdRefs OF FwdRef;
   nFwdRefs:         INTEGER;
   curModName:       ARRAY NameLen OF CHAR;
@@ -62,6 +86,24 @@ BEGIN
   END;
   RETURN FALSE
 END IsLex;
+
+(* Append one module name onto parserExtraInits (TOC.MOD calls this,
+   once per resident module in its own transitive-import walk, before
+   compiling the ENTRY module only — see parserExtraInits's own comment).
+   Must be called before ParseModule for that compile; ParseModule
+   consumes and clears the list. *)
+PROCEDURE AddExtraInit*(name: ARRAY OF CHAR);
+  VAR n: InitImpNode;
+BEGIN
+  NEW(n);
+  IF n = NIL THEN
+    LogErr.Error("out of memory (extra init list)"); RETURN
+  END;
+  Strings.Copy(name, n^.name); n^.next := NIL;
+  IF parserExtraInitsTail # NIL THEN parserExtraInitsTail^.next := n
+  ELSE parserExtraInits := n END;
+  parserExtraInitsTail := n
+END AddExtraInit;
 
 (* ---- syscomment handler ---- *)
 
@@ -79,14 +121,16 @@ BEGIN
   dst[last + 1] := 0X
 END TrimAndCopy;
 
-(* Apply a single +/- toggle directive (currently A, R, D).  Returns the index
-   just past the consumed "+" or "-" in val, or -1 on error (caller reports). *)
+(* Apply a single +/- toggle directive (currently A, R, D, O).  Returns the
+   index just past the consumed "+" or "-" in val, or -1 on error (caller
+   reports). *)
 PROCEDURE ApplyToggle(dir: CHAR; val: ARRAY OF CHAR; i: INTEGER): INTEGER;
 BEGIN
   IF val[i] = "+" THEN
     IF dir = "R" THEN PExpr.boundsChk := TRUE
     ELSIF dir = "A" THEN Syms.AlignFields := TRUE
     ELSIF dir = "D" THEN TDbg.SetEnabled(TRUE)
+    ELSIF dir = "O" THEN PExpr.overlayMode := TRUE
     ELSE RETURN -1
     END;
     RETURN i + 1
@@ -94,6 +138,7 @@ BEGIN
     IF dir = "R" THEN PExpr.boundsChk := FALSE
     ELSIF dir = "A" THEN Syms.AlignFields := FALSE
     ELSIF dir = "D" THEN TDbg.SetEnabled(FALSE)
+    ELSIF dir = "O" THEN PExpr.overlayMode := FALSE
     ELSE RETURN -1
     END;
     RETURN i + 1
@@ -101,9 +146,10 @@ BEGIN
   END
 END ApplyToggle;
 
-(* Toggle directives (A, R, D) may be combined in one comment, comma-separated:
-   (*$A-,R-*), (*$R-,D-*).  Parses "Dir+-[,Dir+-]*" starting at val[0], where
-   the first Dir is already known (dir/val holds only the value after it). *)
+(* Toggle directives (A, R, D, O) may be combined in one comment, comma-
+   separated: (*$A-,R-*), (*$R-,D-*), (*$O+,R-*).  Parses "Dir+-[,Dir+-]*"
+   starting at val[0], where the first Dir is already known (dir/val holds
+   only the value after it). *)
 PROCEDURE ProcessToggleChain(dir: CHAR; val: ARRAY OF CHAR);
   VAR i: INTEGER; nextDir: CHAR;
 BEGIN
@@ -112,12 +158,12 @@ BEGIN
   WHILE val[i] = "," DO
     INC(i);
     nextDir := val[i];
-    IF (nextDir = "A") OR (nextDir = "R") OR (nextDir = "D") THEN
+    IF (nextDir = "A") OR (nextDir = "R") OR (nextDir = "D") OR (nextDir = "O") THEN
       INC(i);
       i := ApplyToggle(nextDir, val, i);
       IF i < 0 THEN PExpr.Error("$ directive requires + or -"); RETURN END
     ELSE
-      PExpr.Error("$ directive: only A, R and D may be combined with ','"); RETURN
+      PExpr.Error("$ directive: only A, R, D and O may be combined with ','"); RETURN
     END
   END;
   IF val[i] # 0X THEN PExpr.Error("$ directive: trailing text after toggle chain") END
@@ -139,7 +185,7 @@ PROCEDURE ApplyOneSyscomment(dir: CHAR; VAR arg: ARRAY OF CHAR);
 BEGIN
   TrimAndCopy(arg, val);
 
-  IF (dir = "R") OR (dir = "A") OR (dir = "D") THEN
+  IF (dir = "R") OR (dir = "A") OR (dir = "D") OR (dir = "O") THEN
     ProcessToggleChain(dir, val)
   ELSIF dir = "M" THEN
     (* $M stack_size, min_memory, max_memory
@@ -220,6 +266,41 @@ BEGIN
   END;
   sc.nSys := 0
 END ProcessSyscomment;
+
+(* Append one overlay-entry-point name (DOCS/OVR.MD §5). *)
+PROCEDURE AddOvrEntry(name: ARRAY OF CHAR);
+  VAR node: OvrEntryNode;
+BEGIN
+  NEW(node);
+  IF node = NIL THEN LogErr.Error("out of memory (overlay entry list)"); RETURN END;
+  Strings.Copy(name, node^.name); node^.next := NIL;
+  IF ovrEntriesTail # NIL THEN ovrEntriesTail^.next := node ELSE ovrEntriesHead := node END;
+  ovrEntriesTail := node; INC(nOvrEntries)
+END AddOvrEntry;
+
+(* Write the MODNAME.OVR archive member text (DOCS/OVR.MD §11.2):
+     OVERLAY=1
+     ENTRYCOUNT=<n>
+     ENTRY0=<name>
+     ENTRY1=<name>
+     ...
+   Only called when modIsOverlay is TRUE — a non-overlay module gets no
+   .OVR member at all (om-no-file, checked by the manifest). *)
+PROCEDURE WriteOvrMember(VAR f: Files.File);
+  VAR line: ARRAY 80 OF CHAR;
+      oe: OvrEntryNode; idx: INTEGER;
+BEGIN
+  Files.WriteLine(f, "OVERLAY=1");
+  Strings.Copy("ENTRYCOUNT=", line); Strings.AppendInt(LONGINT(nOvrEntries), line);
+  Files.WriteLine(f, line);
+  oe := ovrEntriesHead; idx := 0;
+  WHILE oe # NIL DO
+    Strings.Copy("ENTRY", line); Strings.AppendInt(LONGINT(idx), line);
+    Strings.Append("=", line); Strings.Append(oe^.name, line);
+    Files.WriteLine(f, line);
+    INC(idx); oe := oe^.next
+  END
+END WriteOvrMember;
 
 (* A procedure result type must be a scalar, pointer, or procedure — Oberon-07
    forbids returning arrays or records (they cannot be returned in DX:AX, and
@@ -738,6 +819,19 @@ BEGIN
     Rdoff.RdfAddGlobal(Cgen.CgObj, gname, Rdoff.SegCode, sym.adr)
   END;
 
+  (* DOCS/OVR.MD §5: an overlay entry point is exported AND module-level
+     AND declared while $O+ was active.  sym.level was captured at SymNew
+     time (before this procedure's own param scope was opened), so it
+     reflects the DECLARING scope, not the body we're about to parse.
+     Stored under the MANGLED global name (gname, "<Mod>_<Proc>") -- the
+     linker's own symbol table (LINK.MOD's FindImport/SymOwner) is keyed
+     by that same mangled name, never the bare proc name, so OvrEntryId's
+     lookup at link time only works if the .OVR member matches it. *)
+  IF exported & (sym.level = 0) & PExpr.overlayMode THEN
+    modIsOverlay := TRUE;
+    AddOvrEntry(gname)
+  END;
+
   (* save outer context *)
   savedRetList := PStmt.retPatchList;
   savedProloguePatch := PStmt.curProloguePatch;
@@ -1008,13 +1102,14 @@ PROCEDURE ParseModule*(VAR s: Scan.Scanner);
       nbuf: ARRAY Syms.NameLen OF CHAR;
       initName: ARRAY 66 OF CHAR;
       initOfs, guardOfs: LONGINT;
-      rdfName, defName, libName, dbgName: ARRAY 40 OF CHAR;
+      rdfName, defName, libName, dbgName, ovrName: ARRAY 40 OF CHAR;
       srcBase: ARRAY 40 OF CHAR;
-      rf, df, lf, sf, dg, mf: Files.File;
-      dgOpen: BOOLEAN;
+      rf, df, lf, sf, dg, mf, ov: Files.File;
+      dgOpen, ovOpen: BOOLEAN;
       mergeOk: BOOLEAN;
       ip, ipNext: InitImpNode;
       er, erNext: ExtraRdf;
+      oe, oeNext: OvrEntryNode;
       sym: Syms.Symbol;
       req87Id, depImportId: INTEGER;
       addrField, dsImmAt: LONGINT;
@@ -1039,6 +1134,7 @@ BEGIN
   Cgen.EmitDataZero(2);
   PExpr.modUsesFpu := FALSE;
   PExpr.boundsChk := FALSE;
+  PExpr.overlayMode := FALSE;
   PStmt.retPatchList := NIL;
   PStmt.curProloguePatch := 0;
   PStmt.curProcDepth := 0;
@@ -1046,6 +1142,8 @@ BEGIN
   initImpsHead := NIL; initImpsTail := NIL; nInitImps := 0;
   (* reset extra rdfs *)
   extraRdfsHead := NIL; extraRdfsTail := NIL;
+  (* reset overlay entry-point collection (DOCS/OVR.MD §5) *)
+  ovrEntriesHead := NIL; ovrEntriesTail := NIL; nOvrEntries := 0; modIsOverlay := FALSE;
 
   IF ~parserSystemMode THEN Import.AddImplicitImport("SYSTEM") END;
 
@@ -1131,6 +1229,23 @@ BEGIN
      contiguous. *)
   Import.ResetLoaded();
 
+  (* Merge TOC.MOD's extra transitive-init list (entry module only; NIL for
+     every other module's compile) onto the tail of the ordinary IMPORT-
+     derived list, so the existing __init-call codegen loop below calls
+     them exactly like any other direct import — see parserExtraInits's
+     own comment. A name already reached through this module's own real
+     IMPORT clause is harmless to call twice (the callee's own guard word
+     absorbs the redundant call — DOCS/OVR.MD §4) so no dedup is done here. *)
+  WHILE parserExtraInits # NIL DO
+    IF initImpsTail # NIL THEN initImpsTail^.next := parserExtraInits
+    ELSE initImpsHead := parserExtraInits END;
+    initImpsTail := parserExtraInits;
+    parserExtraInits := parserExtraInits^.next;
+    initImpsTail^.next := NIL;
+    INC(nInitImps)
+  END;
+  parserExtraInitsTail := NIL;
+
   (* parse declarations *)
   ParseDeclSeq();
 
@@ -1159,11 +1274,35 @@ BEGIN
   hasBody    := (PExpr.sc.sym = Scan.TBegin);
   Strings.Copy(modName, initName); Strings.Append("__init", initName);
 
+  (* An $O+ module may not have a BEGIN block at all: an overlay module's
+     own init body would have to be called through the SAME overlay-
+     trampoline mechanism as any other overlay call, and doing so before
+     OvrInit has run would crash -- giving an $O+ module no init code at
+     all removes that failure class by construction (DOCS/OVR.MD §4).
+     Reject at compile time rather than silently
+     miscompiling. *)
+  IF modIsOverlay & hasBody THEN
+    PExpr.Error("$O+ module may not have a BEGIN block")
+  END;
+
+  (* No __init at all for an $O+ module: nothing outside the entry
+     module's own transitive-init walk (TOC.MOD, see parserExtraInits)
+     ever calls an overlay module's init, and an $O+ module's own direct
+     imports (if any) have no init caller either — DOCS/OVR.MD §4 documents
+     this: once a unit has no init body, nothing tries to run one
+     separately. *)
+  IF modIsOverlay THEN
+    (* still consume a body if present, even though it's a compile error
+       above, so parsing doesn't derail on the rest of the file *)
+    IF hasBody THEN
+      IsLex(Scan.TBegin); ParseStatSeq(Syms.TypeNotype)
+    END
+
   (* The bare-RETF short form is only valid when the module ALSO needs no
      FPU check: a body-less, import-less module whose procedures use REAL/
      LONGREAL must still get the SYSTEM_REQUIRE87 call in its __init, or it
      runs undetected on FPU-less hardware. *)
-  IF ~hasImports & ~hasBody & ~PExpr.modUsesFpu THEN
+  ELSIF ~hasImports & ~hasBody & ~PExpr.modUsesFpu THEN
     initOfs := Cgen.CgPc();
     Rdoff.RdfAddGlobal(Cgen.CgObj, initName, Rdoff.SegCode, initOfs);
     Cgen.Emit1(BYTE(Cgen.OpRetf))
@@ -1205,9 +1344,17 @@ BEGIN
     END;
     ip := initImpsHead;
     WHILE ip # NIL DO
-      Strings.Copy(ip^.name, depInit); Strings.Append("__init", depInit);
-      depImportId := Rdoff.RdfAddImport(Cgen.CgObj, depInit);
-      Cgen.CgCallFar(depImportId);
+      (* An $O+ import has no __init to call (see the modIsOverlay branch
+         above) -- skip it rather than emit a CALL FAR to a symbol that
+         will never exist.  A name reached here via parserExtraInits
+         (entry module only) is always resident by construction (TOC.MOD's
+         transitive walk never adds an $O+ node to that list), so this
+         check only ever fires for a module's own real IMPORT clause. *)
+      IF ~Import.IsOverlayModule(ip^.name) THEN
+        Strings.Copy(ip^.name, depInit); Strings.Append("__init", depInit);
+        depImportId := Rdoff.RdfAddImport(Cgen.CgObj, depInit);
+        Cgen.CgCallFar(depImportId)
+      END;
       ip := ip^.next
     END;
     IF IsLex(Scan.TBegin) THEN ParseStatSeq(Syms.TypeNotype) END;
@@ -1230,6 +1377,7 @@ BEGIN
   Strings.Copy(modName, rdfName); Strings.Append(".RDF", rdfName); SYSTEM.UPSTR(rdfName);
   Strings.Copy(modName, defName); Strings.Append(".DEF", defName); SYSTEM.UPSTR(defName);
   Strings.Copy(modName, dbgName); Strings.Append(".DBG", dbgName); SYSTEM.UPSTR(dbgName);
+  Strings.Copy(modName, ovrName); Strings.Append(".OVR", ovrName); SYSTEM.UPSTR(ovrName);
   Strings.Copy(modName, libName); Strings.Append(".OM",  libName); SYSTEM.UPSTR(libName);
 
   (* debug info: module code length for the SEGMENT slice *)
@@ -1293,6 +1441,17 @@ BEGIN
     ELSE
       LogErr.Error("oc: cannot create .dbg temp")
     END;
+    (* write .OVR into a temp -- only for modules with $O+ entry points
+       (DOCS/OVR.MD §11.2); non-overlay modules get no .OVR member at all. *)
+    ovOpen := FALSE;
+    IF modIsOverlay THEN
+      ovOpen := Files.ReWriteTemp(ov);
+      IF ovOpen THEN
+        WriteOvrMember(ov)
+      ELSE
+        LogErr.Error("oc: cannot create .ovr temp")
+      END
+    END;
     (* Symbol table is no longer needed: .def captures all exported info.
        Release it now to free DOS heap before the entry-stub generator
        allocates its own ObjFile. *)
@@ -1320,6 +1479,11 @@ BEGIN
         Files.Seek(dg, LONGINT(0));
         Tar.TarAddFromFile(lf, dbgName, dg, Files.Size(dg))
       END;
+      (* stream .OVR temp — only present for $O+ overlay-eligible modules. *)
+      IF ovOpen THEN
+        Files.Seek(ov, LONGINT(0));
+        Tar.TarAddFromFile(lf, ovrName, ov, Files.Size(ov))
+      END;
       Tar.TarEnd(lf);
       Files.Close(lf);
       (* Disk-full / write errors are latched inside Files (wrErr survives
@@ -1331,10 +1495,11 @@ BEGIN
     ELSE
       LogErr.Error2("oc: cannot create ", libName)
     END;
-    (* close (auto-delete) the .rdf/.def/.dbg temps *)
+    (* close (auto-delete) the .rdf/.def/.dbg/.ovr temps *)
     Files.Close(rf);
     IF dfOpen THEN Files.Close(df) END;
     IF dgOpen THEN Files.Close(dg) END;
+    IF ovOpen THEN Files.Close(ov) END;
     IF ~LogErr.HaveErr() THEN LogErr.Info2("wrote ", libName) END
     END   (* IF LogErr.HaveErr() *)
   END;
@@ -1367,7 +1532,13 @@ BEGIN
     DISPOSE(initImpsHead);
     initImpsHead := ipNext
   END;
-  initImpsTail := NIL; nInitImps := 0
+  initImpsTail := NIL; nInitImps := 0;
+  WHILE ovrEntriesHead # NIL DO
+    oeNext := ovrEntriesHead^.next;
+    DISPOSE(ovrEntriesHead);
+    ovrEntriesHead := oeNext
+  END;
+  ovrEntriesTail := NIL; nOvrEntries := 0
 END ParseModule;
 
 BEGIN
@@ -1378,5 +1549,6 @@ BEGIN
   parserMemSet := FALSE;
   extraRdfsHead := NIL; extraRdfsTail := NIL;
   initImpsHead := NIL; initImpsTail := NIL; nInitImps := 0;
+  ovrEntriesHead := NIL; ovrEntriesTail := NIL; nOvrEntries := 0; modIsOverlay := FALSE;
   nFwdRefs := 0
 END Parser.
