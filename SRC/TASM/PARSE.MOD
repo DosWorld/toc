@@ -1,3 +1,4 @@
+(*$D-,A-,R-,O-*)
 MODULE Parse;
 (*
   TASM top-level driver: one source line at a time, dispatch to Dir (if a
@@ -29,6 +30,11 @@ MODULE Parse;
 IMPORT Files, Strings, LogErr, Rdoff, Sym, Dir, Enc, Scan, Lex;
 
 CONST
+  MaxPass1Iters = 8;  (* EncJccAuto's Pass-1 fixed-point loop (widen
+                          backward out-of-range Jcc's, see its own header
+                          comment): bound on reruns before giving up as
+                          non-convergent. Real sources converge in 1-2
+                          reruns; 8 is generous headroom. *)
   MaxSrcDepth = 8;    (* §I.3: input-source stack depth -- top-level file
                           (always stk[0]) plus up to 7 nested %include/
                           %macro/%define levels (§S2: %define substitutions
@@ -81,7 +87,18 @@ TYPE
     scn:      Scan.Scanner;
     f:        Files.File;
     isFile:   BOOLEAN;
-    isDefine: BOOLEAN
+    isDefine: BOOLEAN;
+    repLeft:  INTEGER;   (* %rep: iterations still to replay after this one,
+                             0 for every non-%rep slot (isFile/isDefine/plain
+                             %macro expansions never touch this field).  On
+                             EOF, RawTokNext rewinds scn (Scan.InitMem on the
+                             SAME body pointer, no realloc) and decrements
+                             this instead of popping, until it reaches 0. *)
+    repLine:  LONGINT    (* %rep: the ORIGINAL virtLine (the %rep line
+                             itself), reused unchanged on every rewind --
+                             scn.line has advanced past the body's own LFs
+                             by the time EOF triggers a rewind, so it is
+                             wrong to feed back to InitMem's virtLine. *)
   END;
   SrcStack = ARRAY MaxSrcDepth OF SrcSlot;
 
@@ -242,6 +259,18 @@ BEGIN
       DEC(srcTop);
       RawTokNext; RETURN
     END;
+    (* %rep: EOF on a repeat slot rewinds the SAME body (Scan.InitMem on
+       the same MemText pointer, no realloc/free) instead of popping,
+       until repLeft reaches 0 -- then falls through to the ordinary pop
+       below exactly like a one-shot %macro expansion. Must be checked
+       before the isFile/DISPOSE pop below, and still synthesizes one
+       TEol per iteration boundary for the same reason a %macro
+       expansion does (never newline-terminated). *)
+    IF (~stk[srcTop].isFile) & (~stk[srcTop].isDefine) & (stk[srcTop].repLeft > 0) THEN
+      DEC(stk[srcTop].repLeft);
+      Scan.InitMem(stk[srcTop].scn, stk[srcTop].scn.mem, stk[srcTop].scn.fname, stk[srcTop].repLine);
+      tSym := Scan.TEol; RETURN
+    END;
     (* §I.3: on inner-file/%macro EOF (srcTop > 0), pop back to the
        parent source and synthesize ONE TEol first -- an included file
        not ending in a newline (or a %macro expansion, which is never
@@ -282,7 +311,7 @@ BEGIN
        2026-07-16 review probe; InvokeMacro had the same ordering bug). *)
     CurFname(fn);
     INC(srcTop);
-    stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := TRUE;
+    stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := TRUE; stk[srcTop].repLeft := 0;
     Scan.InitMem(stk[srcTop].scn, expansion, fn, tLine);
     TokNext; RETURN     (* re-enter: pull the macro's first real token *)
   END
@@ -486,14 +515,14 @@ BEGIN
   END
 END EvalShift;
 
-(* EvalExpr: left-to-right chain of '+'/'-' over EvalShift terms, with at
+(* EvalAdd: left-to-right chain of '+'/'-' over EvalShift terms, with at
    most one label term across the whole chain (folded into
    hasLabel/labelName; a second label term is a hard error, since this
    dialect has no two-symbol-difference relocation support -- see
    DOCS/IMPLRULE.MD-style Simplicity First scoping note above). Unary
    '-' is handled here (not in EvalFactor) so "-(2+3)" and "-label" both
    work via the same leading-minus check as the old flat parsers. *)
-PROCEDURE EvalExpr;
+PROCEDURE EvalAdd(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
   VAR rhs: LONGINT; rhsHasLabel, isPlus, leadNeg: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
 BEGIN
   leadNeg := FALSE;
@@ -512,6 +541,55 @@ BEGIN
       hasLabel := TRUE; Strings.Copy(rhsName, labelName)
     END;
     IF isPlus THEN v := v + rhs ELSE v := v - rhs END
+  END
+END EvalAdd;
+
+(* EvalBitAnd: left-to-right chain of '&' (bitwise AND) over EvalAdd terms
+   -- NASM's precedence tier just above '+'/'-', just below '^'. A label
+   cannot be AND-ed (same reasoning as EvalTerm's '*'/'/'/'%' rejection:
+   a relocatable address has no fixed bit pattern until link time). *)
+PROCEDURE EvalBitAnd(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  EvalAdd(v, hasLabel, labelName);
+  WHILE tSym = Scan.TAmp DO
+    IF hasLabel THEN Fail("a label cannot be used with '&' in an expression"); RETURN END;
+    TokNext; EvalAdd(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN Fail("a label cannot be used with '&' in an expression"); RETURN END;
+    v := SYSTEM.AND(v, rhs)
+  END
+END EvalBitAnd;
+
+(* EvalBitXor: left-to-right chain of '^' (bitwise XOR) over EvalBitAnd
+   terms -- NASM's precedence tier just above '&', just below '|'. *)
+PROCEDURE EvalBitXor(VAR v: LONGINT; VAR hasLabel: BOOLEAN; VAR labelName: ARRAY OF CHAR);
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  EvalBitAnd(v, hasLabel, labelName);
+  WHILE tSym = Scan.TCaret DO
+    IF hasLabel THEN Fail("a label cannot be used with '^' in an expression"); RETURN END;
+    TokNext; EvalBitAnd(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN Fail("a label cannot be used with '^' in an expression"); RETURN END;
+    v := SYSTEM.XOR(v, rhs)
+  END
+END EvalBitXor;
+
+(* EvalExpr: left-to-right chain of '|' (bitwise OR) over EvalBitXor terms
+   -- NASM's lowest-precedence operator, the top of the whole expression
+   grammar. Kept as the stable public entry point every caller (EvalFactor's
+   own '(' case, ParseConstExpr, OperandExprTail/OperandLeadingMulTail,
+   ParseOperand's EQU-constant/bare-label arms) already calls -- only its
+   body changed, from "the '+'/'-' tier" to "the whole precedence chain
+   starting at '|'". *)
+PROCEDURE EvalExpr;
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+BEGIN
+  EvalBitXor(v, hasLabel, labelName);
+  WHILE tSym = Scan.TPipe DO
+    IF hasLabel THEN Fail("a label cannot be used with '|' in an expression"); RETURN END;
+    TokNext; EvalBitXor(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN Fail("a label cannot be used with '|' in an expression"); RETURN END;
+    v := SYSTEM.IOR(v, rhs)
   END
 END EvalExpr;
 
@@ -636,6 +714,20 @@ BEGIN
           hasLabel := TRUE; Strings.Copy(firstIdent, labelName)
         END
       END
+    ELSIF tSym = Scan.TDot THEN
+      (* dot-local-label reference, e.g. "[cs:.opsite]" or "[.loop]" --
+         same "." + name convention ParseOperand's own bare TDot branch
+         uses, just reached from inside [ ] instead of as a whole
+         operand. Only a bare local label is meaningful here (no
+         NAME.field struct-offset form, since a leading '.' with no
+         preceding identifier can never be a struct-field access). *)
+      TokNext;
+      IF tSym # Scan.TIdent THEN Fail("expected identifier after '.'"); RETURN END;
+      firstIdent[0] := "."; firstIdent[1] := 0X; Strings.Append(tIdOrig, firstIdent);
+      TokNext;
+      IF negNext THEN Fail("'-' before register/label in address"); RETURN END;
+      IF hasLabel THEN Fail("only one label is allowed in an address expression"); RETURN END;
+      hasLabel := TRUE; Strings.Copy(firstIdent, labelName)
     ELSE
       Fail("unexpected token inside [ ]"); RETURN
     END
@@ -673,6 +765,46 @@ BEGIN
   END
 END ParseMemBody;
 
+(* OperandLeadingMulTail: consume a "*/,%,<<,>>" chain applying directly to
+   the already-parsed leading term (op.disp), BEFORE OperandExprTail's own
+   '+'/'-' loop runs -- e.g. "dw NAME*2" where NAME is an EQU/%assign
+   constant: '*' is the very first token after NAME, never a '+'/'-', so
+   OperandExprTail's own loop (which only ever starts on '+'/'-') was
+   never reached and "*2" was left unconsumed, surfacing as "unexpected
+   token at start of statement" one level up. Mirrors EvalTerm/EvalShift's
+   own precedence tier ('*','/','%' above '<<','>>', both above '+'/'-')
+   but seeded from op.disp/op.hasLabel instead of a fresh EvalFactor call, since the
+   leading term here was already resolved by ParseOperand's EQU-constant/
+   bare-label branches. A label cannot be scaled/shifted, same restriction
+   EvalTerm/EvalShift already enforce for a fresh expression. *)
+PROCEDURE OperandLeadingMulTail(VAR op: Enc.Operand);
+  VAR rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
+      tstOp: INTEGER; isShl: BOOLEAN;
+BEGIN
+  WHILE (tSym = Scan.TStar) OR (tSym = Scan.TSlash) OR (tSym = Scan.TPercent) DO
+    IF op.hasLabel THEN Fail("a label cannot be scaled, divided, or used with '%' in an expression"); RETURN END;
+    tstOp := tSym; TokNext; EvalFactor(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN
+      Fail("a label cannot be scaled, divided, or used with '%' in an expression"); RETURN
+    END;
+    IF tstOp = Scan.TStar THEN
+      op.disp := op.disp * rhs
+    ELSIF tstOp = Scan.TSlash THEN
+      IF rhs = LONGINT(0) THEN Fail("division by zero in expression"); RETURN END;
+      op.disp := op.disp DIV rhs
+    ELSE
+      IF rhs = LONGINT(0) THEN Fail("modulo by zero in expression"); RETURN END;
+      op.disp := op.disp MOD rhs
+    END
+  END;
+  WHILE (tSym = Scan.TShl) OR (tSym = Scan.TShr) DO
+    IF op.hasLabel THEN Fail("a label cannot be shifted in an expression"); RETURN END;
+    isShl := (tSym = Scan.TShl); TokNext; EvalTerm(rhs, rhsHasLabel, rhsName);
+    IF rhsHasLabel THEN Fail("a label cannot be shifted in an expression"); RETURN END;
+    IF isShl THEN op.disp := SYSTEM.LSL(op.disp, INTEGER(rhs)) ELSE op.disp := SYSTEM.LSR(op.disp, INTEGER(rhs)) END
+  END
+END OperandLeadingMulTail;
+
 (* OperandExprTail: consume an optional "+/- expr" tail after an
    already-parsed EQU-constant, bare-label, or dot-local-label immediate
    (op.disp/op.hasLabel/op.labelName already carry the leading term),
@@ -683,10 +815,15 @@ END ParseMemBody;
    since the tail's operator is already the explicit '+'/'-' this loop
    consumes). A second label appearing in the tail is rejected the same
    way EvalExpr rejects one within a single expression -- this dialect
-   supports at most one label total in any operand. *)
+   supports at most one label total in any operand. Calls
+   OperandLeadingMulTail FIRST so a "*/,%,<<,>>" chain directly against the
+   leading term (no '+'/'-' in front, e.g. "NAME*2") is folded into
+   op.disp before this loop ever looks for '+'/'-'. *)
 PROCEDURE OperandExprTail(VAR op: Enc.Operand);
   VAR neg: BOOLEAN; rhs: LONGINT; rhsHasLabel: BOOLEAN; rhsName: ARRAY Sym.MaxName OF CHAR;
 BEGIN
+  OperandLeadingMulTail(op);
+  IF LogErr.HaveErr() OR anyErr THEN RETURN END;
   WHILE (tSym = Scan.TPlus) OR (tSym = Scan.TMinus) DO
     neg := (tSym = Scan.TMinus); TokNext;
     EvalShift(rhs, rhsHasLabel, rhsName);
@@ -758,6 +895,20 @@ BEGIN
     END;
     IF LookupReg(name, size, reg, isSeg) THEN
       TokNext;
+      IF isSeg & (tSym = Scan.TColon) THEN
+        (* NASM segment-override prefix written OUTSIDE the brackets, e.g.
+           "mov al, es:[bx]" (as opposed to the "[es:bx]" form ParseMemBody
+           already handles on its own) -- both spellings are legal NASM and
+           must produce the same OKMem operand with op.seg set. Only a
+           following '[' is meaningful here; "es:" before anything else
+           (a register, an immediate) is not a memory operand and falls
+           through to the plain OKSegReg case below. *)
+        TokNext;
+        IF tSym = Scan.TLbrak THEN
+          TokNext; ParseMemBody(op); op.seg := reg; RETURN
+        END;
+        Fail("expected '[' after segment override"); RETURN
+      END;
       IF isSeg THEN op.kind := Enc.OKSegReg ELSE op.kind := Enc.OKReg END;
       op.reg := reg; op.size := size; op.seg := Enc.NoSeg;
       RETURN
@@ -1189,7 +1340,7 @@ BEGIN
     INC(i)
   END;
   INC(srcTop);
-  stk[srcTop].isFile := TRUE; stk[srcTop].isDefine := FALSE;
+  stk[srcTop].isFile := TRUE; stk[srcTop].isDefine := FALSE; stk[srcTop].repLeft := 0;
   IF ~Files.Reset(stk[srcTop].f, path) THEN
     DEC(srcTop); Fail("cannot open include file"); RETURN
   END;
@@ -1330,6 +1481,112 @@ BEGIN
   Sym.DefineMacro(name, nParams, body)
 END DoMacroRecord;
 
+VAR
+  inRepDef: BOOLEAN;   (* mirrors inMacroDef -- guards against nested %rep,
+                           out of scope the same way nested %macro is. *)
+  repBodyBuf: ARRAY 4096 OF CHAR;   (* separate from macroBodyBuf: a %rep
+                                        body replayed later can itself
+                                        contain a %macro invocation whose
+                                        OWN capture (if any) must not alias
+                                        this buffer. *)
+
+(* IsEndrepLine: TRUE if the raw line text is, once leading blanks are
+   skipped, the bare directive "%endrep" and nothing else but trailing
+   blanks/comment -- exactly IsEndmacroLine's own convention, applied to
+   %rep's own capture loop. *)
+PROCEDURE IsEndrepLine(buf: ARRAY OF CHAR; n: INTEGER): BOOLEAN;
+  VAR i, j: INTEGER; word: ARRAY 16 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  j := 0;
+  WHILE (i < n) & (j < LEN(word) - 1) & (buf[i] # " ") & (ORD(buf[i]) # 9) DO
+    word[j] := SYSTEM.UCASE(buf[i]); INC(i); INC(j)
+  END;
+  word[j] := 0X;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  RETURN ((i = n) OR (buf[i] = ";")) & Strings.Equal(word, "%ENDREP")
+END IsEndrepLine;
+
+(* IsRepLine: TRUE if the raw line text starts (after leading blanks) with
+   "%rep" as a whole word -- used by DoRep's raw-capture loop to detect and
+   reject a nested %rep, mirroring IsMacroLine. *)
+PROCEDURE IsRepLine(buf: ARRAY OF CHAR; n: INTEGER): BOOLEAN;
+  VAR i, j: INTEGER; word: ARRAY 16 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE (i < n) & ((buf[i] = " ") OR (ORD(buf[i]) = 9)) DO INC(i) END;
+  j := 0;
+  WHILE (i < n) & (j < LEN(word) - 1) & (buf[i] # " ") & (ORD(buf[i]) # 9) DO
+    word[j] := SYSTEM.UCASE(buf[i]); INC(i); INC(j)
+  END;
+  word[j] := 0X;
+  RETURN Strings.Equal(word, "%REP")
+END IsRepLine;
+
+(* DoRep: "%rep COUNT ... %endrep" -- repeats the body COUNT times by
+   pushing it as a §I.3 memory-source slot with repLeft = COUNT-1;
+   RawTokNext's EOF handling (Scan.InitMem on the SAME body pointer, no
+   realloc) replays it the remaining COUNT-1 times before popping, so a
+   %assign inside the body (RowOfs's counter-table idiom, see
+   TASM.MD/CLAUDE.md's CGA2.ASM sample) advances once per iteration exactly
+   as %assign's own re-evaluation semantics require. COUNT is a full
+   constant expression (ParseConstExpr), evaluated ONCE before the body is
+   captured -- matching real NASM, which does not let the body's own
+   %assign side effects change COUNT after the fact.  COUNT <= 0 captures
+   (to keep the scanner in sync) but pushes nothing, i.e. zero iterations. *)
+PROCEDURE DoRep;
+  VAR count: LONGINT;
+      lineBuf: ARRAY 512 OF CHAR;
+      total, lineLen: INTEGER; eof, overLong, done, skipping: BOOLEAN;
+      body: Scan.MemText;
+      fn: ARRAY 128 OF CHAR;
+BEGIN
+  IF inRepDef THEN Fail("nested %rep not supported"); RETURN END;
+  ParseConstExpr(count);
+  IF LogErr.HaveErr() OR anyErr THEN RETURN END;
+  IF (tSym # Scan.TEol) & (tSym # Scan.TEof) THEN
+    Fail("unexpected text after %rep count"); RETURN
+  END;
+  skipping := CurrentlySkipping();
+  inRepDef := TRUE;
+  total := 0; done := FALSE;
+  WHILE ~done DO
+    Scan.ReadRawLine(stk[srcTop].scn, lineBuf, lineLen, eof, overLong);
+    IF IsEndrepLine(lineBuf, lineLen) THEN
+      done := TRUE
+    ELSIF IsRepLine(lineBuf, lineLen) THEN
+      Fail("nested %rep not supported"); inRepDef := FALSE; RETURN
+    ELSIF eof THEN
+      Fail("missing %endrep"); inRepDef := FALSE; RETURN
+    ELSIF overLong THEN
+      Fail("%rep body line too long"); inRepDef := FALSE; RETURN
+    ELSE
+      IF ~skipping THEN
+        IF total + lineLen + 2 >= LEN(repBodyBuf) THEN
+          Fail("%rep body too long"); inRepDef := FALSE; RETURN
+        END;
+        IF lineLen > 0 THEN SYSTEM.MOVE(lineBuf[0], repBodyBuf[total], lineLen) END;
+        INC(total, lineLen);
+        repBodyBuf[total] := CHR(10); INC(total)
+      END
+    END
+  END;
+  inRepDef := FALSE;
+  IF skipping OR (count <= 0) THEN RETURN END;
+  IF srcTop = MaxSrcDepth - 1 THEN Fail("%rep nested too deep"); RETURN END;
+  repBodyBuf[total] := 0X;
+  NEW(body);
+  IF body = NIL THEN Fail("out of memory (%rep body)"); RETURN END;
+  SYSTEM.MOVE(repBodyBuf[0], body^[0], total);
+  body^[total] := 0X;
+  CurFname(fn);
+  INC(srcTop);
+  stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := FALSE;
+  stk[srcTop].repLeft := INTEGER(count) - 1; stk[srcTop].repLine := tLine;
+  Scan.InitMem(stk[srcTop].scn, body, fn, tLine)
+END DoRep;
+
 (* DoTimesTail: TIMES n DB/DW/DD val, with the repeat-count expression
    already fully parsed (ParseConstExpr, called by the caller) and the
    token stream positioned right at the DB/DW/DD keyword -- since every
@@ -1357,15 +1614,28 @@ BEGIN
     WHILE i < count DO EmitDataByte(BYTE(op.disp)); i := i + LONGINT(1) END
   ELSIF Strings.Equal(kw, "DW") THEN
     ParseOperand(op, Enc.SzWord);
-    IF (op.kind # Enc.OKImm) OR op.hasLabel THEN
-      Fail("TIMES DW requires a constant value"); RETURN
+    IF op.kind # Enc.OKImm THEN
+      Fail("TIMES DW requires a constant or label value"); RETURN
     END;
-    (* N4 fix: same word-range guard as EmitDataWordMaybeLabel. *)
-    IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
-      Fail("word value out of range"); RETURN
-    END;
-    i := LONGINT(0);
-    WHILE i < count DO EmitDataWord(INTEGER(op.disp)); i := i + LONGINT(1) END
+    IF op.hasLabel THEN
+      (* "times N dw LABEL" -- a per-iteration relocated word (e.g. a
+         jump/dispatch table filled with N copies of the same handler
+         address, CGA2.ASM's own "times 16 dw NotImpNear" idiom).
+         EmitDataWordMaybeLabel already does exactly this for a single
+         DW; calling it N times in a loop emits N independent words each
+         with their own reloc, using codeOfs/dataOfs as the running patch
+         offset the same way a literal "dw LABEL" repeated N times in
+         source would. *)
+      i := LONGINT(0);
+      WHILE i < count DO EmitDataWordMaybeLabel(op); i := i + LONGINT(1) END
+    ELSE
+      (* N4 fix: same word-range guard as EmitDataWordMaybeLabel. *)
+      IF (op.disp < LONGINT(-32768)) OR (op.disp > LONGINT(65535)) THEN
+        Fail("word value out of range"); RETURN
+      END;
+      i := LONGINT(0);
+      WHILE i < count DO EmitDataWord(INTEGER(op.disp)); i := i + LONGINT(1) END
+    END
   ELSIF Strings.Equal(kw, "DD") THEN
     ParseOperand(op, Enc.SzWord);
     IF (op.kind # Enc.OKImm) OR op.hasLabel THEN
@@ -1639,6 +1909,24 @@ BEGIN
        line scan (IsEndmacroLine) -- reaching this dispatch means it
        appeared with no matching %macro at all. *)
     Fail("%endmacro without %macro"); RETURN TRUE
+  ELSIF Strings.Equal(kw, "REP") THEN
+    (* Unlike %assign (which must skip a NAME token before its value), the
+       RawTokNext just above already landed on the count expression's own
+       first token -- calling TokNext again here would skip it. That
+       token was fetched raw (no macro expansion), but ParseConstExpr's
+       EvalFactor chain calls TokNext for every token AFTER the first, so
+       a %define'd/%assign'd name appearing anywhere but the very first
+       token of the count still resolves correctly; a bare %define'd
+       name as the WHOLE count would need re-checking here the same way
+       DoEqu's RHS does, but %rep's count in every real use (including
+       this dialect's own CGA2.ASM sample, "%rep YRES") is a plain
+       integer or EQU-style name, both handled by EvalFactor directly. *)
+    DoRep; RETURN TRUE
+  ELSIF Strings.Equal(kw, "ENDREP") THEN
+    (* %endrep is only ever consumed internally by DoRep's raw-line scan
+       (IsEndrepLine) -- reaching this dispatch means it appeared with no
+       matching %rep. *)
+    Fail("%endrep without %rep"); RETURN TRUE
   ELSE
     Fail("unknown % directive"); RETURN TRUE
   END
@@ -1646,14 +1934,20 @@ END TryPercentDirective;
 
 (* IsDataDirectiveNext: TRUE if the CURRENT token (tSym/tId, already
    advanced past a just-consumed leading identifier) is one of the data
-   directive keywords DB/DW/TIMES -- used to detect a colon-less implicit
-   label immediately followed by a data declaration. *)
+   directive keywords DB/DW/DD/TIMES -- used to detect a colon-less
+   implicit label immediately followed by a data declaration. DD was
+   missing here (only DB/DW/TIMES were checked): a colon-less LONGINT
+   global ("xmsApiEntry dd 0", the shape SPHO.MOD's own EmitVarDecl
+   emits for a TyLong VAR) fell through to "unknown directive or
+   mnemonic" instead of being recognized as an implicit label + DD
+   declaration, even though the exact same colon-less form already
+   worked for DB/DW. *)
 PROCEDURE IsDataDirectiveNext(): BOOLEAN;
   VAR d: INTEGER;
 BEGIN
   IF tSym # Scan.TIdent THEN RETURN FALSE END;
   d := Lex.LookupDirective(tId);
-  RETURN (d = Lex.DDb) OR (d = Lex.DDw) OR (d = Lex.DTimes)
+  RETURN (d = Lex.DDb) OR (d = Lex.DDw) OR (d = Lex.DDd) OR (d = Lex.DTimes)
 END IsDataDirectiveNext;
 
 (* IsEquNext: TRUE if the current token is the EQU keyword (the operator of a
@@ -1703,10 +1997,33 @@ END DoEqu;
    leading token on this same source line. *)
 PROCEDURE ParseInstruction(mnemId: INTEGER; prefixByte: BYTE);
   VAR ops: ARRAY Enc.MaxOperands OF Enc.Operand; n: INTEGER; more: BOOLEAN;
-      fn: ARRAY 128 OF CHAR;
+      fn: ARRAY 128 OF CHAR; trailQual: INTEGER;
 BEGIN
   n := 0; more := (tSym # Scan.TEol) & (tSym # Scan.TEof);
   WHILE more & (n < Enc.MaxOperands) DO
+    (* Non-standard trailing-qualifier form: "mov [StkPtr], word 0" (the
+       BYTE/WORD size keyword AFTER the comma, in front of the value,
+       instead of NASM's normal "mov word [StkPtr], 0" prefix form).  Real
+       NASM does not accept this either, but this dialect's own sample
+       sources use it once, so it's special-cased here rather than left
+       an outright error: detected ONLY when operand 0 is an unsized
+       memory operand (size=SzNone) and this operand's own leading token
+       is a bare BYTE/WORD qualifier NOT itself introducing a memory
+       operand (i.e. not followed by '[', which is the ordinary prefix
+       form ParseOperand's own QByte/QWord branch already handles) --
+       consumed here and folded back onto ops[0].size instead of being
+       parsed as this operand's own prefix. *)
+    trailQual := Enc.SzNone;
+    IF (n = 1) & (ops[0].kind = Enc.OKMem) & (ops[0].size = Enc.SzNone) & (tSym = Scan.TIdent) THEN
+      IF Lex.LookupQualifier(tId) = Lex.QByte THEN trailQual := Enc.SzByte
+      ELSIF Lex.LookupQualifier(tId) = Lex.QWord THEN trailQual := Enc.SzWord
+      END
+    END;
+    IF trailQual # Enc.SzNone THEN
+      TokNext;
+      IF tSym = Scan.TLbrak THEN Fail("unexpected '[' after size qualifier"); RETURN END;
+      ops[0].size := trailQual
+    END;
     ParseOperand(ops[n], Enc.SzNone);
     INC(n);
     IF tSym = Scan.TComma THEN TokNext ELSE more := FALSE END
@@ -1907,7 +2224,7 @@ BEGIN
      the depth-cap edge" gap documented after the §I.4 pass). *)
   CurFname(fn);
   INC(srcTop);
-  stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := FALSE;
+  stk[srcTop].isFile := FALSE; stk[srcTop].isDefine := FALSE; stk[srcTop].repLeft := 0;
   Scan.InitMem(stk[srcTop].scn, expansion, fn, tLine)
 END InvokeMacro;
 
@@ -2077,7 +2394,7 @@ BEGIN
   ok := TRUE;
   CloseAllSources;
   srcTop := 0;
-  stk[0].isFile := TRUE; stk[0].isDefine := FALSE;
+  stk[0].isFile := TRUE; stk[0].isDefine := FALSE; stk[0].repLeft := 0;
   IF ~Files.Reset(stk[0].f, srcPath) THEN
     LogErr.Error2("tasm: cannot open ", srcPath); srcTop := -1; ok := FALSE; RETURN
   END;
@@ -2148,6 +2465,7 @@ END EmitGlobal;
    interleave/parallelize calls. *)
 PROCEDURE Assemble*(srcPath: ARRAY OF CHAR; outObj: Rdoff.ObjFile): BOOLEAN;
   VAR undefName: ARRAY Sym.MaxName OF CHAR; ok: BOOLEAN;
+      prevCodeSize: LONGINT; iter: INTEGER; converged: BOOLEAN;
 BEGIN
   srcTop := -1;
   obj := outObj;
@@ -2156,9 +2474,38 @@ BEGIN
   Sym.Init; Dir.Init;
   ApplyPredefs;
 
-  RunPass(1, srcPath, ok);
-  IF ~ok THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
-  IF anyErr OR LogErr.HaveErr() THEN Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
+  (* Pass 1 fixed-point loop (EncJccAuto's own header comment): an
+     out-of-range BACKWARD Jcc auto-widens by 3 bytes (see EncJccAuto),
+     which can itself push a FORWARD reference further out of range, or
+     bring a previously-out-of-range one back in as labels shift -- rerun
+     Pass 1 (Sym.SetIterating(TRUE), tolerating a label's offset changing
+     between reruns) until two consecutive runs produce the IDENTICAL
+     total code size (codeOfs), a real fixed point (the well-known
+     "quick winner" algorithm: assume every Jcc short, widen the ones
+     that don't fit, repeat -- converges in 1-2 reruns for any real
+     source; see DOCS/TASM.MD §1.5a). MaxPass1Iters bounds pathological
+     non-convergence as a fatal error rather than looping forever.
+     Sym.SetIterating(FALSE) before returning/falling through to Pass
+     2 -- the FINAL Pass 1 run's own decisions/offsets are the ones Pass
+     2 replays, and Pass 2 keeps the original exact-match-or-duplicate-
+     error contract. *)
+  Sym.SetIterating(TRUE);
+  prevCodeSize := LONGINT(-1); iter := 0; converged := FALSE;
+  WHILE ~converged & (iter < MaxPass1Iters) DO
+    RunPass(1, srcPath, ok);
+    IF ~ok THEN Sym.SetIterating(FALSE); Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE END;
+    IF anyErr OR LogErr.HaveErr() THEN
+      Sym.SetIterating(FALSE); Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE
+    END;
+    converged := (codeOfs = prevCodeSize);
+    prevCodeSize := codeOfs;
+    INC(iter)
+  END;
+  Sym.SetIterating(FALSE);
+  IF ~converged THEN
+    LogErr.Error("tasm: Jcc auto-size fixed point did not converge (internal error)");
+    Sym.Free; Enc.FreeJmpDecisions; RETURN FALSE
+  END;
 
   IF Sym.CheckAllDefined(undefName) THEN
     LogErr.Error2("tasm: undefined symbol ", undefName);

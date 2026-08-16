@@ -122,14 +122,35 @@ VAR
   macroHead, macroTail: MacroNode;
   lastLabel: ARRAY MaxName OF CHAR;   (* most recent non-local label, for .local resolution *)
   nextDefOrder: LONGINT;
+  iterating: BOOLEAN;   (* TRUE while Parse.MOD's Pass 1 fixed-point loop
+                            (EncJccAuto's own header comment) is RERUNNING
+                            Pass 1 on top of an earlier Pass-1 run of the
+                            SAME pass number -- an out-of-range backward
+                            Jcc widening by 3 bytes shifts every later
+                            label's offset, so a label legitimately
+                            redefines to a DIFFERENT offset between two
+                            Pass-1 iterations. DefineLabel's "duplicate
+                            label" check is relaxed only while this is
+                            TRUE; the FINAL Pass-1 iteration and Pass 2
+                            (iterating=FALSE, the default) keep the
+                            original exact-match-or-duplicate-error
+                            contract unchanged. *)
 
 PROCEDURE Init*;
 BEGIN
   labelHead := NIL; labelTail := NIL; nLabels := 0;
   defineHead := NIL; defineTail := NIL; nDefines := 0;
   macroHead := NIL; macroTail := NIL;
-  lastLabel[0] := 0X; nextDefOrder := LONGINT(0)
+  lastLabel[0] := 0X; nextDefOrder := LONGINT(0);
+  iterating := FALSE
 END Init;
+
+(* SetIterating: Parse.MOD calls this around its Pass 1 fixed-point loop
+   -- TRUE before an intermediate rerun, FALSE before the final Pass-1
+   run and before Pass 2. *)
+PROCEDURE SetIterating*(v: BOOLEAN);
+BEGIN iterating := v
+END SetIterating;
 
 (* WarmStrTab: force StrTab's first text/entry chunk allocation (~10 KB)
    right now, before the caller captures its own "before" MemAvail
@@ -243,7 +264,11 @@ END AppendLabelSlot;
    A second DefineLabel for the same (already-defined) name is a fatal
    duplicate-label error -- except Pass 2 re-defining the exact same
    (seg,offset) a Pass-1 run already recorded, which is expected and a
-   silent no-op (Parse.MOD calls DefineLabel again in Pass 2). *)
+   silent no-op (Parse.MOD calls DefineLabel again in Pass 2), or an
+   intermediate Pass-1 RERUN redefining a DIFFERENT offset while
+   Sym.SetIterating(TRUE) is active (EncJccAuto's own Pass-1 fixed-point
+   loop, see its header comment) -- also expected, also a silent
+   overwrite. *)
 PROCEDURE DefineLabel*(name: ARRAY OF CHAR; seg: INTEGER; offset: LONGINT; isGlobal: BOOLEAN; fname: ARRAY OF CHAR; line: LONGINT);
   VAR full: ARRAY MaxName OF CHAR; node: LabelNode; idx: INTEGER;
 BEGIN
@@ -254,6 +279,8 @@ BEGIN
     ELSIF node^.defined[idx] THEN
       IF (node^.seg[idx] = seg) & (node^.offset[idx] = offset) THEN
         (* Pass 2 redefinition with an identical value: expected, ignore *)
+      ELSIF iterating THEN
+        node^.seg[idx] := seg; node^.offset[idx] := offset
       ELSE
         LogErr.ErrorInFile(fname, line, "duplicate label")
       END

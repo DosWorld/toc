@@ -28,6 +28,9 @@ CONST
                          e.g. RESW's count operand *)
   TShl*     = 22;    (* '<<' -- left shift in a constant expression *)
   TShr*     = 23;    (* '>>' -- right shift in a constant expression *)
+  TAmp*     = 24;    (* '&' -- bitwise AND in a constant expression *)
+  TPipe*    = 25;    (* '|' -- bitwise OR in a constant expression *)
+  TCaret*   = 26;    (* '^' -- bitwise XOR in a constant expression *)
 
   TError*   = 99;
 
@@ -420,6 +423,9 @@ BEGIN
     END
   ELSIF s.ch = 34 THEN ScanString(s, 34)   (* " *)
   ELSIF s.ch = 39 THEN ScanString(s, 39)   (* ' *)
+  ELSIF s.ch = 38 THEN NextCh(s); s.sym := TAmp     (* & *)
+  ELSIF s.ch = 124 THEN NextCh(s); s.sym := TPipe   (* | *)
+  ELSIF s.ch = 94 THEN NextCh(s); s.sym := TCaret    (* ^ *)
   ELSE
     LogErr.ErrorInFile(s.fname, s.line, "unexpected character");
     NextCh(s); s.sym := TError

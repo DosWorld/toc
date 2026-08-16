@@ -1,0 +1,11 @@
+MODULE MainTest;
+PROCEDURE Main(x: BYTE; y: INTEGER): INTEGER; FAR;
+BEGIN
+  AX := x;
+  BX := y;
+  RETURN AX+BX
+END Main;
+BEGIN
+  AX := 0x4C00;
+  INT(21H)
+END MainTest.

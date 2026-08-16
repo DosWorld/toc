@@ -841,10 +841,19 @@ END EncNearRel;
    This can only be done losslessly for a reference whose target is
    already DEFINED at the moment Pass 1 first walks past this instruction:
    for those, Pass 1 already knows the real distance and can pick a size.
-   A FORWARD reference has no such fixed point without iterative resizing
-   (the exact problem the short-vs-near jump sizing decision in
-   DOCS/IMPLRULE.MD's TASM section avoids for Jcc/LOOP) -- so a forward
-   JMP always takes the near (E9) form.
+   A FORWARD reference always takes the near (E9) form -- UNLIKE
+   EncJccAuto's own Jcc handling (which now benefits from Parse.MOD's
+   Pass-1 fixed-point rerun loop, Sym.SetIterating, see its header
+   comment), this is a deliberate choice kept even though Sym's
+   persistence across reruns COULD give a forward JMP a real distance to
+   measure the same way: doing so shortened "jmp ErrWithMsg" in
+   SYSTEM.ASM relative to the real-NASM-built SYSTEM.RDF oracle (real
+   NASM's own default JMP sizing evidently does not opportunistically
+   shorten a forward reference either, at least not at whatever
+   optimization level built the checked-in oracle) -- tried and reverted,
+   DOCS/HISTORY.MD. A forward JMP that must be short needs the explicit
+   `JMP SHORT target` qualifier (EncJmpShort, hard error if it doesn't
+   actually fit) written in source.
 
    CRITICAL: Sym's label table is NOT reset between passes (Pass 2 needs
    Pass 1's final offsets to resolve forward refs), so by the time Pass 2
@@ -955,9 +964,20 @@ BEGIN
   IF ~target.hasLabel THEN Err("JMP target must be a label"); RETURN END;
   startOfs := here;
   IF pass = 1 THEN
-    IF ~Sym.IsDefined(target.labelName) THEN
+    IF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
       useShort := FALSE
-    ELSIF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
+    ELSIF (lseg = Sym.SegCode) & (lofs >= here) THEN
+      (* target's own code offset is not BEHIND `here` -- a forward
+         reference by POSITION, regardless of whether Sym happens to
+         already carry a value for it (a rerun of this same Pass 1, see
+         EncJccAuto's own header comment, leaves every label "defined"
+         in Sym's table from the previous rerun's walk, even ones that
+         are still genuinely ahead of `here` in THIS rerun's own walk --
+         checking the actual offset instead of Sym.IsDefined is what
+         keeps this forward/backward test accurate across reruns). Kept
+         near unconditionally, matching this procedure's own header
+         comment on why a forward JMP is never opportunistically
+         shortened even when Sym could supply a distance. *)
       useShort := FALSE
     ELSE
       instrEnd := here + LONGINT(2);
@@ -982,6 +1002,116 @@ BEGIN
     EncNearRel(BYTE(0E9H), target)
   END
 END EncJmpAuto;
+
+(* EncJccAuto: unqualified Jcc (070h..07Fh only -- see the mnemonic dispatch
+   in Encode below; LOOP/LOOPE/LOOPZ/LOOPNE/LOOPNZ/JCXZ stay EncJmpShort's
+   rel8-only, hard-error-on-overflow path, since none of them can be
+   widened by a simple invert-and-JMP wrapper -- each has its own CX-
+   decrementing/testing side effect baked into the single opcode, unlike a
+   plain Jcc's pure flag test. DOCS/IMPLRULE.MD's "short-vs-near jump
+   sizing" note names exactly this as the case to revisit if a real .ASM
+   ever needs it (CGA2.ASM does).
+
+   Same 8086-only widened form real NASM emits for an out-of-range Jcc:
+      <invertedCC> short SKIP     ; 70h+(cc XOR 1), rel8 = 03h (skip the JMP)
+      jmp near TARGET             ; E9h rel16 -- plain near jmp, no 386 needed
+   SKIP:
+   Total 5 bytes (2+3), vs. the 2-byte short form -- widening changes this
+   instruction's OWN size, so (same reasoning as EncJmpAuto's own header
+   comment) the choice must be made once in Pass 1 and REPLAYED identically
+   in Pass 2 (RecordJmpDecision/ReplayJmpDecision), never re-decided, or
+   Pass 2's differently-sized choice would desync every later label offset
+   from Pass 1's.
+
+   The well-known "quick winner" fixed-point algorithm (assume every Jcc
+   short on the first pass, widen the ones that don't fit, rerun, repeat
+   until nothing changes -- see DOCS/TASM.MD §1.5a) applies to BOTH
+   forward and backward references here, not just backward ones: Parse.
+   MOD's Assemble reruns Pass 1 itself (Sym.SetIterating(TRUE) around the
+   loop) until two consecutive runs produce the identical total code
+   size. Sym's label table is NOT reset between reruns (same "Pass 1
+   fixes every label's final offset, Pass 2 re-walks" persistence
+   EncJmpAuto's own header comment already relies on), so by the SECOND
+   Pass-1 run, a target that was still forward (undefined) during the
+   first run's walk now carries that first run's own approximate offset
+   -- giving a FORWARD reference a real (if momentarily stale, refined
+   every rerun) distance to measure, the same way a backward reference
+   always had one. Only the very first-ever encounter of a label
+   anywhere in Assemble (first iteration, first walk past it) has
+   nothing to measure against at all; that one case defaults to short
+   (matching this dialect's original single-pass assumption) and
+   converges upward across reruns exactly like every other undersized
+   guess in the algorithm. *)
+PROCEDURE EncJccAuto(opcode: BYTE; VAR target: Operand);
+  VAR lseg: INTEGER; lofs, rel: LONGINT; instrEnd: LONGINT;
+      startOfs: LONGINT; useShort: BOOLEAN; invOpcode: BYTE;
+BEGIN
+  IF ~target.hasLabel THEN Err("Jcc target must be a label"); RETURN END;
+  startOfs := here;
+  IF pass = 1 THEN
+    IF Sym.IsExtern(target.labelName) THEN
+      (* rel8 has no RDOFF2 relocation type at all (see EncJmpShort's own
+         extern check) -- an EXTERN target can NEVER be short, so always
+         widen rather than tentatively guessing short and hard-failing in
+         Pass 2 (matches real NASM, which auto-widens a Jcc-to-extern the
+         same way instead of erroring). *)
+      useShort := FALSE
+    ELSIF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
+      useShort := TRUE   (* never seen this label at all yet: assume short *)
+    ELSE
+      instrEnd := here + LONGINT(2);
+      rel := lofs - instrEnd;
+      useShort := (rel >= -128) & (rel <= 127)
+    END;
+    RecordJmpDecision(startOfs, useShort)
+  ELSE
+    useShort := ReplayJmpDecision(startOfs)
+  END;
+  IF useShort THEN
+    IF ~Sym.LookupDefined(target.labelName, lseg, lofs) THEN
+      IF pass = 1 THEN
+        (* still genuinely undefined at this point in Pass 1's walk --
+           mirrors EncJmpShort's own "IF pass = 1 THEN placeholder;
+           RETURN END" contract: a forward reference not yet resolved
+           this iteration is not an error, real validation only happens
+           in Pass 2 once every label is finally resolved. *)
+        B(opcode); B(BYTE(0)); RETURN
+      END;
+      Err("undefined symbol"); B(opcode); B(BYTE(0)); RETURN
+    END;
+    IF lseg # Sym.SegCode THEN
+      Err("branch target is not in the code segment"); B(opcode); B(BYTE(0)); RETURN
+    END;
+    instrEnd := here + LONGINT(2);
+    rel := lofs - instrEnd;
+    (* Re-validated here (not just trusted from the decision above): the
+       decision may have been made against a stale (pre-fixed-point)
+       offset if Pass 2 is replaying a Pass-1 run whose OWN later
+       iteration changed something -- can't happen given Assemble's loop
+       runs Pass 1 to convergence before Pass 2 ever starts, but this
+       guard is what turns a would-be silent wrong-byte into the same
+       fatal "restructure source" EncJmpShort always gave, so a future
+       change to the convergence loop fails loudly instead of silently
+       miscompiling. *)
+    IF (rel < -128) OR (rel > 127) THEN
+      Err("branch target out of short (rel8) range -- restructure source"); B(opcode); B(BYTE(0)); RETURN
+    END;
+    B(opcode); B(BYTE(rel))
+  ELSE
+    invOpcode := BYTE(SYSTEM.XOR(LONGINT(opcode), LONGINT(1)));
+    B(invOpcode); B(BYTE(3));    (* skip over the 3-byte JMP rel16 below *)
+    EncNearRel(BYTE(0E9H), target)
+  END
+END EncJccAuto;
+
+(* EncJcc: dispatch for a plain Jcc mnemonic -- explicit "Jcc SHORT label"
+   stays strictly rel8 (EncJmpShort, hard error on overflow, same as
+   before this feature), matching JMP's own isShort/auto split; every
+   other Jcc auto-widens via EncJccAuto. *)
+PROCEDURE EncJcc(opcode: BYTE; VAR target: Operand);
+BEGIN
+  IF target.isShort THEN EncJmpShort(opcode, target) ELSE EncJccAuto(opcode, target) END
+END EncJcc;
 
 (* EncJmpIndirect / EncCallIndirect: FF /4 (near) FF /5 (far) through a
    memory or register operand -- `far [reg]`/`far [mem]` selects /5. *)
@@ -1270,37 +1400,37 @@ BEGIN
   | Lex.MJcxz:
       IF n # 1 THEN Err("JCXZ requires 1 operand") ELSE EncJmpShort(BYTE(0E3H), ops[0]) END
   | Lex.MJe, Lex.MJz:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(074H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(074H), ops[0]) END
   | Lex.MJne, Lex.MJnz:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(075H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(075H), ops[0]) END
   | Lex.MJb, Lex.MJc, Lex.MJnae:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(072H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(072H), ops[0]) END
   | Lex.MJae, Lex.MJnb, Lex.MJnc:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(073H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(073H), ops[0]) END
   | Lex.MJbe, Lex.MJna:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(076H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(076H), ops[0]) END
   | Lex.MJa, Lex.MJnbe:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(077H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(077H), ops[0]) END
   | Lex.MJs:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(078H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(078H), ops[0]) END
   | Lex.MJns:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(079H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(079H), ops[0]) END
   | Lex.MJo:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(070H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(070H), ops[0]) END
   | Lex.MJno:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(071H), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(071H), ops[0]) END
   | Lex.MJp, Lex.MJpe:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07AH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07AH), ops[0]) END
   | Lex.MJnp, Lex.MJpo:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07BH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07BH), ops[0]) END
   | Lex.MJl, Lex.MJnge:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07CH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07CH), ops[0]) END
   | Lex.MJge, Lex.MJnl:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07DH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07DH), ops[0]) END
   | Lex.MJle, Lex.MJng:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07EH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07EH), ops[0]) END
   | Lex.MJg, Lex.MJnle:
-      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJmpShort(BYTE(07FH), ops[0]) END
+      IF n # 1 THEN Err("Jcc requires 1 operand") ELSE EncJcc(BYTE(07FH), ops[0]) END
   ELSE
     Err("unknown mnemonic")
   END

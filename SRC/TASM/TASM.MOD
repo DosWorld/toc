@@ -1,10 +1,10 @@
-(*$M 32000, 262144, 650000*)
+(*$M 20000, 128144, 650000*)
 MODULE TASM;
 (*
-  tasm -- oberon-hosted 8086 assembler: reads a NASM-subset .asm source file
+  tasm -- Oberon-hosted 8086 assembler: reads a NASM-subset .asm source file
   and writes an RDOFF2 .rdf object file.  No other output format.
 
-  usage: tasm [/LNG=nasm|turbo] [/LOG=level] file.asm
+  usage: tasm [/LOG=level] file.asm
      or: tasm /BIN=code|data /NAME=GlobalName [/LOG=level] file.bin
 
   Exactly one positional argument: the input .asm (or, in bin2obj mode,
@@ -13,15 +13,14 @@ MODULE TASM;
   this toolchain's naming convention; see Files.ReplaceExt) -- there is
   no -o/-OUT= override in v1, per the maintainer's explicit CLI choice.
 
-  /LNG=nasm|turbo  selects the source dialect (case-insensitive); default
-  nasm, matching tasm's original NASM-subset-only behavior exactly (this
-  switch is purely additive, no existing invocation changes behavior).
-  /LNG=turbo treats file.asm as Borland Turbo Assembler 5.0 (MASM/Ideal
-  mode) source: Turbo.Convert (TURBO.MOD) rewrites it to a temporary
-  file.NAS (NASM-subset syntax), which is then fed into the exact same
-  Parse.Assemble pipeline /LNG=nasm uses to produce file.rdf. file.NAS is
-  deleted on success and left on disk on failure (so a failed conversion
-  or assembly can be inspected).
+  NASM-subset source only -- Borland Turbo Assembler 5.0 (MASM/Ideal
+  mode) source is NOT accepted here.  Convert it to NASM-subset syntax
+  first with the standalone TA2NASM.EXE tool (SRC/TASM/TA2NASM.MOD),
+  then feed ITS OWN output into this tool the same as any other .asm
+  file.  (TASM.EXE used to accept Turbo-dialect source directly via a
+  /LNG=turbo switch, calling Turbo.Convert -- TURBO.MOD/TURBODIR.MOD --
+  in-process; moved out to TA2NASM.EXE as its own complete standalone
+  tool 2026-08-11, see TA2NASM.MOD's own header comment for why.)
 
   /LOG=level  sets diagnostic verbosity (debug/info/warn/error,
   case-insensitive) -- the exact same switch toc.exe accepts
@@ -55,16 +54,13 @@ MODULE TASM;
   LogErr.Open first in Run, a single Halt(code) wrapper that calls
   LogErr.Close then SYSTEM.Halt (the only SYSTEM.Halt call site in TASM).
 *)
-IMPORT Out, Dos, Files, Strings, LogErr, Rdoff, Parse, Sym, Turbo;
+IMPORT Out, Dos, Files, Strings, LogErr, Rdoff, Parse, Sym;
 
 CONST
   ExitOk    = 0;
   ExitUsage = 2;
   ExitIo    = 3;
   ExitAsm   = 4;
-
-  LngNasm  = 0;
-  LngTurbo = 1;
 
   (* one 16-bit segment, same bound Rdoff itself enforces -- RdfWriteTo's
      own check is `codeLen/dataLen >= SegLimit` (see RDOFF.MOD), so the
@@ -75,12 +71,10 @@ PROCEDURE Usage;
 BEGIN
   Out.String("Trubo Assembler, 2026 (c) DosWorld, Public domain (unlicense)"); Out.Ln;
   Out.Ln;
-  Out.String("Usage: TASM [/LNG=nasm|turbo] [/LOG=level] [-Dname[=value]]... file.asm"); Out.Ln;
+  Out.String("Usage: TASM [/LOG=level] [-Dname[=value]]... file.asm"); Out.Ln;
   Out.String("  or:  TASM /BIN=code|data /NAME=GlobalName [/LOG=level] file.bin"); Out.Ln;
   Out.Ln;
-  Out.String("  Assembles file.asm to file.rdf (RDOFF2)."); Out.Ln;
-  Out.String("  /LNG=nasm   NASM-subset source (default)."); Out.Ln;
-  Out.String("  /LNG=turbo  TURBO-subset source"); Out.Ln;
+  Out.String("  Assembles file.asm (NASM-subset syntax) to file.rdf (RDOFF2)."); Out.Ln;
   Out.String("  -Dname[=value]  predefine name (as if %define name value had"); Out.Ln;
   Out.String("                  appeared before line 1); may repeat. A later"); Out.Ln;
   Out.String("                  %define of the same name in source wins."); Out.Ln;
@@ -243,9 +237,8 @@ BEGIN
 END RunBin2Obj;
 
 PROCEDURE RunBody(): INTEGER;
-  VAR srcPath, outPath, nasPath: ARRAY 128 OF CHAR;
+  VAR srcPath, outPath: ARRAY 128 OF CHAR;
       logLevel: ARRAY 32 OF CHAR;
-      lngVal: ARRAY 32 OF CHAR;
       binVal, nameVal: ARRAY 128 OF CHAR;
       arg: ARRAY 128 OF CHAR;
       dRest: ARRAY 128 OF CHAR;
@@ -254,13 +247,12 @@ PROCEDURE RunBody(): INTEGER;
       f: Files.File;
       ok, binMode: BOOLEAN;
       binSeg: INTEGER;
-      lng: INTEGER;
       argc, i: INTEGER;
 BEGIN
   LogErr.SetLevel(LogErr.LINFO);
   argc := Dos.ParamCount();
   IF argc < 1 THEN Usage; RETURN ExitUsage END;
-  srcPath[0] := 0X; binMode := FALSE; nameVal[0] := 0X; lng := LngNasm;
+  srcPath[0] := 0X; binMode := FALSE; nameVal[0] := 0X;
   i := 1;
   WHILE i <= argc DO
     Dos.ParamStr(i, arg);
@@ -271,13 +263,6 @@ BEGIN
       ELSIF Strings.EqualICase(logLevel, "error") THEN LogErr.SetLevel(LogErr.LERROR)
       ELSE
         LogErr.Error2("tasm: /LOG=: unknown level (want debug/info/warn/error) ", logLevel);
-        Parse.FreePredefs; RETURN ExitUsage
-      END
-    ELSIF MatchSwitchVal(arg, "/LNG=", lngVal) THEN
-      IF Strings.EqualICase(lngVal, "nasm") THEN lng := LngNasm
-      ELSIF Strings.EqualICase(lngVal, "turbo") THEN lng := LngTurbo
-      ELSE
-        LogErr.Error2("tasm: /LNG=: unknown dialect (want nasm/turbo) ", lngVal);
         Parse.FreePredefs; RETURN ExitUsage
       END
     ELSIF MatchSwitchVal(arg, "/BIN=", binVal) THEN
@@ -330,10 +315,6 @@ BEGIN
   IF binMode & ~ValidGlobalName(nameVal) THEN
     LogErr.Error2("tasm: invalid global name: ", nameVal); Parse.FreePredefs; RETURN ExitUsage
   END;
-  IF binMode & (lng = LngTurbo) THEN
-    LogErr.Error("tasm: /LNG=turbo is not valid with /BIN= (bin2obj mode never runs any parser)");
-    Parse.FreePredefs; RETURN ExitUsage
-  END;
 
   Files.ReplaceExt(srcPath, ".RDF", outPath);
 
@@ -344,15 +325,6 @@ BEGIN
 
   IF binMode THEN
     ok := RunBin2Obj(srcPath, nameVal, binSeg, obj)
-  ELSIF lng = LngTurbo THEN
-    (* /LNG=turbo: Turbo.Convert rewrites srcPath (TASM syntax) to
-       nasPath (NASM subset), then the exact same Parse.Assemble the
-       /LNG=nasm path uses picks it up from there.  nasPath is deleted
-       only on a fully successful assemble (see the tail below) so a
-       failed conversion/assembly can be inspected. *)
-    Files.ReplaceExt(srcPath, ".NAS", nasPath);
-    ok := Turbo.Convert(srcPath, nasPath);
-    IF ok THEN ok := Parse.Assemble(nasPath, obj) END
   ELSE
     ok := Parse.Assemble(srcPath, obj)
   END;
@@ -370,16 +342,7 @@ BEGIN
     IF LogErr.HaveErr() THEN Files.SetDeleteOnClose(f, TRUE) END;
     Files.Close(f);
     IF ~LogErr.HaveErr() THEN
-      LogErr.Info2("tasm: wrote ", outPath);
-      (* /LNG=turbo's intermediate .NAS is disposable once the .rdf it
-         was assembled into is confirmed written -- left on disk on any
-         earlier failure (conversion or assembly) so it can be
-         inspected, per TASM.MOD's header comment. *)
-      IF (lng = LngTurbo) & Files.FileExists(nasPath) THEN
-        IF ~Files.Delete(nasPath) THEN
-          LogErr.Warn2("tasm: could not remove intermediate ", nasPath)
-        END
-      END
+      LogErr.Info2("tasm: wrote ", outPath)
     END
   END;
 
