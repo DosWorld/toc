@@ -12,7 +12,7 @@
 objects will produce false results. `make test` enforces this automatically.
 
 ```bash
-make test      # clean, full rebuild, run 301 manifest rows + TASM regression (host-side, fast)
+make test      # clean, full rebuild, run 311 manifest rows + TASM regression (host-side, fast)
 make testall   # full DOS-side suite via xt: manifest + Section 17/18 + SYSTEM.DEF checks (~9 min)
 ```
 
@@ -136,7 +136,7 @@ and `testall.exe` (T5/T6 — SYSTEM.DEF absent checks).  The old
 
 A TSV-driven test runner — one row per test, no shell heredocs.  Each row
 names a fixture in `TESTS/FIX/`, optional compiler flags, an EXPECT
-predicate, and an argument.  **306 rows, all passing.**
+predicate, and an argument.  **311 rows, all passing.**
 
 Driven by two runners:
 - **Host-side (POSIX):** `make -f TESTS/Makefile.man test` — GNU make, calls xt per row.  Per-row scratch dirs are created under the project `TMP/` (not the system tmpfs); see `TMPROOT` in `TESTS/Makefile.man`.
@@ -195,8 +195,11 @@ Test categories currently covered (selection):
 - `mz/*` — MZ header min_alloc/max_alloc/SP for various `$M stack`
 - `bounds/*` — `$R+` runtime check call
 - `overlay/*` — `$O+`/`$O-` directive: parses standalone and chained with
-  other toggles (`$O+,R+`), rejects a value with no `+`/`-`; state-only for
-  now, no codegen/linker effect (see `OVR-PLAN.MD` §3.1, §7 step 1)
+  other toggles (`$O+,R+`), rejects a value with no `+`/`-`. Covers
+  directive PARSING only — the full end-to-end overlay feature (call-site
+  trampolines, `.OVR` file format, load/evict/patch runtime) is a
+  separate regression suite; see "Overlay feature regression tests"
+  below and `DOCS/OVR.MD`
 - `dbg/*` — `$D+` debug-info collection (`MODNAME.DBG` member present + contains
   the module ident; a no-`$D` module's `.DBG` has no content) and `/G` link
   (`dbg/link-g-runs`: flags column `/G /ENTRY=Run`, exe still exits 0).
@@ -213,7 +216,7 @@ form and survives all codegen reshuffles.
 
 ## Integration tests
 
-All integration tests are now in `TESTS/MANIFEST.TSV` (306 rows) or run by
+All integration tests are now in `TESTS/MANIFEST.TSV` (311 rows) or run by
 `BIN/TESTALL.EXE` (Section 17/18 executables + SYSTEM.DEF artefact checks).
 The old bash drivers (`test_src.sh`, `test_system_intrinsics.sh`) have been deleted —
 their content is fully covered by the manifest and testall.
@@ -384,7 +387,7 @@ Regressions of historical compiler bugs are preserved in the corresponding modul
   codegen (G7, `DOCS/IMPLRULE.MD` §"CASE jump-table dispatch"); it caught a
   real out-of-range-dispatch bug (values outside the label range fell into
   arm 1's body instead of the `ELSE`/fall-through target) that `make test`'s
-  301-row manifest cannot catch, since the manifest only checks compile-time
+  311-row manifest cannot catch, since the manifest only checks compile-time
   byte/symbol patterns, not runtime dispatch correctness. Also runnable
   standalone, bypassing `make testall`'s harness bugs:
   `toc /ENTRY=RunAllTests TCASETBL.MOD` then run the resulting `.exe`.
@@ -718,6 +721,40 @@ symbols, source files (with DOS timestamp), line numbers and segments.
 - No `SYSTEM.VAL/GET/PUT` — use `POINTER TO T` and `p^` dereference
 - `SYSTEM.AND(x, LONGINT(0FFFFH))` instead of `INTEGER MOD 65536`
 - All `SYSTEM.*` intrinsics require the `SYSTEM.` qualified prefix
+
+---
+
+## Overlay feature regression tests
+
+Full design/format reference: `DOCS/OVR.MD`. The `$O+`/`$O-` directive's
+own PARSING is covered by the `overlay/*` manifest rows (above); the
+full end-to-end feature (call-site trampolines, `.OVR` file format,
+runtime load/evict/patch, `SRC/LIB/OVERLAY.MOD`/`OVERLAY.ASM`) is
+verified by `EXAMPLES/OVRDEMO/Makefile`'s own `xt`-driven regressions —
+not yet folded into `TESTS/MANIFEST.TSV` since each one is a full linked
+`.EXE` run exercising real eviction/dispatch behavior, not a static
+`.rdf`/`.om` byte check `rdfgrep` predicates are built for.
+
+Run via `cd EXAMPLES/OVRDEMO && make && make run-<name>` (or `make`
+alone builds every fixture's `.EXE`):
+
+| Target | Fixture | What it covers |
+|--------|---------|-----------------|
+| `run` | `OVRMAIN.MOD`/`OVRDEMO.MOD`/`OVRDEMO2.MOD` | 2-unit standalone `.OVR`: real dispatch, load, cross-overlay call + resume |
+| `run-appended` | `OVRAPPT.MOD` | Same demo, `.OVR` payload appended to the `.EXE`'s own tail instead of a standalone file |
+| `run-eviction` | `OVRA3.MOD`/`OVRB3.MOD`/`OVRDEMO3.MOD`/`OVRMAIN3.MOD` | 3-unit chain: real eviction of an idle caller mid-outgoing-call, reload to a possibly different segment |
+| `run-ems` | `OVRMAINE.MOD` | Same 2-unit demo, EMS-backed `OvrReadBuf` instead of disk |
+| `run-clearbuf` | `OVRMAINX.MOD` | `Overlay.OvrClearBuf` mid-run, then a second call proving re-trap/reload works after a full evict-and-unpatch |
+| `run-deepchain` | `OVRA4.MOD`/`OVRB4.MOD`/`OVRC4.MOD`/`OVRD4.MOD`/`OVRMAIN4.MOD` | 4-unit chain + appended-to-EXE combined: evicts TWO simultaneously-idle callers |
+
+Each target's own exit code (0 = pass) and stdout (checked by eye
+against the fixture's own header comment describing expected output)
+are the pass criteria — there is no separate assertion framework here,
+matching the style of `TESTS/test_tlink.sh`/`test_tasm.sh`'s own
+`xt`-driven checks.  All six pass a genuinely clean `make clean && make`
+rebuild as of 2026-08-09 (see `DOCS/OVR.MD` §10 for a real bug —
+entry-id/entryOfs bytes corrupted by the resident-form trampoline patch
+— found and fixed via `run-clearbuf`).
 
 ---
 

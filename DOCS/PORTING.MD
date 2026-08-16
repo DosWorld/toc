@@ -102,7 +102,7 @@ Used to inspect or manipulate `.om` archives.  `merge` combines multiple archive
 copying all members (`.RDF` and `.DEF`).  When the argument list exceeds the 127-character
 DOS command-line limit, pass `@listfile` with one path per line.
 
-### 1.6 `tasm.exe` — self-hosted NASM-subset assembler
+### 1.6 `tasm.exe` — Oberon-hosted NASM/TUBRO-subsets assembler
 
 ```
 tasm.exe [/LOG=level] File.asm

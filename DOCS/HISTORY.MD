@@ -817,3 +817,311 @@ left untouched — Oberon source never emits width=4 relocations. New
 fixtures: `TESTS/FIX/TDBWDD.ASM`, `TESTS/FIX/TDBLABEL.ASM`,
 `TESTS/FIX/TLKDD.ASM` (end-to-end `/T=bin /ORG=100` PatchMem4 check,
 `0x100 + 6 = 0x106`). `test_tasm.sh` → 113/0, `test_tlink.sh` → 14/0.
+
+**Overlay demo (`EXAMPLES/OVRDEMO/OVRMAIN.EXE`) runs end-to-end for the
+first time, two real bugs found and fixed (2026-08-08).** After the
+`$O+`-module init-flow work (README.MD §9 — no `BEGIN` block in an `$O+`
+module; a resident module reachable only through one still gets its
+`__init` called from the entry module's own flat table) landed, the
+demo compiled and linked clean but crashed at runtime with the CPU
+running off into unmapped memory (`CS:1FF8` garbage). Root-caused via
+`xt trace`, byte-level RDOFF2 inspection, and manual x86 stack-frame
+tracing — two independent bugs, both in the overlay runtime path, both
+invisible until a real call into `$O+` code actually executed and tried
+to return:
+1. **`Link.OnSegRelocOverlay` (`SRC/TOC/LINK.MOD`) baked every
+   cross-module CODE/DATA/BSS reference inside `$O+` code as a raw,
+   load-segment-relative paragraph number with no runtime correction.**
+   A main-image reference gets that correction for free from the DOS MZ
+   loader's own relocation table at program load; a standalone `.OVR`
+   file is never touched by that loader at all, so nothing was ever
+   adding it — every such reference (e.g. `Ovrdemo.Run` calling
+   `Out.String`) silently pointed ~160 paragraphs short of its real
+   target. Fixed by adding a second runtime-applied fixup table
+   (`Link.Module.ovrXFixups`/`Overlay.ApplyXFixups`, paired with the
+   existing self-CODE-only `ovrFixups`/`ApplyFixups`) that adds the
+   PROGRAM's own load segment (`Overlay.LoadSegment()`) instead of the
+   unit's own — threaded through `LINK.MOD` → `LINKOVR.MOD`'s on-disk
+   `.OVR` format (grew from an 8-byte to a 10-byte per-unit header,
+   README.MD §4/§7.1) → `OVERLAY.MOD`'s reader. Caught and fixed an
+   off-by-2 file-offset bug in the new reader code along the way (used
+   the OLD 8-byte header-size constant while computing where the fixup
+   tables/call-site table/code actually start).
+2. **`Ovr_TrapEntry` (`OVERLAY.ASM`) `IRET`ed straight into the resolved
+   overlay target — but `INT` pushes three stack words (FLAGS, CS, IP)
+   where the trampoline's own `CALL FAR` would have pushed only two (CS,
+   IP).** An `IRET` into the target consumes exactly the three words
+   `INT` pushed, leaving SP back at its pre-trap depth — i.e. as if the
+   call site had pushed nothing at all — so the target's own eventual
+   `RETF` popped whatever was already on the caller's stack below that
+   point (unrelated saved data), landing anywhere; confirmed via `xt
+   trace`: it landed back on the trampoline's own `INT 3Fh` opcode,
+   re-firing the same trap a second time (the demo's own characteristic
+   doubled "before Ovrdemo.Run" / "Ovrdemo.Run called" output before
+   eventually running into an invalid opcode). Fixed by having the
+   handler synthesize a genuine `CALL FAR`-shaped return frame (real
+   return address = trampoline site + 5, i.e. the caller's own next
+   instruction) and reach the target via `RETF` used as an indirect far
+   jump (push target seg:ofs, `RETF` into it) instead of `IRET` — a
+   first attempt at this fix (discard the interrupt's FLAGS word via a
+   plain `add sp,2` before the push/RETF) had the stack order backwards
+   (FLAGS sits FARTHEST from SP after the register pops, not nearest)
+   and was itself caught and fixed via a second `xt trace` pass before
+   landing on the correct three-pop/discard/three-push sequence.
+
+`EXAMPLES/OVRDEMO/OVRMAIN.EXE` now runs clean under `xt`: "before
+Ovrdemo.Run" / "Ovrdemo.Run called" / "after Ovrdemo.Run", exit code 0,
+no repeats, no crash — the first real, confirmed end-to-end run of this
+project's own compiled `$O+` overlay call/return round trip. Regression
+found along the way: the `$O+`-no-`BEGIN`-block compile check (from the
+same earlier init-flow work) broke two pre-existing manifest fixtures
+(`TESTS/FIX/OVR59A.MOD`, `OVR59C.MOD`) that predate that design and
+still had `BEGIN` blocks; fixed both fixtures and updated
+`TESTS/MANIFEST.TSV` rows `overlay/59a-o-plus-compiles` and
+`overlay/59c-o-plus-chained-r-plus` from `has-global Mod__init` to
+`no-global Mod__init`, matching the current, intentional design.
+README.MD/OVR-PLAN.MD updated to match (§4/§5/§7.1/§8.3/§12: the 10-byte
+header, the second fixup table, the `RETF`-based dispatch return).
+
+* **Overlay `inUse` gap closed — "Solution 2: real per-call inUse
+  nesting" (2026-08-09).** `OvrDispatch` used to hold a unit's `inUse`
+  flag set for its ENTIRE activation (set on entry, cleared only on its
+  own resume), so a unit could never be evicted while it had an
+  outgoing call in flight, by construction — the exact window the
+  return-address trampoline mechanism exists to handle. Fixed:
+  `OvrDispatch`'s ordinary-entry path now DECrements the CALLING unit's
+  own `inUse` the moment a fresh call traps (found via a new
+  `FindSiteOwner`), modeling "caller goes idle the instant it makes an
+  outgoing call"; the resume path re-INCrements it. This exposed a
+  deeper bug: the baked hardware return address could go stale once an
+  idle caller became evictable and reloaded to a different segment
+  before its callee returned — fixed with a small, permanently-resident
+  `resumeTrapTable` in `OVERLAY.ASM`, so a cross-overlay call's return
+  address always re-resolves the caller's CURRENT segment fresh, never
+  a baked one. Three more real bugs found and fixed getting here (a
+  linear-address-not-field-comparison bug in `FindSiteOwner`; a
+  resident-table offset-0 assumption bug; a resume-offset-always-zero
+  bug in `ResumeCallee`). Verified via a new 3-unit eviction-pressure
+  fixture (`OVRA3.MOD`→`OVRB3.MOD`→`OVRDEMO3.MOD`, `make run-eviction`).
+  Full design/history: `DOCS/OVR.MD` §10.
+
+* **Overlay runtime moved into the standard library (2026-08-09).**
+  `OVERLAY.MOD`/`OVERLAY.ASM` moved from `EXAMPLES/OVRDEMO/` (their
+  "canonical location while the feature was in progress") to
+  `SRC/LIB/`, added to `SRC/LIB/Makefile`'s `STDLIB_OMS` — `Overlay` is
+  now a normal stdlib module, built into `BIN/OBERON.OM` alongside
+  `Files`/`Out`/`EMS`/etc., importable with a plain `IMPORT Overlay`
+  from any program. `EXAMPLES/OVRDEMO/Makefile` updated to stop
+  compiling `OVERLAY.MOD` locally and rely on the prebuilt `OBERON.OM`
+  instead, matching every other stdlib-consuming fixture in the
+  project.
+
+* **`README.MD`/`OVR-PLAN.MD` merged into `DOCS/OVR.MD` (2026-08-09).**
+  The two overlay-feature documents that had lived in
+  `EXAMPLES/OVRDEMO/` since the feature's earliest days were rewritten
+  as a single, better-organized `DOCS/OVR.MD` (18 sections: problem,
+  scope, mechanism, `$O+` directive, trampoline, header record, fixup
+  tables, call-site patch table, cross-overlay calls, `inUse`/eviction,
+  file format, appended-to-EXE format, runtime algorithm, runtime
+  library, prior-art built-on, implementation status, deliberate
+  simplifications, examples/tests), following the project's established
+  `DOCS/BGI.MD`/`DOCS/TASM.MD` single-doc-per-feature convention. Every
+  `README.MD §N`/`OVR-PLAN.MD §N` citation across `SRC/TOC/*.MOD` and
+  `SRC/LIB/OVERLAY.MOD`/`OVERLAY.ASM` was remapped to the new document's
+  section numbers. The old files, and a stray superseded
+  `DOCS/OVERLAY.OLD` snapshot, were deleted.
+
+* **Six new overlay regression fixtures added (2026-08-09),
+  `EXAMPLES/OVRDEMO/`:** `OVRMAINE.MOD` (EMS-backed storage, `make
+  run-ems`); `OVRMAINX.MOD` (`Overlay.OvrClearBuf` mid-run, `make
+  run-clearbuf`); `OVRA4.MOD`/`OVRB4.MOD`/`OVRC4.MOD`/`OVRD4.MOD`/
+  `OVRMAIN4.MOD` (4-unit deep chain + appended-to-EXE combined, evicting
+  TWO simultaneously-idle callers, `make run-deepchain`). Writing
+  `OVRMAINX.MOD` found a real, previously-latent bug: `Overlay_
+  PatchTrampoline`'s resident-form (`JMP FAR`) write unconditionally
+  overwrote the swappable form's entry-id/entryOfs bytes (`+2..+4`) —
+  once any site had been patched resident even once, a LATER
+  evict-then-reload cycle on that same site read back garbage instead
+  of the real entryOfs and crashed on a bogus jump target. No other
+  fixture in the directory had ever exercised a second load/evict cycle
+  on the same site, so this was invisible until now. Fixed with a small
+  per-unit `entryId → entryOfs` cache (`OVERLAY.MOD`'s
+  `EntryOfsNodeRec`, chunked per the project's "Chunk small records"
+  rule): the first successful read of a given entry's offset is cached
+  and reused on every later patch instead of re-trusting the (by-then
+  possibly corrupted) trampoline bytes; `Overlay_PatchTrampoline`'s
+  swappable-restore branch was also changed to write the full 5 bytes
+  explicitly rather than assuming bytes `2..4` survived untouched. All
+  six fixtures verified passing from a genuinely clean rebuild. Full
+  writeup: `DOCS/OVR.MD` §10.
+
+* **TASM dialect extended: `%rep`/`%endrep`, `seg:[...]` prefix form,
+  full constant-expression grammar in `DW`/`DD` value lists, dot-local
+  labels inside `[ ]`, a non-standard trailing size-qualifier form, and
+  `Jcc` auto-widening for BOTH forward and backward references
+  (2026-08-11/12).** Driven by a real sample file (`5/CGA2.ASM`, a
+  ported Borland-Pascal BGI CGA driver) that needed all of these to
+  assemble. Six independent gaps found and fixed in
+  `SRC/TASM/SCAN.MOD`/`PARSE.MOD`/`ENC.MOD`:
+  1. `mov al, es:[bx]` (segment override BEFORE the brackets, real
+     NASM's usual spelling) was never recognized — only the
+     `[es:bx]` bracket-interior form worked. Fixed in `ParseOperand`:
+     a segment-register identifier followed by `:` now dispatches into
+     `ParseMemBody` the same as the bracket-interior path. Byte-verified
+     identical output to the pre-existing `[seg:reg]` form.
+  2. `%rep COUNT ... %endrep` added as a new preprocessor construct,
+     mirroring `%macro`'s existing raw-text body capture
+     (`DoMacroRecord`/`IsEndmacroLine`) but pushed onto the §I.3
+     input-source stack with a repeat counter (`SrcSlot.repLeft`) instead
+     of a one-shot expansion — `RawTokNext`'s EOF handling rewinds the
+     same `Scan.MemText` body (`Scan.InitMem` on the same pointer, no
+     realloc) until the counter reaches 0. Works with `%assign` loop
+     counters (real NASM's own idiom, and CGA2.ASM's own `RowOfs` table
+     generator).
+  3. `SCAN.MOD` gained `&`/`|`/`^` (bitwise AND/OR/XOR) tokens; `PARSE.MOD`
+     gained `EvalBitAnd`/`EvalBitXor` tiers between the existing `+/-`
+     and `*//` precedence levels, and `OperandLeadingMulTail` (a
+     `*/,%,<<,>>` chain applying directly to an EQU/label's leading term
+     with no `+`/`-` in front — `dw NAME*2` was previously silently
+     unparseable past the `NAME`, since `OperandExprTail`'s own chain
+     only ever started on `+`/`-`).
+  4. `ParseMemBody` gained a `TDot` case — `[cs:.label]`/`[.label]`
+     (a dot-local label inside `[ ]`) was an outright "unexpected token"
+     before.
+  5. `mov [x], word 0` (the `BYTE`/`WORD` qualifier as a trailing
+     pseudo-operand instead of prefixing the memory operand) — not real
+     NASM syntax, but present once in CGA2.ASM; special-cased in
+     `ParseInstruction`, folded back onto operand 0's size.
+  6. `times N dw LABEL` (previously a hard "TIMES DW requires a constant
+     value" error, since `TIMES` had no per-iteration reloc path) now
+     calls the pre-existing `EmitDataWordMaybeLabel` N times, matching
+     CGA2.ASM's own `times 16 dw NotImpNear` dispatch-table-fill idiom.
+     `db`/`dd` with a label stay fatal (unchanged).
+
+  A seventh gap — `Jcc` (`jz`/`jne`/etc.) to an out-of-range rel8 target
+  hard-failing ("restructure source") instead of auto-widening the way
+  real NASM does — took three iterations to land correctly:
+  - **First attempt (backward-only):** `EncJccAuto` widened a
+    **backward** out-of-range `Jcc` to the classic 8086-only
+    `Jncc short +3 / JMP near target` idiom; a **forward** reference
+    still assumed short and hard-failed if it turned out too far
+    (matching the pre-existing single-pass rel8 policy `DOCS/IMPLRULE.MD`
+    already documented as a known limitation). Byte-verified against
+    `SYSTEM.RDF`/`EMS.RDF`.
+  - **Second attempt (Pass-0 pre-scan, reverted):** to also auto-widen
+    forward references, a size-only "Pass 0" was inserted before Pass 1
+    to give forward targets a real distance to measure. This corrupted
+    `EncJmpAuto`'s own pre-existing forward-`JMP` sizing (Pass 0
+    populating `Sym` early made every label look "already defined" to
+    `Sym.IsDefined`, breaking the forward/backward distinction
+    `EncJmpAuto` relies on) and was reverted in full.
+  - **Final design (Pass-1 fixed-point loop):** the maintainer supplied
+    the standard "quick winner" algorithm real assemblers use for this —
+    assume every `Jcc` short, rerun the SAME Pass 1 (not a separate
+    earlier pass) until two consecutive runs produce an identical total
+    code size, then run Pass 2 once against the converged result.
+    Because it reruns Pass 1 itself rather than inserting a new pass
+    number, `Sym`'s label table naturally carries each rerun's
+    approximate offsets into the next one (the same persistence
+    `EncJmpAuto`'s own header comment already relied on for Pass 1 ->
+    Pass 2), giving a forward reference a real, refining distance to
+    measure without disturbing what "Pass 1" or "Pass 2" mean to any
+    other encoder. `Sym.MOD` gained `SetIterating`/`iterating` so
+    `DefineLabel` tolerates a label's offset changing between
+    reruns (`Assemble` turns it off again before the final Pass 1 result
+    is used and before Pass 2). `EncJmpAuto` needed one adjustment to
+    stay compatible: its own forward/backward test switched from
+    `Sym.IsDefined` (now unreliable across reruns) to a direct offset
+    comparison against `here` (a target whose recorded offset is not yet
+    BEHIND the current position is forward, regardless of what an
+    earlier rerun left in `Sym`) — `EncJmpAuto` itself still never
+    opportunistically shortens a forward `JMP`, since real NASM's own
+    checked-in oracle doesn't either. Both `EncJmpAuto` and `EncJccAuto`
+    verified byte-identical against `SYSTEM.RDF`/`EMS.RDF` after the
+    fixed-point loop; a genuinely-far FORWARD `Jcc` (e.g. `5/CGA2.ASM`'s
+    own `jz .notflat` sites) now auto-widens correctly with no source
+    changes needed, verified against several synthetic forward/backward/
+    chained-far-target fixtures. `5/CGA2.ASM` itself now assembles
+    end-to-end via `tasm` (needs a larger-than-default `xt --max=`
+    instruction budget for the extra Pass-1 reruns on a 2700-line file,
+    not a hang).
+
+  Regression: `TESTS/test_tasm.sh` — `TEXTSHORT.ASM` (`Jcc` to an
+  `EXTERN` symbol, which can never fit rel8 and now widens instead of
+  erroring, matching real NASM) and `TTIMESLBL.ASM` (`times N dw LABEL`)
+  updated from `check_fails` to `check_reloc_for`/`check_reloc_to_seg`
+  to match the new, intentionally-changed behavior. Full suite (116
+  rows: all real-NASM oracles + fixtures) passing from a clean rebuild.
+  See `DOCS/TASM.MD` §1.1/§1.3a/§1.5/§1.5a/§1.7 for the user-facing
+  dialect documentation.
+
+* **Overlay dispatch performance + a real self-hosting correctness bug,
+  both fixed (2026-08-16).** Two-round investigation into re-enabling
+  `$O+` on the compiler's own `Def`/`LinkNE` (DOCS/OVR.MD §16's
+  long-open item):
+  1. **Dispatch-table disk-rescan fix.** `OVERLAY.MOD`'s
+     `FindSiteOwner`/`PatchSitesForModule`/`ResumeCallee`/
+     `FindResumeGlobalId` all independently re-read a module's
+     call-site/resume tables from disk on every single dispatch, even a
+     plain repeat call through an already-loaded module — an
+     `O(dispatches × siteCount)` cost the project's own earlier
+     "`FindSiteOwner` fast path" fix (2026-08-14) only partially closed.
+     Fixed by caching both tables in memory once, at `RegisterModule`
+     time, via new chunked `SiteNode`/`ResumeNode` records (mirroring
+     the existing `EntryOfsNodeRec` pattern) and new `LoadSiteCache`/
+     `LoadResumeCache` procedures; all four consumers switched to read
+     the cache. Verified via isolated `xt` reproducers: a 30-site
+     module's cost per 300 dispatches dropped from ~8-9M instructions to
+     ~2.5-3M, and scaling to 3000 dispatches stayed linear (~20-30M)
+     rather than compounding. Also fixed a related pre-existing leak
+     found while touching this code: `FreeModuleList` never disposed
+     `entryOfsCache`'s (or the two new caches') own chunk chains, only
+     the top-level `ModuleHeaderDesc`.
+  2. **`LINK.MOD` SEGRELOC/`AddReloc` fix (a genuine infinite loop, not a
+     performance issue).** With the dispatch-cache fix landed, real
+     self-hosting (`Def`/`LinkNE` at `$O+`, compiling `TOC`'s own
+     sources) hung on `Def.DefWrite`'s `WHILE sym # Syms.NoSym DO`
+     symbol-walk loop — never terminating, looping over garbage memory.
+     Root cause: `Def`'s reference to `Syms.NoSym` (an exported VAR in
+     the resident `Syms` module) needs a SEGRELOC to resolve `Syms`'s
+     DATA segment at runtime; `LINK.MOD`'s `OnSegRelocOverlay` (used
+     only for overlay modules) patched the correct link-time value into
+     `Def`'s own DATA image but never registered the MZ loader-relocation
+     entry that value still needs — unlike `LinkMZ.OnSegReloc`'s
+     identical case for a resident module's same reference, which calls
+     `AddReloc` unconditionally. Since `Def`'s DATA (unlike its CODE)
+     stays in the main image and is covered by the DOS loader's own
+     relocation table, skipping that registration left the baked segment
+     permanently un-adjusted, so `Syms.NoSym` resolved to garbage from
+     `Def`'s own code and the loop's termination check never matched.
+     Fixed: `ProcessOverlayModule` now threads the real target's
+     `segRelocProc` through to `OnSegRelocOverlay`, which delegates to
+     it whenever the patch site is in the module's own DATA (not overlay
+     CODE) and the reference target isn't the module's own overlay CODE
+     either. Needed a locally-declared `PROCEDURE` type for the
+     `VAR`-held `segRelocProc` value, since `Rdoff.RelocProc` loses its
+     formal parameter list crossing the `.def` boundary (confirmed via
+     `RDFGREP.EXE om-extract` on the compiled `.def` — `TYPE ... PROC`
+     carries no signature at all) — an ordinary parameter of the same
+     type works fine since its signature comes from a fresh in-file
+     parse, never round-tripped through `.def`.
+  3. **A third bug found, precisely diagnosed, NOT fixed.** With both
+     fixes above landed, real self-hosting still crashes ("Invalid
+     opcode") on the very first real dispatch. Direct instrumentation
+     proved `Overlay.OvrDispatch` (Oberon) computes and returns fully
+     correct values every time (`targetSeg:targetOfs` and
+     `retSegOut:retOfsOut` both verified byte-for-byte against
+     independently-derived expected values); a canary probe ruled out
+     `SYSTEM.Intr`/`SS:SP` disturbance during the first real disk read.
+     The corruption is isolated to `OVERLAY.ASM`'s own
+     `Ovr_TrapEntry`/`Ovr_DispatchStub` handling of those already-correct
+     values — a manual push/pop balance re-derivation found no
+     discrepancy on paper, meaning this needs a real single-step
+     debugger or the maintainer's own first-hand read of `OVERLAY.ASM`,
+     not more `xt trace` log-mining. Full trace evidence in DOCS/OVR.MD
+     §16. `Def`/`LinkNE` remain `$O-` and `TOC.MOD`'s `SetupOvr` call
+     stays commented out pending this bug; the dispatch-cache and
+     SEGRELOC/`AddReloc` fixes are landed permanently regardless and
+     already benefit every other overlay call site. `make test`: 311
+     manifest rows / 116 TASM / 14 TLINK, all passing, self-hosting
+     clean, zero leaks.
