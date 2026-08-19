@@ -28,6 +28,33 @@ TYPE
 
 VAR
   loadedHead: Loaded;   (* aliases whose .def has already been read this compile *)
+  oberonLib: ARRAY 512 OF CHAR;  (* OBERON_LIB, cached once via CacheOberonLib *)
+
+(* CacheOberonLib: snapshot OBERON_LIB up front, before any Files.Reset/Close
+   cycle has run.  Workaround for a real DOS-environment-read bug (not yet
+   root-caused past this point) documented in ENV-BUG.MD: a bare Files.Reset
+   + Files.Close pair (e.g. Overlay.Init's own file open, via TOC.MOD's
+   SetupOvr) reliably corrupts the very next Dos.GetEnv("OBERON_LIB", ...)
+   read, taking the whole compiler down with "cannot find module 'LogErr.om'"
+   the moment $O+ overlay bring-up runs before the first import lookup.
+   TOC.MOD's Run calls this BEFORE SetupOvr; FindImportFile/
+   LoadExplicitImport read this cached copy instead of calling
+   Dos.GetEnv again themselves. *)
+PROCEDURE CacheOberonLib*;
+BEGIN
+  Dos.GetEnv("OBERON_LIB", oberonLib)
+END CacheOberonLib;
+
+(* GetCachedOberonLib: return the OBERON_LIB snapshot CacheOberonLib took.
+   Other modules that need OBERON_LIB after SetupOvr has run (e.g.
+   TocMain.PerformLink, which loads OBERON_LIB's .om files into the linker's
+   own symbol table) must use this instead of calling Dos.GetEnv themselves,
+   for the same reason FindImportFile/LoadExplicitImport do -- see
+   CacheOberonLib's own comment and ENV-BUG.MD. *)
+PROCEDURE GetCachedOberonLib*(VAR dst: ARRAY OF CHAR);
+BEGIN
+  Strings.Copy(oberonLib, dst)
+END GetCachedOberonLib;
 
 (* Reset the loaded-.def set; call once at the start of each module compile.
    Frees the previous list so the guard itself never leaks across compiles. *)
@@ -113,7 +140,6 @@ END PathJoin;
    then in each OBERON_LIB archive, then OBERON.OM (CWD), then OBERON.OM in exe dir. *)
 PROCEDURE FindImportFile(defname: ARRAY OF CHAR; VAR out: Files.File): BOOLEAN;
   VAR omname: ARRAY NameLen OF CHAR;
-      env: ARRAY 512 OF CHAR;
       omPath: ARRAY PathLen OF CHAR;
       exePath, exeDir, n1, n2: ARRAY PathLen OF CHAR;
       i, dlen: INTEGER;
@@ -121,7 +147,9 @@ BEGIN
   DefToOmName(defname, omname);
 
   (* 1. ModName.OM in current directory *)
-  IF TryExtract(omname, defname, out) THEN RETURN TRUE END;
+  IF TryExtract(omname, defname, out) THEN
+    RETURN TRUE
+  END;
 
   (* Get exe directory for steps 1.5 and 4 *)
   Dos.ParamStr(0, exePath);
@@ -137,24 +165,27 @@ BEGIN
     IF TryExtract(omPath, defname, out) THEN RETURN TRUE END
   END;
 
-  (* 2. Each .OM file in OBERON_LIB *)
-  Dos.GetEnv("OBERON_LIB", env);
-  IF env[0] # 0X THEN
+  (* 2. Each .OM file in OBERON_LIB (cached copy -- see CacheOberonLib) *)
+  IF oberonLib[0] # 0X THEN
     i := 0;
-    WHILE env[i] # 0X DO
+    WHILE oberonLib[i] # 0X DO
       dlen := 0;
-      WHILE (env[i] # 0X) & (env[i] # ";") & (dlen < PathLen - 1) DO
-        omPath[dlen] := env[i]; INC(dlen); INC(i)
+      WHILE (oberonLib[i] # 0X) & (oberonLib[i] # ";") & (dlen < PathLen - 1) DO
+        omPath[dlen] := oberonLib[i]; INC(dlen); INC(i)
       END;
       omPath[dlen] := 0X;
-      IF env[i] = ";" THEN INC(i) END;
+      IF oberonLib[i] = ";" THEN INC(i) END;
       NormalizeSlashes(omPath);
-      IF (dlen > 0) & TryExtract(omPath, defname, out) THEN RETURN TRUE END
+      IF (dlen > 0) & TryExtract(omPath, defname, out) THEN
+        RETURN TRUE
+      END
     END
   END;
 
   (* 3. OBERON.OM in current directory *)
-  IF TryExtract("OBERON.OM", defname, out) THEN RETURN TRUE END;
+  IF TryExtract("OBERON.OM", defname, out) THEN
+    RETURN TRUE
+  END;
 
   (* 4. OBERON.OM in exe directory *)
   IF exeDir[0] # 0X THEN
@@ -173,7 +204,6 @@ END FindImportFile;
 PROCEDURE LoadExplicitImport*(modName, alias: ARRAY OF CHAR);
   VAR deffile: ARRAY NameLen OF CHAR;
       f: Files.File;
-      env: ARRAY 512 OF CHAR;
       msg: ARRAY 640 OF CHAR;
 BEGIN
   IF AlreadyLoaded(alias) THEN RETURN END;
@@ -186,10 +216,9 @@ BEGIN
     Strings.Copy("cannot find module '", msg);
     Strings.Append(modName, msg);
     Strings.Append(".om' (or '.def'); searched current directory", msg);
-    Dos.GetEnv("OBERON_LIB", env);
-    IF env[0] # 0X THEN
+    IF oberonLib[0] # 0X THEN
       Strings.Append(" and OBERON_LIB=", msg);
-      Strings.Append(env, msg)
+      Strings.Append(oberonLib, msg)
     END;
     LogErr.Error(msg); RETURN
   END;

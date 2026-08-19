@@ -511,7 +511,7 @@ END DirEntry;
 (* Init: open the overlay file (DOCS/OVR.MD §13.1).
    Parameters: fileName -- the overlay file to open, tried as given, then
    searched on PATH, then relative to the running program's own directory.
-   Result: none (see OvrResult).
+   Result: ovrResult (see OvrResult).
 
    Also installs the INT 3Fh trap handler (OVERLAY.ASM's
    Overlay_InstallHandler) and the single exit-procedure hook
@@ -520,19 +520,19 @@ END DirEntry;
    the vector twice or chain the exit hook onto itself.  Per
    SYSTEM.MOD's SetExitProc/GetExitProc contract, prevExitProc must be
    captured BEFORE installing ExitCleanup. *)
-PROCEDURE Init*(fileName: ARRAY OF CHAR);
+PROCEDURE Init*(fileName: ARRAY OF CHAR) : INTEGER;
 BEGIN
   IF ~(TryOpen(fileName) OR SearchPath(fileName) OR SearchOwnDir(fileName)) THEN
-    ovrResult := ovrNotFound; RETURN
+    ovrResult := ovrNotFound; RETURN ovrResult
   END;
   IF ~DetectFormat() THEN
     Files.Close(ovrDosHandle); ovrHaveHandle := FALSE;
-    ovrResult := ovrError; RETURN
+    ovrResult := ovrError; RETURN ovrResult
   END;
   FreeModuleList;   (* guards a second Init call, same as OvrSetBuf/InitEMS *)
   IF ~LoadDirectory() THEN
     Files.Close(ovrDosHandle); ovrHaveHandle := FALSE;
-    ovrResult := ovrError; RETURN
+    ovrResult := ovrError; RETURN ovrResult
   END;
 
   IF ~ovrTrapInstalled THEN
@@ -551,7 +551,8 @@ BEGIN
   ovrResumeTrapTableOfs := ResumeTrapTableOfs();
   InitResumeTrapTable;
 
-  ovrResult := ovrOk
+  ovrResult := ovrOk;
+  RETURN ovrResult
 END Init;
 
 (* ---- OvrSetBuf / OvrGetBuf, DOCS/OVR.MD §13.2 ----

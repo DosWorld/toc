@@ -3,7 +3,7 @@
 MODULE TOC;
 
 IMPORT
- Dos, TocMain, Overlay;
+ Dos, TocMain, Overlay, Import;
 
 (* SetupOvr: enable the overlay runtime for DEF.MOD/LINKNE.MOD ($O+).
    self is the running program's own path (Dos.ParamStr(0,...)) -- the
@@ -37,6 +37,15 @@ END SetupOvr;
 
 PROCEDURE Run*;
 BEGIN
+  (* Read OBERON_LIB before any overlay bring-up runs -- SetupOvr's own
+     Overlay.Init does a Files.Reset/Files.Close cycle to open TOC.EXE's
+     appended .OVR payload, which reliably corrupts the next
+     Dos.GetEnv("OBERON_LIB", ...) read (root cause not yet found past
+     SYSTEM.FCLOSE -- see ENV-BUG.MD).  Caching it first, before that file
+     I/O ever runs, works around it; Import.FindImportFile/
+     LoadExplicitImport read the cached copy instead of calling
+     Dos.GetEnv again themselves. *)
+  Import.CacheOberonLib;
   SetupOvr;
   TocMain.Run
 END Run;

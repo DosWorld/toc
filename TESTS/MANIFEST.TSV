@@ -148,6 +148,7 @@ assert/42c-default-errcode-1	ASSRTDEF.MOD		code-contains	B8 01 00 50
 assert/42d-halt-import-with-code	ASSRTCD.MOD		has-import	SYSTEM_Halt
 assert/42e-errcode-5	ASSRTCD.MOD		code-contains	B8 05 00 50
 assert/44e-assert-false-halts	ASSRTFL.MOD	/ENTRY=Run	errorlevel	1
+condfuse/negparen-whole-condition	NEGPAREN.MOD	/ENTRY=Run	errorlevel	0
 is/57a-compiles	IS57A.MOD		has-global	Is57a__init
 is/57b-runtime	IS57B.MOD		has-global	Is57b__init
 is/57c-unrelated	IS57C.MOD		has-global	Is57c__init
@@ -160,6 +161,7 @@ bounds/59d-in-bounds	BND59D.MOD		has-global	Bnd59d__init
 bounds/59e-r-after-r+	BND59E.MOD		has-global	Bnd59e__init
 bounds/59k-neg-index-traps	BNDNEG.MOD	/ENTRY=Run	errorlevel	201
 bounds/59l-over-index-traps	BNDOVER.MOD	/ENTRY=Run	errorlevel	201
+bounds/59m-compound-index-byte-word	IDXCOMP.MOD	/ENTRY=Run	errorlevel	0
 overlay/59a-o-plus-compiles	OVR59A.MOD		no-global	Ovr59a__init
 overlay/59b-o-minus-compiles	OVR59B.MOD		has-global	Ovr59b__init
 overlay/59c-o-plus-chained-r-plus	OVR59C.MOD		no-global	Ovr59c__init

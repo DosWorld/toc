@@ -192,7 +192,11 @@ PROCEDURE FindSrc(name: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
   VAR i, dlen: INTEGER; env: ARRAY 256 OF CHAR; dir: ARRAY MaxPath OF CHAR;
 BEGIN
   IF TryPath(".", name, result) THEN RETURN TRUE END;
-  Dos.GetEnv("OBERON_LIB", env);
+  (* Cached copy, not a fresh Dos.GetEnv call -- TryPath's own Files.Reset/
+     Files.Close just above (and every other Reset/Close pair before this
+     point) corrupts a fresh read.  See Import.CacheOberonLib and
+     ENV-BUG.MD. *)
+  Import.GetCachedOberonLib(env);
   i := 0;
   WHILE env[i] # 0X DO
     dlen := 0;
@@ -897,7 +901,11 @@ BEGIN
     m := mr.sortNext
   END;
 
-  Dos.GetEnv("OBERON_LIB", p);
+  (* Cached copy, not a fresh Dos.GetEnv call -- see Import.CacheOberonLib's
+     comment and ENV-BUG.MD: by this point (link phase) SetupOvr's overlay
+     bring-up has already run its Files.Reset/Files.Close cycle, which
+     corrupts a fresh Dos.GetEnv("OBERON_LIB", ...) read. *)
+  Import.GetCachedOberonLib(p);
   pos := 0;
   WHILE p[pos] # 0X DO
     dlen := 0;

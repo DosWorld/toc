@@ -161,6 +161,19 @@ BEGIN
   RETURN (f = Syms.TFInteger) OR (f = Syms.TFLongint) OR (f = Syms.TFWord)
 END IsIntConst;
 
+(* NearRootMode — §4.1: for an item.nearBase MReg item, the implicit
+   segment (DS or SS) is never re-derived from the item itself (adr/mode
+   were already overwritten by the indexing/chaining that produced it) --
+   it comes from rootSym.level, set once at the designator's root and
+   never touched again by any subsequent "." or "[" step (see Cgen.Item's
+   own nearBase comment).  level=0 (module-level global) -> DS -> MGlobal;
+   level>0 (local/param) -> SS -> MLocal.  Every nearBase consumer site
+   calls this instead of inspecting item.mode/adr directly. *)
+PROCEDURE NearRootMode*(VAR item: Cgen.Item): INTEGER;
+BEGIN
+  IF item.rootSym.level = 0 THEN RETURN Cgen.MGlobal ELSE RETURN Cgen.MLocal END
+END NearRootMode;
+
 (* IsPow2 — TRUE iff v is a positive power of two (1, 2, 4, 8, ...). *)
 PROCEDURE IsPow2(v: LONGINT): BOOLEAN;
 BEGIN
@@ -535,10 +548,36 @@ BEGIN
   Cgen.Emit1(BYTE(Cgen.OpPushAx))    (* PUSH AX (offset) *)
 END PushFarEsBx;
 
+(* LoadFarAddrEsBxForAggr — ES:BX := far address of a by-value RECORD/fixed-
+   array actual, for Cgen.CgPushAggrValue's source.  Cgen.CgLoadFarAddrEsBx
+   only knows MGlobal/MLocal (each with its own isRef flag); it was never
+   correct for arg.mode=MReg (an already-indexed/dereferenced element),
+   silently misreading `adr` as a BP offset via CgLesBxItem's MGlobal/MLocal
+   dispatch -- a pre-existing bug, not introduced by §4.1, just newly
+   reachable now that plain array-of-record indexing takes the MReg path
+   more often (near or far).  For MReg, ES:BX (or, if arg.nearBase, just
+   BX with the implicit segment synthesized here) is already the address —
+   the preceding ParseExpression's own indexing/deref codegen loaded it;
+   nothing more to do beyond making sure ES is set for the near case. *)
+PROCEDURE LoadFarAddrEsBxForAggr(VAR arg: Cgen.Item);
+BEGIN
+  (* arg.type.form is RECORD/ARRAY here (caller's own guard) -- Oberon has
+     no record/array-valued expression, so an MReg arg here is always an
+     already-dereferenced designator result (isRef=TRUE), never a bare
+     computed value.  Guard on isRef anyway to stay explicit. *)
+  IF (arg.mode = Cgen.MReg) & arg.isRef THEN
+    IF arg.nearBase THEN Cgen.CgEsFromMode(NearRootMode(arg)) END
+    (* else: ES:BX already loaded by the indexing/deref that produced arg. *)
+  ELSE
+    Cgen.CgLoadFarAddrEsBx(arg.mode, arg.adr, arg.isRef)
+  END
+END LoadFarAddrEsBxForAggr;
+
 PROCEDURE ParseActualParameters*(pt: Syms.TypeDesc);
   VAR arg: Cgen.Item; p: Syms.Symbol; bad: BOOLEAN;
       isOpenFormal: BOOLEAN;
       pty: Syms.TypeDesc;
+      isFarPtrArg: BOOLEAN;
 BEGIN
   Expect(Scan.TLparen);
   p := pt.symList; bad := FALSE;
@@ -596,6 +635,13 @@ BEGIN
           Cgen.CgLoadAddrMem(WORD(arg.adr));
           Cgen.Emit1(BYTE(Cgen.OpPushDs));   (* PUSH DS *)
           Cgen.Emit1(BYTE(Cgen.OpPushAx))    (* PUSH AX *)
+        ELSIF (arg.mode = Cgen.MReg) & arg.isRef & arg.nearBase THEN
+          (* §4.1 near array/record element: BX alone holds the offset, no
+             ES was ever loaded -- synthesize the implicit segment (DS/SS,
+             from rootSym.level) before forwarding it as a genuine far
+             {seg,ofs} pair; the VAR-param callee always expects one. *)
+          Cgen.CgEsFromMode(NearRootMode(arg));
+          PushFarEsBx
         ELSIF (arg.mode = Cgen.MReg) & arg.isRef THEN
           (* Pointer deref or indexed element: ES:BX holds far address *)
           PushFarEsBx
@@ -624,12 +670,12 @@ BEGIN
              rounded up to an even byte count (2-byte aligned).  The callee reads
              it in place at [BP+ofs]; argSize reserves the same evenSize so the
              post-call SP cleanup balances.  See Cgen.CgPushAggrValue. *)
-          Cgen.CgLoadFarAddrEsBx(arg.mode, arg.adr, arg.isRef);
+          LoadFarAddrEsBxForAggr(arg);
           Cgen.CgPushAggrValue(INTEGER((pty.size + LONGINT(1)) DIV LONGINT(2) * LONGINT(2)))
         ELSIF (p.type # Syms.NoType) & (pty.form = Syms.TFArray) & (pty.len >= 0) THEN
           (* By-value FIXED array: same caller-copy as a value record (the formal
              is a fixed-size array, not an open array). *)
-          Cgen.CgLoadFarAddrEsBx(arg.mode, arg.adr, arg.isRef);
+          LoadFarAddrEsBxForAggr(arg);
           Cgen.CgPushAggrValue(INTEGER((pty.size + LONGINT(1)) DIV LONGINT(2) * LONGINT(2)))
         ELSIF (arg.type # Syms.NoType) & (arg.type.form = Syms.TFArray) &
             (p.type # Syms.NoType) &
@@ -676,6 +722,10 @@ BEGIN
                holds {ofs:2,seg:2} — forward the pointer, do NOT take the slot's
                own address. *)
             PushFarSlotBp(arg.adr)
+          ELSIF (arg.mode = Cgen.MReg) & arg.isRef & arg.nearBase THEN
+            (* §4.1 near element: synthesize the implicit segment first. *)
+            Cgen.CgEsFromMode(NearRootMode(arg));
+            PushFarEsBx
           ELSIF (arg.mode = Cgen.MReg) & arg.isRef THEN
             (* ES:BX already holds far address (record field, indexed elem) *)
             PushFarEsBx
@@ -725,10 +775,10 @@ BEGIN
             Cgen.EmitCodeStr("83,EC,04,89,E3,36,D9,1F") (* 4-byte dword *)
           END
         ELSE
-          Cgen.CgLoadItem(arg);
-          (* For POINTER/ADDRESS/NILTYPE/far-PROC: 4-byte far pointer arg.
-             Push DX (segment) first, then AX (offset). *)
-          IF (arg.type # Syms.NoType) &
+          (* For POINTER/ADDRESS/NILTYPE/far-PROC: 4-byte far pointer arg,
+             needs both DX (segment) and AX (offset) — not eligible for the
+             single-word memory-push fast path below. *)
+          isFarPtrArg := (arg.type # Syms.NoType) &
              ((arg.type.form = Syms.TFPointer) OR
               (arg.type.form = Syms.TFNiltype) OR
               (arg.type.form = Syms.TFAddress) OR
@@ -737,10 +787,24 @@ BEGIN
               (pty.form = Syms.TFPointer) OR
               (pty.form = Syms.TFAddress) OR
               (pty.form = Syms.TFNiltype) OR
-              ((pty.form = Syms.TFProc) & p.type.isFar)) THEN
-            Cgen.Emit1(BYTE(Cgen.OpPushDx))   (* PUSH DX (segment) *)
-          END;
-          Cgen.Emit1(BYTE(Cgen.OpPushAx))
+              ((pty.form = Syms.TFProc) & p.type.isFar));
+          (* Fast path: a plain scalar actual (INTEGER/WORD/CHAR/BYTE/
+             BOOLEAN — isFarPtrArg excludes the 4-byte case above) that is
+             still a bare, unloaded MGlobal/MLocal item (no isRef — see
+             DOCS/CODEGEN-SIZE.MD §2/§3) can be pushed straight from
+             memory with no load at all: `PUSH [mem]` instead of
+             `MOV AX,[mem]` + `PUSH AX`. *)
+          IF ~isFarPtrArg & ~arg.isRef &
+             ((arg.mode = Cgen.MGlobal) OR (arg.mode = Cgen.MLocal)) THEN
+            IF arg.mode = Cgen.MLocal THEN Cgen.CgPushMemBp(arg.adr)
+            ELSE Cgen.CgPushMemGlobal(WORD(arg.adr)) END
+          ELSE
+            Cgen.CgLoadItem(arg);
+            IF isFarPtrArg THEN
+              Cgen.Emit1(BYTE(Cgen.OpPushDx))   (* PUSH DX (segment) *)
+            END;
+            Cgen.Emit1(BYTE(Cgen.OpPushAx))
+          END
         END
       END;
       p := p.next
@@ -951,7 +1015,8 @@ PROCEDURE ParseDesignator;
       index: Cgen.Item;
       elem: Syms.TypeDesc;
       ts: Syms.Scope;
-      more, wasConst: BOOLEAN;
+      more, wasConst, negConst: BOOLEAN;
+      mark: Scan.Scanner; markPos: LONGINT;
 BEGIN
   IF sc.sym # Scan.TIdent THEN Error("identifier expected"); RETURN END;
   sym := Syms.SymFind(sc.id);
@@ -959,7 +1024,7 @@ BEGIN
   Scan.Next(sc);
 
   item.type := sym.type; item.isRef := FALSE; item.isFar := FALSE;
-  item.typeless := FALSE; item.addrDeref := FALSE;
+  item.typeless := FALSE; item.addrDeref := FALSE; item.nearBase := FALSE;
   item.rdoffId := sym.rdoffId; item.fwdSym := Syms.NoSym;
   item.rootSym := sym;
 
@@ -1074,7 +1139,7 @@ BEGIN
                 Error("ADDRESS() accepts only LONGINT (or pointer/address)")
               END;
               item.mode := Cgen.MReg; item.type := Syms.TypeAddress;
-              item.isRef := FALSE; item.addrDeref := FALSE; RETURN
+              item.isRef := FALSE; item.addrDeref := FALSE; item.nearBase := FALSE; RETURN
             ELSE
               Error("variable or constant expected"); item.mode := Cgen.MConst; item.val := 0
             END
@@ -1094,7 +1159,7 @@ BEGIN
           ELSE
             Cgen.CgLoadItem(item); Cgen.CgDxaxToEsbx()
           END;
-          item.mode := Cgen.MReg; item.isRef := TRUE;
+          item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE;
           item.type := item.type.base; item.adr := 0
         END;
         IF (item.type = Syms.NoType) OR (item.type.form # Syms.TFRecord) THEN
@@ -1136,7 +1201,8 @@ BEGIN
           Cgen.Emit1(05BH);                  (* POP BX (base offset) *)
           Cgen.Emit2(003H, 0D8H);            (* ADD BX, AX *)
           Cgen.Emit1(007H);                  (* POP ES *)
-          item.mode := Cgen.MReg; item.isRef := TRUE; item.type := Syms.TypeChar;
+          item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE;
+          item.type := Syms.TypeChar;
           item.addrDeref := FALSE;
           IF sc.sym # Scan.TComma THEN more := FALSE END;
           IF more THEN Error("too many index dimensions for ADDRESS") END
@@ -1151,18 +1217,46 @@ BEGIN
           ELSE
             Cgen.CgLoadItem(item); Cgen.CgDxaxToEsbx()
           END;
-          item.mode := Cgen.MReg; item.isRef := TRUE;
+          item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE;
           item.type := item.type.base; item.adr := 0
         END;
         IF (item.type = Syms.NoType) OR (item.type.form # Syms.TFArray) THEN
           Error("not an array"); ParseExpression(index); more := FALSE
         ELSE
-          (* Always emit full ES:BX setup + PUSH/POP wrapping and indexed
-             write, regardless of whether the index is a compile-time constant.
-             Compile-time bounds check still fires on constant indices, but it
-             does NOT replace the runtime codegen path. *)
+          (* §4.1 (DOCS/CODEGEN-SIZE.MD): a module-level/local fixed array,
+             never a VAR-param alias and never behind a pointer deref
+             anywhere in this designator's chain so far, is provably
+             DS/SS-relative at runtime -- no far ES:BX pair is needed, just
+             a plain offset in BX (near := TRUE below).  Every other case
+             (VAR-param array, open array, pointer-to-array, or continuing
+             a chain that already went far at an earlier step) keeps the
+             original far ES:BX path unchanged (near := FALSE). *)
           elem := item.type.elemOrRet;
-          IF (item.mode = Cgen.MReg) & item.isRef THEN
+          IF (item.mode = Cgen.MReg) & item.isRef & item.nearBase THEN
+            (* Continuing an already-near chain (e.g. a[i][j]): BX alone
+               already holds the base offset, implicit segment unchanged. *)
+            Cgen.Emit1(BYTE(Cgen.OpPushBx));(* PUSH BX *)
+            ParseExpression(index);
+            wasConst := IsIntConst(index);
+            IF boundsChk & wasConst &
+               (item.type.len >= 0) &
+               ((index.val < 0) OR (index.val >= item.type.len)) THEN
+              Error("index out of bounds")
+            END;
+            Cgen.CgLoadItem(index);
+            IF ~wasConst & (item.type.len >= 0) THEN
+              EmitBoundsCheck(item.type.len, 0)
+            END;
+            IF elem.size = 2 THEN Cgen.Emit2(0D1H, 0E0H)            (* SHL AX,1 *)
+            ELSIF (elem.size > 2) & IsPow2(elem.size) THEN
+              Cgen.CgShlImm(Log2(elem.size))                       (* SHL AX, log2(size) *)
+            ELSIF elem.size > 2 THEN
+              Cgen.CgLoadImmCx(INTEGER(elem.size)); Cgen.CgMul()
+            END;
+            Cgen.Emit1(05BH);                (* POP BX (base offset) *)
+            Cgen.Emit2(003H, 0D8H)             (* ADD BX, AX *)
+            (* nearBase stays TRUE; no ES to restore. *)
+          ELSIF (item.mode = Cgen.MReg) & item.isRef THEN
             (* ES:BX points to array base (through far pointer).
                PUSH ES to preserve array segment across index expression. *)
             Cgen.Emit1(006H);                 (* PUSH ES *)
@@ -1188,8 +1282,64 @@ BEGIN
             Cgen.Emit1(05BH);                (* POP BX (base offset) *)
             Cgen.Emit2(003H, 0D8H);            (* ADD BX, AX *)
             Cgen.Emit1(007H);                  (* POP ES *)
+          ELSIF ((item.mode = Cgen.MGlobal) OR (item.mode = Cgen.MLocal)) &
+                ~item.isRef & (item.type.len >= 0) THEN
+            (* §4.1 near path: plain fixed array, first dimension.
+               §2.7 (DOCS/CODEGEN-SIZE.MD): recognize a plain integer-
+               literal index (optionally negated) WITHOUT emitting any
+               code first -- ParseExpression itself cannot be called
+               before deciding, because for a compound index expression
+               (e.g. i+j) it emits real code eagerly (single-pass, no
+               AST) and materializes the result into AX, which
+               CgLoadAddrItem would then clobber.  A bare TInt, or TMinus
+               immediately followed by TInt (peeked via Scan.Mark/Restore,
+               matching ParseSimpleExpression's own unary-minus constant
+               fold), is recognized as "constant" here; anything else --
+               including a named CONST or a foldable sub-expression --
+               falls through to the original runtime address-math path,
+               unchanged, with ParseExpression called at its original spot
+               (after the base address is already in BX). *)
+            negConst := FALSE;
+            IF sc.sym = Scan.TMinus THEN
+              Scan.Mark(sc, mark, markPos);
+              Scan.Next(sc);
+              IF sc.sym = Scan.TInt THEN negConst := TRUE
+              ELSE Scan.Restore(sc, mark, markPos)
+              END
+            END;
+            wasConst := negConst OR (sc.sym = Scan.TInt);
+            IF wasConst THEN
+              index.val := sc.ival;
+              IF negConst THEN index.val := -index.val END;
+              IF boundsChk THEN
+                IF index.val < 0 THEN Error("index out of bounds") END;
+                IF index.val >= item.type.len THEN Error("index out of bounds") END
+              END;
+              Scan.Next(sc);
+              INC(item.adr, index.val * LONGINT(elem.size))
+              (* item stays MGlobal/MLocal, adr now points straight at the
+                 element -- every existing CgLoadItem/CgStoreItem branch
+                 already handles this optimally, no MReg/nearBase needed. *)
+            ELSE
+              Cgen.CgLoadAddrItem(item.mode, item.adr);
+              Cgen.Emit2(08BH, 0D8H);   (* MOV BX, AX *)
+              Cgen.Emit1(BYTE(Cgen.OpPushBx));(* PUSH BX *)
+              ParseExpression(index);
+              Cgen.CgLoadItem(index);
+              EmitBoundsCheck(item.type.len, 0);
+              IF elem.size = 2 THEN Cgen.Emit2(0D1H, 0E0H)
+              ELSIF (elem.size > 2) & IsPow2(elem.size) THEN
+                Cgen.CgShlImm(Log2(elem.size))
+              ELSIF elem.size > 2 THEN
+                Cgen.CgLoadImmCx(INTEGER(elem.size)); Cgen.CgMul()
+              END;
+              Cgen.Emit1(05BH);        (* POP BX (base offset) *)
+              Cgen.Emit2(003H, 0D8H);  (* ADD BX, AX *)
+              item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := TRUE
+            END
           ELSE
-            (* Load array base into ES:BX *)
+            (* Load array base into ES:BX (far path: VAR-param array,
+               open array, or pointer-to-array target). *)
             IF (item.mode = Cgen.MLocal) & (item.isRef OR (item.type.len < 0)) THEN
               Cgen.CgLesBxBp(item.adr)
             ELSIF ((item.mode = Cgen.MGlobal) OR (item.mode = Cgen.MLocal)) & item.isRef THEN
@@ -1226,7 +1376,7 @@ BEGIN
             Cgen.Emit1(05BH);        (* POP BX (base offset) *)
             Cgen.Emit2(003H, 0D8H);  (* ADD BX, AX *)
             Cgen.Emit1(007H);        (* POP ES *)
-            item.mode := Cgen.MReg; item.isRef := TRUE
+            item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE
           END;
           item.type := elem;
           IF sc.sym # Scan.TComma THEN more := FALSE END
@@ -1243,7 +1393,8 @@ BEGIN
            ref.  Standalone `p^` reads the byte; a following `[i]` (handled in the
            TLbrak branch) advances BX by i. *)
         Cgen.CgLoadItem(item); Cgen.CgDxaxToEsbx();
-        item.mode := Cgen.MReg; item.isRef := TRUE; item.type := Syms.TypeChar;
+        item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE;
+        item.type := Syms.TypeChar;
         item.adr := 0; item.addrDeref := TRUE
       ELSIF (item.type = Syms.NoType) OR (item.type.form # Syms.TFPointer) THEN Error("not a pointer")
       ELSE
@@ -1259,7 +1410,8 @@ BEGIN
           Cgen.CgLoadItem(item);
           Cgen.CgDxaxToEsbx()
         END;
-        item.mode := Cgen.MReg; item.isRef := TRUE; item.type := item.type.base; item.adr := 0
+        item.mode := Cgen.MReg; item.isRef := TRUE; item.nearBase := FALSE;
+        item.type := item.type.base; item.adr := 0
       END
     END
   END
@@ -1276,7 +1428,7 @@ PROCEDURE ParseFactor(VAR item: Cgen.Item);
       realVar: REAL; realBytes: ARRAY 4 OF BYTE;
 BEGIN
   item.isRef := FALSE; item.isFar := FALSE; item.fwdSym := Syms.NoSym;
-  item.rootSym := Syms.NoSym; item.addrDeref := FALSE;
+  item.rootSym := Syms.NoSym; item.addrDeref := FALSE; item.nearBase := FALSE;
   CASE sc.sym OF
     Scan.TInt:
       item.mode := Cgen.MConst; item.val := sc.ival;
@@ -1376,6 +1528,18 @@ BEGIN
       Scan.Next(sc); ParseExpression(item); Expect(Scan.TRparen)
 
   | Scan.TNot:
+      (* DOCS/CODEGEN-SIZE.MD §4.5 ("IF ~x THEN materializes the negation")
+         was attempted and reverted: a standalone `~x` as the WHOLE
+         condition is parsed as ParseTerm's OWN first factor, which
+         ParseTerm deliberately disarms Cgen.condArmed around (see
+         ParseTerm's own header comment — a real, previously-caught bug,
+         `(a<b) & (c>d)` miscompiling, if the first factor's own internal
+         fusion commits to a branch before the parser knows whether `&`
+         follows).  A correct fix needs to thread the "still-pending
+         negation" state through ParseTerm's own first-factor handling
+         (decide fuse-vs-materialize only once it's known whether `&`/`OR`
+         follows), not a self-contained change inside ParseFactor's TNot
+         case alone — left as a scoped follow-up, not attempted here. *)
       Scan.Next(sc); ParseFactor(item);
       Cgen.CgLoadItem(item); Cgen.CgBoolNot();
       item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
@@ -1553,6 +1717,12 @@ BEGIN
         pt := item.type; varAdr := item.adr;
         varGlobal := (item.mode = Cgen.MGlobal); varRef := (item.mode = Cgen.MReg) & item.isRef;
         IF varRef THEN
+          (* §4.1 near array/record elements (item.nearBase) hold only an
+             offset in BX -- no ES was ever loaded.  Materialize the correct
+             implicit segment (DS/SS, from rootSym.level) into ES first, so
+             the "PUSH BX; PUSH ES (save slot addr)" below always saves a
+             genuine far {ofs,seg} pair either way. *)
+          IF item.nearBase THEN Cgen.CgEsFromMode(NearRootMode(item)) END;
           Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
           ParseActualParameters(pt);
           Cgen.CgCallProcVarRefTail(pt.lenOrDescOrArg)
@@ -1562,7 +1732,7 @@ BEGIN
           IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
           ELSE Cgen.CgCallProcVarBp(varAdr) END
         END;
-        item.type := pt.elemOrRet; item.isRef := FALSE;
+        item.type := pt.elemOrRet; item.isRef := FALSE; item.nearBase := FALSE;
         IF (pt.elemOrRet # Syms.NoType) & ((pt.elemOrRet.form = Syms.TFReal) OR (pt.elemOrRet.form = Syms.TFLongreal)) THEN
           item.mode := Cgen.MFreg
         ELSE item.mode := Cgen.MReg END
@@ -2105,22 +2275,70 @@ BEGIN
         IF op = Scan.TPlus THEN Cgen.CgFadd() ELSE Cgen.Emit2(0DEH, 0E1H) END;
         item.mode := Cgen.MFreg; rhsLoaded := FALSE
       ELSE
-        IF isLong THEN Cgen.CgPushDxax() ELSE Cgen.Emit1(BYTE(Cgen.OpPushAx)) END;
-        savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
-        ParseTerm(rhs); Cgen.condArmed := savedArmed;
-        IF ~isLong & (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord) THEN isWord := TRUE END;
-        (* x + 0 / x - 0 = x : pop the variable back and emit nothing. *)
-        IF IsIntConst(rhs) & (rhs.val = LONGINT(0)) &
-           ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
-          IF isLong THEN Cgen.CgPopAxdx()   (* POP AX; POP DX *)
-          ELSE Cgen.Emit1(BYTE(Cgen.OpPopAx)) END;
-          IF isLong THEN item.type := Syms.TypeLongint
-          ELSIF isWord THEN item.type := Syms.TypeWord
-          ELSE item.type := Syms.TypeInteger END;
-          item.mode := Cgen.MReg; rhsLoaded := FALSE
+        IF isLong THEN
+          Cgen.CgPushDxax();
+          savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+          ParseTerm(rhs); Cgen.condArmed := savedArmed;
+          (* x + 0 / x - 0 = x : pop the variable back and emit nothing. *)
+          IF IsIntConst(rhs) & (rhs.val = LONGINT(0)) &
+             ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
+            Cgen.CgPopAxdx();   (* POP AX; POP DX *)
+            item.type := Syms.TypeLongint;
+            item.mode := Cgen.MReg; rhsLoaded := FALSE
+          ELSE
+            Cgen.CgLoadItem(rhs);
+            rhsLoaded := TRUE
+          END
         ELSE
-          Cgen.CgLoadItem(rhs);
-          rhsLoaded := TRUE
+          (* Fast path (DOCS/CODEGEN-SIZE.MD §3/§6b): LHS is pushed
+             UNCONDITIONALLY, exactly as before this change — parsing rhs
+             (e.g. array-index arithmetic for `ga[i]`, still ending in
+             MReg) can clobber AX along the way even when the FINAL rhs
+             item looks like a safe MGlobal/MLocal operand at first
+             glance, so the push cannot be safely deferred past
+             ParseTerm.  (Found by a real test failure, not reasoned out
+             on paper — see this comment's own history.)  What phase 1
+             actually saves is the LOAD+POP-into-CX/register-shuffle
+             step: when rhs turns out to be a plain, unloaded
+             MGlobal/MLocal item (no isRef), LHS is popped straight back
+             into AX and combined directly against rhs's memory location
+             — no CgLoadItem(rhs), no second register, no `mov bx,ax`
+             shuffle — instead of the full push/load-into-AX/pop-into-CX/
+             combine-in-CX shape every other case still uses. *)
+          Cgen.Emit1(BYTE(Cgen.OpPushAx));
+          savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+          ParseTerm(rhs); Cgen.condArmed := savedArmed;
+          IF (rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord) THEN isWord := TRUE END;
+          IF ((rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MLocal)) & ~rhs.isRef &
+             ~IsFpuType(rhs) &
+             ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
+            (* memory-source ADD/SUB: POP LHS back into AX (undoing
+               whatever rhs's own parse did to AX), then combine straight
+               from rhs's memory location — no CgLoadItem(rhs) needed.
+               ~IsFpuType(rhs) excludes "INTEGER + REAL" (item.type drove
+               isFpu above, so an INTEGER LHS with a REAL rhs — a real,
+               live case, TESTS/FIX/COE49G.MOD — would otherwise wrongly
+               take this integer-only path against a REAL's memory
+               location; that case is handled below by the existing
+               rhsLoaded + IsFpuType(rhs) fallback, unchanged). *)
+            Cgen.Emit1(BYTE(Cgen.OpPopAx));
+            IF rhs.mode = Cgen.MLocal THEN
+              IF op = Scan.TPlus THEN Cgen.CgAddMemBp(rhs.adr) ELSE Cgen.CgSubMemBp(rhs.adr) END
+            ELSE
+              IF op = Scan.TPlus THEN Cgen.CgAddMemGlobal(WORD(rhs.adr)) ELSE Cgen.CgSubMemGlobal(WORD(rhs.adr)) END
+            END;
+            IF isWord THEN item.type := Syms.TypeWord ELSE item.type := Syms.TypeInteger END;
+            item.mode := Cgen.MReg; rhsLoaded := FALSE
+          (* x + 0 / x - 0 = x : pop the variable back and emit nothing. *)
+          ELSIF IsIntConst(rhs) & (rhs.val = LONGINT(0)) &
+             ((op = Scan.TPlus) OR (op = Scan.TMinus)) THEN
+            Cgen.Emit1(BYTE(Cgen.OpPopAx));
+            IF isWord THEN item.type := Syms.TypeWord ELSE item.type := Syms.TypeInteger END;
+            item.mode := Cgen.MReg; rhsLoaded := FALSE
+          ELSE
+            Cgen.CgLoadItem(rhs);
+            rhsLoaded := TRUE
+          END
         END
       END
     END;
@@ -2265,7 +2483,72 @@ END ParseCondFactor;
 PROCEDURE ParseCondExpr;
   VAR savedArmed, savedWantTrue: BOOLEAN; savedCondBp: Cgen.Backpatch;
       savedBpList, result: CondBpNode; n: CondBpNode; hit: BOOLEAN;
+      mark: Scan.Scanner; markPos: LONGINT; wholeNegation: BOOLEAN;
 BEGIN
+  (* §2.2 (DOCS/CODEGEN-SIZE.MD): `IF ~x THEN`/`WHILE ~x DO` — a leading
+     `~` whose operand is THIS CALL'S ENTIRE condition (nothing else
+     follows: the next token is a genuine condition terminator, never an
+     operator that could extend the expression) — compiles directly by
+     flipping wantTrue and recursing on the un-negated operand, instead of
+     materializing the negation into AX and then re-testing it (the
+     original §4.5/2.2 finding).  Deliberately narrow and self-contained:
+     this does NOT touch `~` used mid-chain (`~a & b`, `a & ~b`) or as a
+     plain boolean VALUE (`y := ~x`) — Oberon's grammar binds `~` at the
+     tightest (factor) level, so `~a & b` parses as `(~a) & b`, and
+     naively treating a leading `~` as negating the WHOLE condition would
+     silently miscompile that shape.
+
+     Two sub-shapes, handled differently:
+     - `~(expr)`: the paren is self-delimiting (matched by Expect(TRparen)
+       below) — no lookahead ambiguity at all about what the `~` applies
+       to, so this recurses straight into the ARMED ParseCondFactor-style
+       path (the exact machinery ParseCondFactor's own TLparen case
+       already uses correctly, see its header comment) with wantTrue
+       flipped, letting any nested relop/`&`/`OR` inside the parens fuse
+       normally.  Verified by disassembly (2026-08-19 CGPAT spot-check)
+       that omitting this case left `IF ~(x > 0) THEN` fully
+       materializing — `~(expr)` is common enough (e.g. `NegatedCond` in
+       TET/CGPAT.MOD) that skipping it left the fix's biggest single
+       target essentially unfixed for this shape.
+     - `~x` (bare factor, no parens): marked lookahead (Scan.Mark/Restore)
+       checks whether the next token is a genuine condition terminator
+       (`THEN`/`DO`/`UNTIL`/`ELSIF`) — if the guess is wrong, the token
+       stream is rewound and the original materialize-then-test path runs
+       completely unchanged, so there is no way this fast path can
+       produce different code from the slow path except in the exact case
+       it was designed for. *)
+  wholeNegation := FALSE;
+  IF sc.sym = Scan.TNot THEN
+    Scan.Mark(sc, mark, markPos);
+    Scan.Next(sc);
+    IF sc.sym = Scan.TLparen THEN
+      Scan.Next(sc);
+      ParseCondExpr(item, ~wantTrue, bpList);
+      Expect(Scan.TRparen);
+      RETURN
+    END;
+    savedArmed := Cgen.condArmed; Cgen.condArmed := FALSE;
+    ParseFactor(item);
+    Cgen.condArmed := savedArmed;
+    wholeNegation := (sc.sym = Scan.TThen) OR (sc.sym = Scan.TDo) OR
+                     (sc.sym = Scan.TUntil) OR (sc.sym = Scan.TElsif);
+    IF ~wholeNegation THEN Scan.Restore(sc, mark, markPos) END
+  END;
+  IF wholeNegation THEN
+    (* The negated operand is already parsed into `item` (disarmed, so any
+       nested paren'd relop inside it materialized normally — safe).  Emit
+       a normal materialize-then-test on the UN-negated item, but with the
+       branch sense flipped, which is exactly what "branch on NOT x" means
+       and needs no CgBoolNot at all. *)
+    Cgen.CgLoadItem(item); Cgen.CgTestAx();
+    n := CondBpPush(bpList);
+    IF wantTrue THEN Cgen.CgCondNear(Cgen.OpJnz, n^.bp)
+    ELSE Cgen.CgCondNear(Cgen.OpJz, n^.bp)
+    END;
+    bpList := n;
+    item.type := Syms.TypeBoolean; item.mode := Cgen.MReg;
+    RETURN
+  END;
   (* condBpList (module-level relay, see its declaration) is how
      ParseAndTail/ParseOrTail reach back to THIS call's `bpList` without
      ParseTerm/ParseSimpleExpression needing an extra parameter — save/
@@ -2318,6 +2601,7 @@ END ParseCondExpr;
 PROCEDURE ParseExpression;
   VAR rhs: Cgen.Item; op: INTEGER; tsym: Syms.Symbol;
       lhsRec, rhsRec: Syms.TypeDesc;
+      isFastCmpEligible: BOOLEAN;
 BEGIN
   ParseSimpleExpression(item);
   IF (sc.sym >= Scan.TEql) & (sc.sym <= Scan.TGeq) THEN
@@ -2376,8 +2660,59 @@ BEGIN
       ELSE Cgen.CgCmp32Eq()
       END
     ELSE
+      (* Fast path (DOCS/CODEGEN-SIZE.MD §6b): LHS is pushed
+         UNCONDITIONALLY, exactly as before this change — parsing rhs can
+         clobber AX along the way (array-index arithmetic, etc.) even
+         when the FINAL rhs item looks like a plain MGlobal/MLocal
+         operand, so the push cannot be safely deferred past
+         ParseSimpleExpression (found by a real test failure in the +/-
+         path above, same root cause applies here).  The
+         ARRAY-OF-CHAR/string-literal special-casing below can only
+         trigger when item.type or rhs.type is TFChar/TFArray — when
+         item's type is a plain scalar, none of those branches can ever
+         fire, so it's safe to skip straight to the memory-source CMP
+         fast path in that case: POP LHS back into AX (undoing whatever
+         rhs's own parse did to it), then compare directly against rhs's
+         memory location with no CgLoadItem(rhs) and no second register. *)
+      isFastCmpEligible := (item.type # Syms.NoType) &
+        ((item.type.form = Syms.TFInteger) OR (item.type.form = Syms.TFWord) OR
+         (item.type.form = Syms.TFByte) OR (item.type.form = Syms.TFBoolean));
       Cgen.Emit1(BYTE(Cgen.OpPushAx));
       ParseSimpleExpression(rhs);
+      (* §4.3 (DOCS/CODEGEN-SIZE.MD): compare-against-constant.  rhs parsed
+         to a bare MConst (integer/word literal, or a named CONST of one of
+         those types folded at parse time) needs no register at all on the
+         rhs side — CMP AX,imm16 replaces the load-into-register dance the
+         memory-operand branch below still needs.  Excludes LONGINT (that
+         type never reaches this ELSE branch at all — it's handled by its
+         own dedicated 32-bit branch above) and generalizes to any integer
+         constant value, not just 0. *)
+      IF isFastCmpEligible & IsIntConst(rhs) & (rhs.type # Syms.NoType) &
+         (rhs.type.form # Syms.TFLongint) THEN
+        Cgen.Emit1(BYTE(Cgen.OpPopAx));
+        IF ((item.type # Syms.NoType) & (item.type.form = Syms.TFWord)) OR
+           ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord)) THEN
+          Cgen.CgCmpAxImmUnsigned(INTEGER(rhs.val));
+          Cgen.CgSetcc(RelopJccU(op))
+        ELSE
+          Cgen.CgCmpAxImm(INTEGER(rhs.val));
+          Cgen.CgSetcc(RelopJcc(op))
+        END;
+        item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+      ELSIF isFastCmpEligible &
+         ((rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MLocal)) & ~rhs.isRef &
+         ~IsFpuType(rhs) THEN
+        Cgen.Emit1(BYTE(Cgen.OpPopAx));
+        IF rhs.mode = Cgen.MLocal THEN Cgen.CgCmpAxBp(rhs.adr)
+        ELSE Cgen.CgCmpMemGlobal(WORD(rhs.adr)) END;
+        IF ((item.type # Syms.NoType) & (item.type.form = Syms.TFWord)) OR
+           ((rhs.type # Syms.NoType) & (rhs.type.form = Syms.TFWord)) THEN
+          Cgen.CgSetcc(RelopJccU(op))
+        ELSE
+          Cgen.CgSetcc(RelopJcc(op))
+        END;
+        item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+      ELSE
       (* ARRAY OF CHAR vs "" (empty, size=1): mask LHS low byte, load RHS as byte. *)
       IF (item.type # Syms.NoType) & (item.type.form = Syms.TFArray) &
          (item.type.elemOrRet # NIL) & (item.type.elemOrRet.form = Syms.TFChar) &
@@ -2428,6 +2763,7 @@ BEGIN
         Cgen.CgSetcc(RelopJccU(op))
       ELSE
         Cgen.CgSetcc(RelopJcc(op))
+      END
       END
     END;
     item.type := Syms.TypeBoolean; item.mode := Cgen.MReg

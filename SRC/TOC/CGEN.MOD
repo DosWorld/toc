@@ -77,6 +77,23 @@ TYPE
     isFar*:    BOOLEAN;    (* local exported FAR proc *)
     typeless*: BOOLEAN;    (* typeless VAR param *)
     addrDeref*: BOOLEAN;   (* CHAR ref produced by SYSTEM.ADDRESS `^` (byte-indexable) *)
+    (* nearBase: only meaningful when mode=MReg & isRef.  FALSE (the
+       long-standing behaviour) means the far ES:BX pair holds the address,
+       as always.  TRUE (§4.1, DOCS/CODEGEN-SIZE.MD) means adr-in-BX alone
+       is the address, no ES load/preserve needed: the base was a plain
+       module-level/local fixed array or record (MGlobal/MLocal, ~isRef),
+       provably DS- or SS-relative at runtime, and every step since stayed
+       on that same provably-near chain (no intervening pointer deref or
+       VAR-param-array indirection, each of which resets to the far
+       representation permanently for the rest of that designator).  The
+       implicit segment (DS vs SS) is derived from rootSym.level (0 =
+       global = DS, >0 = local = SS) wherever nearBase is consumed — never
+       stored again here, since rootSym already carries it.  MUST be set
+       explicitly (TRUE or FALSE) by every site that sets isRef/mode on an
+       Item — this runtime does not zero-init records (DOCS/IMPLRULE.MD),
+       and a stray TRUE here would silently address through the wrong
+       segment. *)
+    nearBase*: BOOLEAN;
     fwdSym*:   Syms.Symbol; (* non-NIL when MProc and fwdDecl *)
     rootSym*:  Syms.Symbol  (* designator's root identifier *)
   END;
@@ -794,6 +811,65 @@ BEGIN
   EmitCodeStr("26,89,07,26,89,57,02")
 END CgStoreDerefFarLong;
 
+(* §4.1 near mirrors of the four Deref helpers above: same op, [BX]
+   addressing instead of [ES:BX] -- but a bare [BX] defaults to DS, NEVER
+   SS, regardless of what SS currently holds (real-mode x86's default
+   segment for BX-based addressing is always DS).  A local (SS-relative)
+   near item therefore needs an explicit SS: override (36H); a global
+   (DS-relative) one needs no prefix at all, matching the default.
+   isLocal comes from Cgen.MLocal/MGlobal — the same distinction
+   PEXPR.NearRootMode derives from rootSym.level. *)
+PROCEDURE CgDerefNear(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,8B,07") ELSE Emit2(08BH, 007H) END
+END CgDerefNear;
+
+PROCEDURE CgDerefNearByte(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,8A,07,25,FF,00")
+  ELSE EmitCodeStr("8A,07,25,FF,00") END
+END CgDerefNearByte;
+
+PROCEDURE CgStoreDerefNear(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,89,07") ELSE Emit2(089H, 007H) END
+END CgStoreDerefNear;
+
+PROCEDURE CgStoreDerefNearByte(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,88,07") ELSE Emit2(088H, 007H) END
+END CgStoreDerefNearByte;
+
+PROCEDURE CgDerefNearLong(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,8B,07,36,8B,57,02")
+  ELSE EmitCodeStr("8B,07,8B,57,02") END
+END CgDerefNearLong;
+
+PROCEDURE CgStoreDerefNearLong(isLocal: BOOLEAN);
+BEGIN
+  IF isLocal THEN EmitCodeStr("36,89,07,36,89,57,02")
+  ELSE EmitCodeStr("89,07,89,57,02") END
+END CgStoreDerefNearLong;
+
+(* CgDerefNearSized/CgStoreDerefNearSized — near mirrors of
+   CgDerefFarSized/CgStoreDerefFarSized (dispatch by width). *)
+PROCEDURE CgDerefNearSized(isByte, isLong, isPtr, isLocal: BOOLEAN);
+BEGIN
+  IF isByte THEN CgDerefNearByte(isLocal)
+  ELSIF isLong OR isPtr THEN CgDerefNearLong(isLocal)
+  ELSE CgDerefNear(isLocal)
+  END
+END CgDerefNearSized;
+
+PROCEDURE CgStoreDerefNearSized(isByte, isLong, isPtr, isLocal: BOOLEAN);
+BEGIN
+  IF isByte THEN CgStoreDerefNearByte(isLocal)
+  ELSIF isLong OR isPtr THEN CgStoreDerefNearLong(isLocal)
+  ELSE CgStoreDerefNear(isLocal)
+  END
+END CgStoreDerefNearSized;
+
 PROCEDURE CgLoadTagFar();
 BEGIN
   (* ES: MOV AX,[BX-2] *)
@@ -1195,6 +1271,25 @@ BEGIN
   IF isGlobal THEN EmitMemDstMem(081H, extHi, WORD(adr + 2)) ELSE EmitMemDstBp(081H, extHi, adr + 2) END;
   EmitW(hi)
 END CgAddSubMemL;
+(* Register-dest / memory-source ADD/SUB/CMP/PUSH — mirrors EmitMemDstBp/
+   EmitMemDstMem's own /ext scheme (see those procedures' own comments)
+   but with the modrm reg field selecting AX (000) for ADD/SUB/CMP, or the
+   opcode's own fixed /6 extension for PUSH.  Used when an operand is
+   still a plain, unloaded MGlobal/MLocal item (no isRef) — safe to read
+   straight out of memory instead of loading into a register first, per
+   DOCS/CODEGEN-SIZE.MD §3's structural argument (a bare designator with
+   no `.`/`[`/`^` trailer emits no code at all, so `[BP+ofs]`/`[disp16]`
+   IS the value, with no side effect to preserve). *)
+PROCEDURE CgAddMemBp*(ofs: LONGINT); BEGIN EmitRel(003H, 006H, ofs) END CgAddMemBp; (* ADD AX, [BP+ofs] *)
+PROCEDURE CgSubMemBp*(ofs: LONGINT); BEGIN EmitRel(02BH, 006H, ofs) END CgSubMemBp; (* SUB AX, [BP+ofs] *)
+(* CMP AX, [BP+ofs]: use the pre-existing CgCmpAxBp below, same encoding. *)
+PROCEDURE CgPushMemBp*(ofs: LONGINT); BEGIN EmitRel(0FFH, 036H, ofs) END CgPushMemBp; (* PUSH [BP+ofs] (FF /6) *)
+
+PROCEDURE CgAddMemGlobal*(dataOfs: WORD); BEGIN EmitMemDstMem(003H, 0, dataOfs) END CgAddMemGlobal; (* ADD AX, [disp16] *)
+PROCEDURE CgSubMemGlobal*(dataOfs: WORD); BEGIN EmitMemDstMem(02BH, 0, dataOfs) END CgSubMemGlobal; (* SUB AX, [disp16] *)
+PROCEDURE CgCmpMemGlobal*(dataOfs: WORD); BEGIN EmitMemDstMem(03BH, 0, dataOfs) END CgCmpMemGlobal; (* CMP AX, [disp16] *)
+PROCEDURE CgPushMemGlobal*(dataOfs: WORD); BEGIN EmitMemDstMem(0FFH, 6, dataOfs) END CgPushMemGlobal; (* PUSH [disp16] (FF /6) *)
+
 PROCEDURE CgCmp*()      ; BEGIN Emit2(03BH, 0C8H) END CgCmp;       (* CMP CX, AX *)
 PROCEDURE CgCmpAxBp*(ofs: LONGINT); BEGIN EmitRel(03BH, 006H, ofs) END CgCmpAxBp; (* CMP AX, [BP+ofs] *)
 PROCEDURE CgTestAx*()   ; BEGIN Emit2(085H, 0C0H) END CgTestAx;
@@ -1484,6 +1579,21 @@ PROCEDURE CgFldRealEsbx();     BEGIN Emit3(026H, 0D9H, 007H) END CgFldRealEsbx;
 PROCEDURE CgFstpRealEsbx();    BEGIN Emit3(026H, 0D9H, 01FH) END CgFstpRealEsbx;
 PROCEDURE CgFldLongrealEsbx(); BEGIN Emit3(026H, 0DDH, 007H) END CgFldLongrealEsbx;
 PROCEDURE CgFstpLongrealEsbx(); BEGIN Emit3(026H, 0DDH, 01FH) END CgFstpLongrealEsbx;
+(* §4.1 near mirrors: same FPU op, no ES: override. *)
+(* isLocal: SS: override needed -- see CgDerefNear's own comment; a bare
+   [BX] always defaults to DS, never SS, regardless of ambient SS. *)
+PROCEDURE CgFldRealNearBx*(isLocal: BOOLEAN);
+BEGIN IF isLocal THEN EmitCodeStr("36,D9,07") ELSE Emit2(0D9H, 007H) END
+END CgFldRealNearBx;
+PROCEDURE CgFstpRealNearBx*(isLocal: BOOLEAN);
+BEGIN IF isLocal THEN EmitCodeStr("36,D9,1F") ELSE Emit2(0D9H, 01FH) END
+END CgFstpRealNearBx;
+PROCEDURE CgFldLongrealNearBx*(isLocal: BOOLEAN);
+BEGIN IF isLocal THEN EmitCodeStr("36,DD,07") ELSE Emit2(0DDH, 007H) END
+END CgFldLongrealNearBx;
+PROCEDURE CgFstpLongrealNearBx*(isLocal: BOOLEAN);
+BEGIN IF isLocal THEN EmitCodeStr("36,DD,1F") ELSE Emit2(0DDH, 01FH) END
+END CgFstpLongrealNearBx;
 
 PROCEDURE CgFadd*(); BEGIN Emit2(0DEH, 0C1H) END CgFadd;
 PROCEDURE CgFmul*(); BEGIN Emit2(0DEH, 0C9H) END CgFmul;
@@ -1521,7 +1631,7 @@ END CgFcmp;
 (* ---- item helpers ---- *)
 
 PROCEDURE CgLoadItem;
-  VAR isPtr, isByte, isLong, isReal, isLreal, isNil, isAddr: BOOLEAN;
+  VAR isPtr, isByte, isLong, isReal, isLreal, isNil, isAddr, isLocalRoot: BOOLEAN;
       tForm: INTEGER; tFar: BOOLEAN;
 BEGIN
   tForm := -1; tFar := FALSE;
@@ -1589,7 +1699,19 @@ BEGIN
     ELSE CgLoadMem(WORD(item.adr))
     END
   ELSIF item.mode = MReg THEN
-    IF item.isRef THEN
+    IF item.isRef & item.nearBase THEN
+      (* §4.1: BX alone holds the address -- isLocalRoot picks [BX] (DS,
+         the default) vs SS:[BX] (item.rootSym.level>0), see CgDerefNear's
+         own comment for why the plain default can never be assumed. *)
+      isLocalRoot := (item.rootSym # Syms.NoSym) & (item.rootSym.level > 0);
+      IF isReal THEN
+        CgFldRealNearBx(isLocalRoot); item.isRef := FALSE; item.mode := MFreg; RETURN
+      ELSIF isLreal THEN
+        CgFldLongrealNearBx(isLocalRoot); item.isRef := FALSE; item.mode := MFreg; RETURN
+      END;
+      CgDerefNearSized(isByte, isLong, isPtr, isLocalRoot);
+      item.isRef := FALSE
+    ELSIF item.isRef THEN
       IF isReal THEN
         CgFldRealEsbx(); item.isRef := FALSE; item.mode := MFreg; RETURN
       ELSIF isLreal THEN
@@ -1614,7 +1736,7 @@ BEGIN
 END CgLoadItem;
 
 PROCEDURE CgStoreItem*(VAR item: Item);
-  VAR isPtr, isByte, isLong, isReal, isLreal, isAddr: BOOLEAN;
+  VAR isPtr, isByte, isLong, isReal, isLreal, isAddr, isLocalRoot: BOOLEAN;
       tForm: INTEGER; tFar: BOOLEAN;
 BEGIN
   tForm := -1; tFar := FALSE;
@@ -1670,7 +1792,12 @@ BEGIN
     ELSE CgStoreMem(WORD(item.adr))
     END
   ELSIF item.mode = MReg THEN
-    IF item.isRef THEN
+    IF item.isRef & item.nearBase THEN
+      isLocalRoot := (item.rootSym # Syms.NoSym) & (item.rootSym.level > 0);
+      IF isReal THEN CgFstpRealNearBx(isLocalRoot); RETURN END;
+      IF isLreal THEN CgFstpLongrealNearBx(isLocalRoot); RETURN END;
+      CgStoreDerefNearSized(isByte, isLong, isPtr, isLocalRoot)
+    ELSIF item.isRef THEN
       IF isReal THEN CgFstpRealEsbx(); RETURN END;
       IF isLreal THEN CgFstpLongrealEsbx(); RETURN END;
       CgStoreDerefFarSized(isByte, isLong, isPtr)

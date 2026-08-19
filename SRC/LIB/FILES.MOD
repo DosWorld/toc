@@ -476,6 +476,15 @@ BEGIN
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
     r.Flags := 0;
     r.AX := 3D02H;
+    (* BX/CX/SI/DI still hold whatever the rejected AX=716CH call above
+       returned them as (SYSTEM.Intr copies every field of the CPU's actual
+       post-call registers back into Regs, not just the ones the caller
+       cared about) -- AH=3Dh only needs AL/DS:DX, but leaving the other
+       fields stale/uncontrolled going into a second real INT 21h call is
+       the bug: reset them here.  Found 2026-08-17 chasing the "LogErr.om
+       not found" self-host regression -- see DOCS/IMPLRULE.MD §"Stale
+       Registers fields across a fallback SYSTEM.Intr call". *)
+    r.BX := 0; r.CX := 0; r.SI := 0; r.DI := 0;
     r.DS := SYSTEM.SEG(p^);
     r.DX := SYSTEM.OFS(p^);
     r.ES := SYSTEM.GetES();
@@ -534,7 +543,10 @@ BEGIN
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
      r.Flags := 0;
      r.AX := 3C00H;
-     r.CX := 0;
+     (* See Reset's identical fallback for why BX/SI/DI (not just CX) must
+        be reset here too -- stale values from the rejected AX=716CH call
+        above, going into this second real INT 21h call. *)
+     r.BX := 0; r.CX := 0; r.SI := 0; r.DI := 0;
      r.DS := SYSTEM.SEG(p^);
      r.DX := SYSTEM.OFS(p^);
      r.ES := SYSTEM.GetES();
@@ -643,6 +655,9 @@ BEGIN
   SYSTEM.Intr(21H, r);
   IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
     r.AX := 4100H;
+    (* See Reset's identical fallback -- CX/SI stale from the rejected
+       AX=7141H call above, going into this second real INT 21h call. *)
+    r.CX := 0; r.SI := 0;
     r.DS := SYSTEM.SEG(FileName);
     r.DX := SYSTEM.OFS(FileName);
     r.ES := SYSTEM.GetES();

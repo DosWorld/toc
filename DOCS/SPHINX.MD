@@ -403,7 +403,9 @@ CB_API:
     retn
 ```
 
-No stack frame is generated if the procedure doesn't have local variables or `USES` (except for the return address).
+No stack frame is generated if the procedure doesn't have local variables, non-register parameters, or `USES`.
+
+The call site shown above is the minimal-case ideal, not `SPHO.MOD`'s own literal current output: the real translator always pushes every argument first (any argument's own evaluation might otherwise clobber an already-computed register-bound one, `DOCS/SPHO.MD`'s own "Call sites now load a register-named formal's argument directly" entry has the full reasoning), then extracts each register-bound one back off the stack via a small self-contained `push bp`/`[bp+N]`/`pop bp` sequence — a few bytes larger than the ideal `mov ax, 0x1700; call CB_API` shown here for this trivial single-argument case, but correct for any number/mix of register- and stack-bound arguments in any order, which the minimal form cannot express in general.
 
 The keyword `REG` is optional for clarity: `PROCEDURE CB_API(REG AX);` is equivalent.
 
@@ -896,7 +898,7 @@ These are part of the language and generate inline code.
 | `SIZE(T)`         | `sizeof(T)` (constant)              |
 | `ODD(x)`          | `test ax,1` / `jz`/`mov 0`/`jmp`/`mov 1` (no `SETcc`; 8086 only) |
 
-`ADR(v)` returns the offset of `v` within its segment. `v` may name a global VAR, a local VAR, or a (non-register) parameter: a global yields a constant offset (`offset v`), while a local/parameter yields its stack-frame address computed at runtime (`lea ax, [bp±N]`). A register-named parameter has no address and is rejected.
+`ADR(v)` returns the offset of `v` within its segment. `v` may name a global VAR, a local VAR, a (non-register) parameter, or a PROCEDURE: a global or a PROCEDURE both yield a constant offset (`offset v`, a PROCEDURE's own bare label is already its own offset as a NASM immediate — useful for installing an interrupt vector or any other function-pointer-style use), while a local/parameter yields its stack-frame address computed at runtime (`lea ax, [bp±N]`). A register-named parameter has no address and is rejected.
 For far pointers, the segment can be obtained via `CS`, `DS`, etc.
 For example, `ADR(xmsRec)` yields a constant offset.
 

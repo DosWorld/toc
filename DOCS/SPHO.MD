@@ -170,6 +170,45 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
     but-explicitly-NEAR (or non-exported-but-FAR) procedure. A register
     formal carries no type at all and never joins a following group's
     type.
+  - **Call sites now load a register-named formal's argument directly
+    into that register, instead of pushing it** (SPHINX.MD §6.2's own
+    worked `CB_API(0x1700)` example only ever worked "by accident" until
+    this fix — reproduced directly with a second register: `PROCEDURE
+    Foo(BX); ... Foo(0x1234);` compiled to `mov ax,0x1234; push ax; call
+    Foo`, leaving `BX` holding whatever garbage register value it had
+    *before* the call, since `Foo`'s own body reads its parameter
+    straight off the bare `BX` name with no stack slot to pop from at
+    all). Every declared procedure's own per-parameter register-ness/
+    register-name is now recorded (`ProcSetParams`, a new `nParams`/
+    `paramIsReg`/`paramRegName` addition to the `ProcChunk` row —
+    `ProcParamIsReg` looks it up by position at a call site).
+
+    `EmitCall` still pushes **every** argument, in order, exactly as
+    before — this is deliberate, not incidental: it's what keeps each
+    argument's own evaluation free to reference/clobber any register
+    (including one another callee-bound register argument) with zero
+    ordering hazard, the identical guarantee a normal all-stack-param
+    call already had. Only *after* every argument is safely on the stack
+    does a second pass (`ExtractRegArg`, one call per register-param
+    position) pull each register-bound value back off — via a direct
+    `[bp+N]` read (`push bp; mov bp,sp` first: 8086 has no SP-relative
+    addressing mode at all, `SP` cannot be a base register — a first
+    attempt using a literal `[sp+N]` operand failed to assemble, TASM:
+    "register not usable as base/index on 8086") into its target
+    register, then closing the gap in the remaining stack-bound
+    arguments by shifting every word above it down one slot and shrinking
+    `SP` by 2. This correctly handles a register-param argument at *any*
+    position, including one with ordinary stack-bound arguments both
+    before AND after it in the same call (verified directly: `Foo(x:
+    INTEGER; BX; y: INTEGER)` called as `Foo(1, 20, 3)` extracts `BX`
+    from its own middle slot and re-closes the gap for `y`, both
+    computed via a fixed per-argument depth recorded at push time that
+    provably never changes as earlier/deeper register arguments are
+    extracted — see `ExtractRegArg`'s own header comment for the
+    depth-invariance argument). A byte-register argument into a
+    byte-register-named formal, or a byte VAR/word-register/word-VAR
+    argument into any register formal, is sized/widened the same way the
+    stack-bound argument path already does.
   - Exported (`*`) procedures always get `global Name`; **default FAR**,
     but an explicit `NEAR`/`FAR` keyword always wins (SPHINX.MD's own
     note: "can be NEAR/FAR (default - far)"). Every declared procedure's
@@ -254,8 +293,36 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
     this, unless it names a register (in which case it's a translator
     error, not a call — no SPHINX construct ever calls a register name).
   - `USES r1, r2, ...` (`FLAGS` included) emits `push`/`pushf` in the
-    prologue and the mirrored `pop`/`popf` in the epilogue.
+    prologue and the mirrored `pop`/`popf` in the epilogue. Bound-checked
+    against `MaxUses` (raised 8 → 16) the same way `ParsePushPop`'s own
+    `PUSH`/`POP` register list already was — `ParseUses` previously had
+    **no bound check at all**, so a `USES` clause naming more than the
+    old `MaxUses=8` registers would silently write past `regs[]`'s own
+    fixed-size array bounds instead of reporting a translator error
+    (reproduced directly: `EXAMPLES/CLIPDRV/CLIPDRV.SMD`'s own
+    `NEW_PS_INT` interrupt handler genuinely needs `USES ES, DS, BP, SI,
+    DI, DX, CX, BX, AX, FLAGS` — 10 entries — to save/restore every
+    register it touches).
   - `INTERRUPT` procedures end in `iret` instead of `ret`/`retf`.
+  - **The `push bp`/`mov bp,sp` ... `mov sp,bp`/`pop bp` stack frame is
+    only emitted when the procedure actually needs one** — `needsFrame
+    := (nStack > 0) OR (frameOfs > 0)`, i.e. it has at least one
+    non-register parameter (`[bp+N]` addressing) or at least one local
+    `VAR` (`[bp-N]` addressing); a procedure with only register-named
+    parameters and no locals never references `BP` at all, so building
+    the frame was pure waste (extra bytes and cycles on every call, plus
+    an unnecessary clobber of the caller's own `BP` — harmless since it's
+    always restored, but still work with no purpose). In that case only
+    the label and the bare `retn`/`retf`/`iret` are emitted — no
+    `push`/`pop bp` on either side (verified directly: `PROCEDURE
+    Foo(BX): INTEGER; NEAR; BEGIN RETURN BX+1 END;` compiles to just
+    `Foo: add ax,1 \ jmp .L1 \ .L1: retn`). `frameOfs` isn't known until
+    `ParseVarSection` has actually run, so the label is emitted first
+    (unconditionally, needed regardless), then `VAR` is parsed, then the
+    frame decision is made and the (possibly-empty) prologue follows —
+    `USES` is parsed earlier (order-independent of `VAR`, both pure
+    lookahead before the body itself) but its own `push`/`pop` pair
+    always still happens, framed or not.
   - **`RETURN [expr]`** (SPHINX.MD §8.3) is legal anywhere in the body,
     not only as the textually last statement: it evaluates `expr` into
     `AX` (if given) and jumps to the procedure's own single epilogue
@@ -263,7 +330,20 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
     needed since SPHINX has no nested procedures) — the actual epilogue
     (local-frame cleanup, `USES` pop, `ret`/`retf`/`iret`) is emitted
     exactly once, right after that label. A body with no explicit
-    `RETURN` falls through to the same label unaffected.
+    `RETURN` falls through to the same label unaffected. A bare
+    `RETURN` (no `expr` at all) recognizes `ELSE`/`ELSIF` as
+    terminators too, not only `;`/`END`/end-of-file — previously missing
+    (`ParseReturn`'s own no-expression check was `~IsSym(";") &
+    (tokKind # TEof) & ~IsKw("END")`, nothing more), so `IF cond THEN
+    RETURN ELSE ... END` (a completely ordinary pattern — a bare
+    `RETURN` as the last statement of an `IF`'s own THEN branch,
+    immediately followed by `ELSE`) wrongly fell into the
+    expression-parsing branch and tried to read the `ELSE` keyword
+    itself as an expression operand — reproduced directly: emitted `mov
+    ax, [ELSE]` (`ELSE` read as a bare, undeclared identifier) into the
+    `.ASM` output, an undefined symbol at assemble time
+    (`EXAMPLES/CLIPDRV/CLIPDRV.SMD`'s own `INSTALL`: `IF AX = 0 THEN ...
+    RETURN ELSE xmsHndl := AX END`).
 - **Expressions**: strictly left to right, no precedence (SPHINX.MD §7) —
   first operand loads into a scratch register/destination, then each
   further `(op, operand)` pair applies the matching instruction
@@ -275,6 +355,38 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
   `AL` if it has none, then clear the high half) rather than emitted as
   a same-size `mov` — BYTE/BOOLEAN are documented unsigned (SPHINX.MD
   §3.1), so this is zero- not sign-extension (no `CBW`).
+- **`SEGREG := SEGREG;`** (SPHINX.MD §2's own worked `DS := CS;`
+  example): 8086 has no segment-register-to-segment-register `mov`
+  encoding at all (TASM: "unsupported MOV operand combination",
+  reproduced directly — the generic `mov destReg, firstOpnd` fallback
+  every other register assignment already used had no segment-register
+  check of its own, so `DS := CS;` silently emitted the illegal `mov
+  ds, cs`). Now detected via `Lex.IsSegReg` on both sides and emitted as
+  `push CS` / `pop DS` instead, matching SPHINX.MD's own documented
+  output exactly. Two ordinary (non-segment) registers, or a
+  segment-register destination with a non-register/non-segment source,
+  are unaffected — this check only fires when BOTH sides are segment
+  registers.
+- **`reg := 0;`** (any general-purpose 8/16-bit register, never a
+  segment register) compiles to `xor reg, reg` instead of `mov reg, 0`
+  — shorter encoding, identical result. Detected via `IsZeroLiteral` (a
+  direct digit-scan over the literal's own source spelling — deliberately
+  NOT routed through the numeric-literal parser, since the RHS operand
+  text reaching this check might just as easily be a register name, a
+  memory operand, or a bare identifier, none of which should ever hit a
+  numeric parser at all) recognizing plain-decimal (`0`, `00`, ...) and
+  trailing-H/B-suffix (`0H`, `0B`, ...) zero spellings; the C-style
+  `0x0` prefix form is not recognized (falls through to the safe,
+  unchanged `mov reg, 0`, never wrong — just misses this one
+  optimization for that one spelling).
+- **`reg = 0`/`reg # 0`** as an `IF`/`WHILE` condition compiles to
+  `or reg, reg` instead of `cmp reg, 0` — `or` sets `ZF` identically for
+  a zero/nonzero test (shorter encoding, no immediate operand), but is
+  **not** used for the ordering relationals (`<`/`>`/`<=`/`>=`), which
+  need the real borrow/sign flags a genuine `sub`-based `cmp` produces
+  and `or` does not. Applies after `LoadIfMem`'s own memory-operand
+  load, so `IF someVar = 0 THEN` (a memory operand, loaded into `AX`
+  first) benefits too, not just a bare register condition.
 - **Relational operators as a value** (SPHINX.MD §7.3, `AL := AX > BX;`):
   detected before the ordinary arithmetic chain and diverted to
   `cmp a,b` / `Jcc` / `mov dst,0` / `jmp` / `mov dst,1` — terminal
@@ -296,7 +408,22 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
   the same emit-then-substitute-a-register convention a call's own
   result already uses elsewhere in `OperandText`. A register-named
   param (SPHINX.MD §6.2) has no frame slot and no address at all —
-  `ADR()` on one is still a translator error. `SIZE(T)` accepts a
+  `ADR()` on one is still a translator error. `ADR(v)` also now accepts
+  a **PROCEDURE name**, not only a VAR/param — the procedure's own bare
+  label is already its own offset as a NASM immediate (`mov ax,
+  ProcName`), the identical zero-cost convention a global VAR's own bare
+  name already gets (`FindSym` never matches a `LexProc` row, so this
+  falls back to `ProcFindAny` when the plain-VAR lookup fails, before
+  reporting an error). Needed for installing an interrupt vector
+  (`INT 21h/AH=25h`-style "DS:DX = new vector") without a raw `ASM mov
+  ax, ProcName` block — before this, `ADR(SomeInterruptHandler)` was
+  rejected as "requires a declared VAR or param name"
+  (`EXAMPLES/CLIPDRV/CLIPDRV.SMD`'s own `INSTALL`, installing
+  `NEW_CB_INT`/`NEW_PS_INT` as interrupt handlers, needed the
+  workaround). Whether the named procedure is FORWARD-pending or already
+  fully defined makes no difference — either way it already has a real
+  NASM label reserved under that exact name, which is all a bare-offset
+  reference needs. `SIZE(T)` accepts a
   scalar-type keyword or a declared `RECORD` type name. `ODD(x)` is a
   terminal boolean expression like a relational (handled in `EmitExpr`,
   not `OperandText`, since its `test`/`jz`/`mov 0`/`jmp`/`mov 1` result
@@ -382,7 +509,25 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
   resolves the field offset via the declared `struc`. A single-register
   RHS with no further chained operator (`[ES:BX] := AL;`) sizes the move
   from the source register (`mov byte [es:bx], al`) instead of always
-  routing word-sized through AX.
+  routing word-sized through AX. A single-**variable** RHS (not a
+  register) with no chained operator and no already-known size hint
+  (a bare `[seg:base]` target, not a `.RecordType.field` one — that case
+  already gets its size from the field's own declared type) is sized
+  from the SOURCE variable's own declared type the same way: `destSize`
+  is only ever filled in from a RECORD-field access (`ParseMemOperand`
+  never looks at the RHS at all, since it's parsed later), so a bare
+  `[ES:DI] := byteVar;` used to fall through to the generic word-wide
+  `EmitExprAssign` default and silently write 2 bytes where 1 was meant
+  — reproduced directly: `EXAMPLES/CLIPDRV/CLIPCLI.SMD`'s own `[ES:DI]
+  := curCh; INC(DI);` building up a byte buffer one character at a time
+  corrupted every next character's own future byte with a garbage high
+  byte before it was ever written (the identical latent bug was already
+  present, unnoticed, in `EXAMPLES/SPHO/LCOUNT.SMD`'s own `[DS:SI] :=
+  c;`, `c: BYTE` — harmless there only because nothing reads the byte
+  immediately after that particular write before it's overwritten
+  again). When the source variable's own operand text turns out to be
+  memory (not a register), it's loaded through `AL` first — x86 has no
+  mem,mem `mov` form.
 - **Conditions** (`IF`/`WHILE`): a single `a REL b` test
   (`=`, `#`, `<`, `>`, `<=`, `>=`) becomes `cmp` plus the matching
   conditional jump; a bare memory first operand is loaded into `AX`
@@ -415,17 +560,47 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
   else (`THEN`/`DO`, i.e. nothing followed `a`) falls into a new
   bare-boolean path instead — `cmp aLoaded, 0` then `jne`/`je` (TRUE=1 is
   nonzero, FALSE=0, per SPHINX.MD §3.1), honoring a leading `~` the same
-  way the existing `CFLAG`/`ZFLAG` path already did (`onTrue # negated`
-  picks the jump). This removes the previous requirement to spell out
-  `sss = TRUE`/`sss = FALSE`/`SomeCall() = TRUE` explicitly — that form
-  still works unchanged (it takes the `a REL b` path, `b` being the
-  literal `TRUE`/`0`/`FALSE`/`1` operand), the bare form is now just an
-  additional accepted shape for the same condition position. `~` in
-  front of a bare condition (previously a translator error — "'~' only
-  supported directly on CFLAG/ZFLAG" — for anything but `CFLAG`/`ZFLAG`)
-  now works for any bare BOOLEAN condition, not only the flag tests. The
-  byte-var peek (`aIsByteVar`, described just above) is unaffected —
-  still computed once, before `OperandText` runs, and used by both paths.
+  way the existing `CFLAG`/`ZFLAG` path already did (a nested `IF onTrue
+  THEN ... ELSE ...` picks the jump — see the `TOC.EXE` codegen bug this
+  now deliberately avoids, just below). This removes the previous
+  requirement to spell out `sss = TRUE`/`sss = FALSE`/`SomeCall() = TRUE`
+  explicitly — that form still works unchanged (it takes the `a REL b`
+  path, `b` being the literal `TRUE`/`0`/`FALSE`/`1` operand), the bare
+  form is now just an additional accepted shape for the same condition
+  position. `~` in front of a bare condition (previously a translator
+  error — "'~' only supported directly on CFLAG/ZFLAG" — for anything
+  but `CFLAG`/`ZFLAG`) now works for any bare BOOLEAN condition, not only
+  the flag tests. The byte-var peek (`aIsByteVar`, described just above)
+  is unaffected — still computed once, before `OperandText` runs, and
+  used by both paths.
+- **Every jump-polarity choice in `EmitCondJump` is written as a nested
+  `IF onTrue THEN ... ELSE ...`, never `IF onTrue # negated THEN ... ELSE
+  ...`** (a plain BOOLEAN `#` comparison) — all three sites (the
+  `CFLAG`/`ZFLAG` path, the `a REL b` path, and the bare-boolean path).
+  This works around a confirmed `TOC.EXE` (the Oberon-07 compiler that
+  builds `SPHO.MOD` itself) codegen bug: `onTrue # negated`, evaluated
+  from *inside a condition nested within another condition's own THEN/DO
+  body* (a nested `IF`, or an `IF` inside a `WHILE` — a sequential,
+  non-nested pair of conditions was unaffected), silently picked the
+  WRONG side regardless of `onTrue`/`negated`'s actual values — diagnostic
+  instrumentation confirmed `onTrue`, `negated`, and `RelJumps`' own
+  `jt`/`jf` output were all individually correct at the point of the
+  bug, yet the `#`-based selection still chose wrong. Reproduced directly
+  (bisected against an Aug-14 SPHO.EXE build, confirmed correct, so this
+  was introduced sometime in the bare-boolean-condition work above, not
+  present from the start): `IF a = 0 THEN IF b = 0 THEN RETURN 1 END
+  END; RETURN 0` — called as `Test(0, 0)`, both conditions genuinely
+  TRUE — returned `0` instead of `1`, the inner condition's own THEN
+  branch unreachable no matter what `b` was. Rewriting the exact same
+  logic as a nested `IF onTrue THEN (IF negated THEN X ELSE Y) ELSE (IF
+  negated THEN Y ELSE X) END` — provably equivalent boolean logic, just
+  not expressed via `#` — fixed it completely; verified via the same
+  repro (now returns `1` correctly), a full runtime `.COM` build/run, and
+  the regression suite (`FILES.ASM`/`MAINTEST.ASM` byte-identical
+  before/after). Root cause not pursued further (would require debugging
+  `TOC.EXE`'s own codegen, out of `SPHO.MOD`'s scope and requiring
+  maintainer sign-off per CLAUDE.md) — this is a workaround at the
+  `SPHO.MOD` source level, not a fix to the underlying compiler bug.
 - **`WHILE`/`DO`/`END` is the only loop construct** — `REPEAT`/`UNTIL` is
   not part of SPHINX Oberon and is not recognized: `SPHO.MOD` briefly had
   a `ParseRepeat`/`KwRepeat`/`KwUntil` implementation (never a documented
@@ -518,11 +693,6 @@ genuinely can't fold into the lexeme row itself the way `LexKw`/`LexSym`/
   word-wide one. `EmitCondJump` itself (`IF`/`WHILE` conditions) is
   unaffected — it peeks the identifier *before* flattening it, same
   pattern as `EmitCall`'s own byte-VAR-argument peek.
-- No cross-procedure call-site register-parameter resolution: actual
-  parameters at a call site are always pushed (register-named formals are
-  a callee-side stack-frame optimization only, per SPHINX.MD §6.2's own
-  worked example calling such a procedure with a plain `mov`/`call`
-  sequence — SPHO does not special-case call sites for this).
 - `*` (`mul`), `IDIV`/`DIV`/`MOD` are not wired into the expression
   emitter (SPHINX.MD §7.1's `mul`/`idiv`/`div` forms need dedicated
   register-clobber handling — `AX`/`DX` — that the generic left-to-right
@@ -563,6 +733,48 @@ relational-as-value `AL := AX > BX`), uses only plain-8086 instructions
 — no `SETcc` (386+; expressed instead as `cmp`/`Jcc`/`mov 0`/`mov 1` or
 `test`/`jz`/`mov 0`/`mov 1`, mirroring `EmitCondJump`'s own jump-based
 style) and no `JCXZ`/`LOOP` (CLAUDE.md's own project-wide rule).
+
+## Diagnostics carry filename + line
+
+Every translator diagnostic (`LogErr.ErrorInFile(srcPath, LONGINT(line),
+msg)`) reports the source **file** a problem was found in, not only its
+line number — `filename(line): message`, the same convention
+`SRC/TOC/SCAN.MOD`/`PEXPR.MOD` already use for the Oberon-07 compiler
+itself. **Before this fix**, every one of SPHO's own diagnostics (`Expect`/
+`ExpectKw`, and roughly thirty other individual `LogErr.Error` call
+sites scattered through the file) built its own `"... near line N"` text
+by hand, with no filename anywhere — ambiguous the moment `IMPORT`
+splices a second file's own line numbers into the same translation unit
+(reproduced directly: a syntax error inside an `IMPORT`ed file reported
+only its own line number, indistinguishable from the same line number in
+the top-level file or any other file it might also `IMPORT`).
+
+`srcPath` (already existed, but was only ever set once, for the
+top-level file, via `Dos.ParamStr(1, srcPath)`) is now kept correct
+across `IMPORT` too: `OpenSource` copies its own `path` argument into
+`srcPath` every time it opens a file (top-level or included), and
+`OpenInclude`/`CloseInclude` save/restore it via a new `outerPath`, the
+same save/restore shape `outerLine`/`outerCh`/etc. already used.
+`CheckPendingCalls` (the end-of-file FORWARD-declaration check, which
+runs *after* every `IMPORT`ed file has already been closed and `srcPath`
+restored to the top-level file) needed its own dedicated fix: each
+`PendingChunk` entry now also stores the call site's own `srcPath`
+**at `PendingAppend` time** (`fname[]`, alongside the existing `line[]`),
+since by the time `CheckPendingCalls` itself runs, `srcPath` no longer
+reflects whichever file the original call was actually written in.
+
+`Expect`/`ExpectKw` — the two most-hit sites, covering the overwhelming
+majority of real "expected X, got Y" syntax errors — were converted
+first; every other individual `LogErr.Error` call building its own
+`"near line N"` text, plus every other one reporting a genuine parse/
+semantic problem with no location info at all (`"too many parameters"`,
+`"expected register after ':' in register pair"`, `"an IMPORTed file may
+not itself IMPORT"`, ...), was converted the same way. The ~8 heap-
+exhaustion (`"out of memory (X table)"`) sites were deliberately left as
+plain `LogErr.Error` — an allocation failure isn't really "at" a source
+location the way a syntax error is, and a stale/misleading line number
+(whatever was mid-parse when the allocation failed) would arguably be
+worse than none.
 
 ## Implementation note: no `LOOP`/`EXIT` in this compiler's Oberon-07
 

@@ -171,6 +171,7 @@ END PatchFrameSize;
 PROCEDURE ParseFor(retType: Syms.TypeDesc);
   VAR varSym, limSym: Syms.Symbol; init, dst, v, limItem: Cgen.Item;
       step: LONGINT; loopTop: LONGINT; jend: Cgen.Backpatch; neg: BOOLEAN;
+      limIsConst: BOOLEAN; limConstVal: INTEGER;
 BEGIN
   Scan.Next(PExpr.sc);
   IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("identifier expected"); RETURN END;
@@ -191,13 +192,29 @@ BEGIN
   dst.adr := varSym.adr; dst.type := Syms.TypeInteger; dst.isRef := varSym.kind = Syms.KVarParam;
   Cgen.CgStoreItem(dst);
   PExpr.Expect(Scan.TTo);
-  limSym := Syms.SymNew("$lim", Syms.KVar);
-  limSym.type := Syms.TypeInteger;
-  Syms.SymAllocLocal(limSym);
-  PExpr.ParseExpression(limItem); Cgen.CgLoadItem(limItem);
-  v.mode := Cgen.MLocal; v.adr := limSym.adr; v.type := Syms.TypeInteger;
-  v.isRef := FALSE;
-  Cgen.CgStoreItem(v);
+  (* §4.2 (DOCS/CODEGEN-SIZE.MD): a compile-time-constant loop bound (the
+     overwhelmingly common case — FOR i := 0 TO 19, etc.) needs no "$lim"
+     stack slot at all: skip SymNew/SymAllocLocal/CgStoreItem entirely and
+     compare the loop counter directly against the immediate on every
+     iteration below (CgCmpAxImm) instead of reloading a stored bound via
+     CgCmpAxBp.  Only plain INTEGER constants qualify — LONGINT constants
+     never reach here anyway (the loop var itself is checked TFInteger
+     above), and any non-constant expression falls back to the existing
+     $lim-slot path unchanged. *)
+  PExpr.ParseExpression(limItem);
+  limIsConst := (limItem.mode = Cgen.MConst) & (limItem.type # Syms.NoType) &
+                (limItem.type.form = Syms.TFInteger);
+  IF limIsConst THEN
+    limConstVal := INTEGER(limItem.val)
+  ELSE
+    Cgen.CgLoadItem(limItem);
+    limSym := Syms.SymNew("$lim", Syms.KVar);
+    limSym.type := Syms.TypeInteger;
+    Syms.SymAllocLocal(limSym);
+    v.mode := Cgen.MLocal; v.adr := limSym.adr; v.type := Syms.TypeInteger;
+    v.isRef := FALSE;
+    Cgen.CgStoreItem(v)
+  END;
   step := 1; neg := FALSE;
   IF IsLex(Scan.TBy) THEN
     neg := IsLex(Scan.TMinus);
@@ -213,7 +230,7 @@ BEGIN
   loopTop := Cgen.CgPc();
   v.mode := dst.mode; v.adr := dst.adr; v.type := Syms.TypeInteger; v.isRef := dst.isRef;
   Cgen.CgLoadItem(v);
-  Cgen.CgCmpAxBp(limSym.adr);
+  IF limIsConst THEN Cgen.CgCmpAxImm(limConstVal) ELSE Cgen.CgCmpAxBp(limSym.adr) END;
   IF step >= 0 THEN Cgen.CgCondNear(Cgen.OpJg, jend)
   ELSE Cgen.CgCondNear(Cgen.OpJl, jend) END;
   ParseStatementSequence(Syms.TypeNotype);
@@ -544,10 +561,17 @@ BEGIN
     RETURN
   END;
 
+  (* Reload the selector into AX once, before the first arm -- not per-arm.
+     Nothing between here and any later arm's own label comparisons can
+     touch AX: CgCmpAxImm/CgCondNear/CgJmpNear are pure compare/branch, and
+     an arm whose labels didn't match falls through skipArm straight into
+     the NEXT arm's comparisons without ever running that arm's body (the
+     only thing that actually clobbers AX) -- see DOCS/CODEGEN-SIZE.MD
+     "CASE selector reload" for the disassembly that found this. *)
+  ReloadCase(caseLoad, caseSym);
   WHILE (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TEnd) &
         (PExpr.sc.sym # Scan.TEof) DO
     bodyList := NIL; more := TRUE;
-    ReloadCase(caseLoad, caseSym);
     WHILE more DO
       lo := ParseConstLabel();
       IF IsLex(Scan.TDotdot) THEN
@@ -613,11 +637,13 @@ BEGIN
                        (ptt.base.form = Syms.TFRecord)
       ELSE PExpr.Error("NEW requires pointer"); isTaggedRec := FALSE END;
       (* If ptr is MReg/isRef (field through pointer, indexed element, etc.)
-         ES:BX holds the destination slot's far address.  The size expression
-         and CALL FAR SYSTEM_Alloc below will clobber both — save them now,
-         restore just before CgStoreItem. *)
+         ES:BX (or, for a §4.1 near element, BX alone) holds the destination
+         slot's address.  The size expression and CALL FAR SYSTEM_Alloc
+         below will clobber both — save them now, restore just before
+         CgStoreItem. *)
       saveEsbx := (ptr.mode = Cgen.MReg) & ptr.isRef;
-      IF saveEsbx THEN Cgen.EmitCodeStr("06,53") END;  (* PUSH ES; PUSH BX *)
+      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(053H)          (* PUSH BX *)
+      ELSIF saveEsbx THEN Cgen.EmitCodeStr("06,53") END;  (* PUSH ES; PUSH BX *)
       mAllocId := PExpr.GetSystemImport("SYSTEM_Alloc");
       IF PExpr.sc.sym = Scan.TComma THEN
         Scan.Next(PExpr.sc);
@@ -641,7 +667,8 @@ BEGIN
         Cgen.Emit2(040H, 040H);                 (* INC AX / INC AX *)
         Cgen.CgPatchShort(bpNil)
       END;
-      IF saveEsbx THEN Cgen.EmitCodeStr("5B,07") END;  (* POP BX; POP ES *)
+      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(05BH)         (* POP BX *)
+      ELSIF saveEsbx THEN Cgen.EmitCodeStr("5B,07") END;  (* POP BX; POP ES *)
       Cgen.CgStoreItem(ptr)
 
   | Syms.SpDispose:
@@ -776,7 +803,9 @@ BEGIN
            Push order (popped reverse): [need_save_addr]: PUSH ES, PUSH BX;
            [is_long_v]: PUSH DX; always PUSH AX. *)
         needSaveAddr  := (vstore.mode = Cgen.MReg) & vstore.isRef;
-        IF needSaveAddr THEN
+        IF needSaveAddr & vstore.nearBase THEN
+          Cgen.Emit1(BYTE(Cgen.OpPushBx))
+        ELSIF needSaveAddr THEN
           Cgen.Emit1(BYTE(Cgen.OpPushEs));
           Cgen.Emit1(BYTE(Cgen.OpPushBx))
         END;
@@ -819,13 +848,17 @@ BEGIN
           ELSE
             Cgen.EmitCodeStr("2B,C3,1B,D1")     (* SUB AX,BX; SBB DX,CX *)
           END;
-          IF needSaveAddr THEN
+          IF needSaveAddr & vstore.nearBase THEN
+            Cgen.Emit1(BYTE(Cgen.OpPopBx))        (* BX = addr.ofs *)
+          ELSIF needSaveAddr THEN
             Cgen.Emit1(BYTE(Cgen.OpPopBx));       (* BX = addr.ofs *)
             Cgen.Emit1(BYTE(Cgen.OpPopEs))        (* ES = addr.seg *)
           END
         ELSE
           Cgen.Emit1(BYTE(Cgen.OpPopCx));         (* CX = old value *)
-          IF needSaveAddr THEN
+          IF needSaveAddr & vstore.nearBase THEN
+            Cgen.EmitCodeStr("91,5B,91")     (* XCHG AX,CX; POP BX; XCHG AX,CX *)
+          ELSIF needSaveAddr THEN
             Cgen.EmitCodeStr("91,5B,07,91")  (* XCHG AX,CX; POP BX; POP ES; XCHG AX,CX *)
           END;
           IF id = Syms.SpInc THEN Cgen.CgAdd() ELSE Cgen.CgSub() END
@@ -932,12 +965,39 @@ BEGIN
   RETURN Syms.TypeAssignCompat(dst, src)
 END AssignCompat;
 
+(* §2.8 (DOCS/CODEGEN-SIZE.MD): a marked one-token lookahead — TRUE iff the
+   upcoming RHS is a single literal token (TInt/TChar/single-char TString,
+   the same shapes IsIntConst/PreScanLabel already treat as "constant")
+   immediately followed by a statement terminator, i.e. the whole RHS
+   really is just that one literal, not the first token of a larger
+   expression like `5 + x`.  Zero effect on the token stream either way —
+   Mark/Restore brackets it exactly like ParseCase's own pre-scan does.
+   A conservative NO for anything else (qualified names, parenthesized
+   expressions, unary +/-, ...) is always safe: it just means the existing
+   address-save path runs unchanged. *)
+PROCEDURE RhsIsSafeConstant(): BOOLEAN;
+  VAR mark: Scan.Scanner; markPos: LONGINT; isLit, safe: BOOLEAN;
+BEGIN
+  isLit := (PExpr.sc.sym = Scan.TInt) OR (PExpr.sc.sym = Scan.TChar) OR
+           ((PExpr.sc.sym = Scan.TString) & (PExpr.sc.sval[0] # 0X) &
+            (PExpr.sc.sval[1] = 0X));
+  IF ~isLit THEN RETURN FALSE END;
+  Scan.Mark(PExpr.sc, mark, markPos);
+  Scan.Next(PExpr.sc);
+  safe := (PExpr.sc.sym = Scan.TSemi) OR (PExpr.sc.sym = Scan.TEnd) OR
+          (PExpr.sc.sym = Scan.TElse) OR (PExpr.sc.sym = Scan.TUntil) OR
+          (PExpr.sc.sym = Scan.TBar);
+  Scan.Restore(PExpr.sc, mark, markPos);
+  RETURN safe
+END RhsIsSafeConstant;
+
 PROCEDURE ParseStatement(retType: Syms.TypeDesc);
   VAR sym: Syms.Symbol; item, rhs: Cgen.Item;
       pt: Syms.TypeDesc; varAdr: LONGINT; varGlobal, varRef: BOOLEAN;
       rdId: INTEGER; codeOfs: LONGINT; isImp, isFr: BOOLEAN; pt2: Syms.TypeDesc;
       count: LONGINT;
       iform, rform: INTEGER;
+      skipSave: BOOLEAN;
 BEGIN
   (* debug info: one line record at the first code of each new source line *)
   TDbg.AddLine(WORD(Cgen.CgPc()), PExpr.sc.line);
@@ -987,7 +1047,25 @@ BEGIN
         END;
         IF item.isRef THEN item.rootSym.wasRead := TRUE END
       END;
-      IF (item.mode = Cgen.MReg) & item.isRef THEN
+      (* §2.8 (DOCS/CODEGEN-SIZE.MD): a bare literal RHS ("arr[i] := 5")
+         cannot possibly touch AX/DX/ES/BX while it parses (ParseFactor's
+         TInt/TChar/TString cases just populate an MConst Item, no codegen
+         at all) -- skip the save/restore bracket entirely in that case.
+         Any other RHS shape (identifier, call, parenthesized expr, ...)
+         keeps the original always-safe save, unchanged. *)
+      skipSave := RhsIsSafeConstant();
+      IF skipSave THEN
+        (* nothing to save -- BX/ES (or the near item's BX alone) are
+           already exactly what CgStoreItem needs, untouched by the RHS. *)
+      ELSIF (item.mode = Cgen.MReg) & item.isRef & item.nearBase THEN
+        (* §4.1 near LHS element: synthesize ES before saving, so the saved
+           pair is always a genuine far {seg,ofs} regardless of nearBase --
+           every consumer downstream of this save (line ~1091's array-assign
+           unified path, line ~1294's plain scalar restore) already expects
+           a real far pair here, unchanged. *)
+        Cgen.CgEsFromMode(PExpr.NearRootMode(item));
+        Cgen.EmitCodeStr("06,53")  (* PUSH ES; PUSH BX *)
+      ELSIF (item.mode = Cgen.MReg) & item.isRef THEN
         Cgen.EmitCodeStr("06,53")  (* PUSH ES; PUSH BX *)
       END;
       PExpr.ParseExpression(rhs);
@@ -1068,7 +1146,10 @@ BEGIN
           Cgen.CgPushFarAddrItem(item.mode, item.adr, item.isRef)
         END;
         (* push src far ptr [seg][ofs] *)
-        IF (rhs.mode = Cgen.MReg) & rhs.isRef THEN
+        IF (rhs.mode = Cgen.MReg) & rhs.isRef & rhs.nearBase THEN
+          Cgen.CgEsFromMode(PExpr.NearRootMode(rhs));
+          Cgen.EmitCodeStr("06,53")                 (* PUSH ES; PUSH BX *)
+        ELSIF (rhs.mode = Cgen.MReg) & rhs.isRef THEN
           Cgen.EmitCodeStr("06,53")                 (* PUSH ES; PUSH BX *)
         ELSIF rhs.isRef OR (rhs.type.len < 0) THEN
           Cgen.CgLesBxItem(rhs.mode, rhs.adr);
@@ -1151,7 +1232,12 @@ BEGIN
          ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MReg)) THEN
         count := item.type.size;
         Cgen.Emit1(01EH);                      (* PUSH DS (restore after MOVSB) *)
-        IF rhs.mode = Cgen.MReg THEN
+        IF (rhs.mode = Cgen.MReg) & rhs.nearBase THEN
+          (* §4.1: BX alone = src near addr -- synthesize ES before the
+             PUSH ES below, so the saved "src seg" is genuine either way. *)
+          Cgen.Emit2(08BH, 0F3H);               (* MOV SI, BX *)
+          Cgen.CgEsFromMode(PExpr.NearRootMode(rhs))
+        ELSIF rhs.mode = Cgen.MReg THEN
           Cgen.Emit2(08BH, 0F3H)                (* MOV SI, BX -- ES:BX already = src far addr *)
         ELSE
           Cgen.CgLesBxItem(rhs.mode, rhs.adr);  (* ES:BX = src far addr *)
@@ -1191,7 +1277,12 @@ BEGIN
          (item.mode # Cgen.MReg) THEN
         count := item.type.size;
         Cgen.Emit1(01EH);             (* PUSH DS *)
-        IF rhs.mode = Cgen.MReg THEN
+        IF (rhs.mode = Cgen.MReg) & rhs.nearBase THEN
+          (* §4.1: synthesize ES before stashing, so DX:SI holds a genuine
+             far src pair either way. *)
+          Cgen.CgEsFromMode(PExpr.NearRootMode(rhs));
+          Cgen.EmitCodeStr("8C,C2,89,DE")  (* MOV DX,ES; MOV SI,BX -- stash src far addr *)
+        ELSIF rhs.mode = Cgen.MReg THEN
           Cgen.EmitCodeStr("8C,C2,89,DE")  (* MOV DX,ES; MOV SI,BX -- stash src far addr *)
         END;
         Cgen.CgLesBxItem(item.mode, item.adr);
@@ -1239,8 +1330,11 @@ BEGIN
         ELSIF rhs.isRef &
               ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
           Cgen.CgLesBxItem(rhs.mode, rhs.adr)
+        ELSIF (rhs.mode = Cgen.MReg) & rhs.isRef & rhs.nearBase THEN
+          (* §4.1: BX already correct, just synthesize ES to match. *)
+          Cgen.CgEsFromMode(PExpr.NearRootMode(rhs))
         END;
-        (* else rhs.mode = MReg/isRef: ES:BX already holds src addr. *)
+        (* else rhs.mode = MReg/isRef (far): ES:BX already holds src addr. *)
         (* MOV SI,BX; MOV CX,ES; POP DI (dst ofs); POP DX (dst seg); PUSH DS;
            MOV DS,CX; MOV ES,DX; opcode of MOV CX,imm16 *)
         Cgen.EmitCodeStr("8B,F3,8C,C1,5F,5A,1E,8E,D9,8E,C2,B9");
@@ -1264,7 +1358,16 @@ BEGIN
           Cgen.Emit1(099H)        (* CWD — sign-extend INTEGER *)
         END
       END;
-      IF (item.mode = Cgen.MReg) & item.isRef THEN
+      IF skipSave THEN
+        (* nothing was saved -- BX/ES (or nearBase's BX alone) are still
+           exactly what they were when the RHS's own MConst load ran. *)
+      ELSIF (item.mode = Cgen.MReg) & item.isRef & item.nearBase THEN
+        (* §4.1: only BX is actually needed; the ES half saved alongside it
+           (synthesized at the save site) is dead weight here -- pop and
+           discard it via SP adjustment instead of a real POP ES. *)
+        Cgen.Emit1(05BH);              (* POP BX *)
+        Cgen.Emit2(083H, 0C4H); Cgen.Emit1(002H)  (* ADD SP, 2 (discard saved seg) *)
+      ELSIF (item.mode = Cgen.MReg) & item.isRef THEN
         Cgen.EmitCodeStr("5B,07")  (* POP BX; POP ES *)
       END;
       Cgen.CgStoreItem(item)
@@ -1276,6 +1379,7 @@ BEGIN
       varRef := (item.mode = Cgen.MReg) & item.isRef;
       pt := item.type;
       IF varRef THEN
+        IF item.nearBase THEN Cgen.CgEsFromMode(PExpr.NearRootMode(item)) END;
         Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.tagIdOrNParams > 0) THEN
           PExpr.ParseActualParameters(pt) END;
