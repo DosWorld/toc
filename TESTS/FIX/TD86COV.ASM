@@ -2,8 +2,10 @@
 ; additions: CMC/LAHF/SAHF (trivial no-operand), WAIT (FWAIT alias),
 ; LOOPE/LOOPZ/LOOPNE/LOOPNZ (short-branch, same shape as LOOP), JCXZ
 ; (short-branch, E3), XLATB (XLAT alias), TEST reg,mem (commutative
-; swap of the existing mem,reg form), and "es movsb"-style leading
-; segment-register prefix on a string op.
+; swap of the existing mem,reg form), "es movsb"-style leading
+; segment-register prefix on a string op, and STD (FD, the set-
+; direction-flag counterpart to the already-supported CLD/FC --
+; trivial no-operand, same shape as CLC/STC).
 bits 16
 cpu 8086
 section .data
@@ -17,6 +19,8 @@ Foo:
     sahf
     wait
     xlatb
+    std
+    cld
 L1:
     loope L1
     loopz L1

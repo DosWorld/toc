@@ -1336,6 +1336,7 @@ BEGIN
   | Lex.MSti: EncNoOperand(BYTE(0FBH))
   | Lex.MClc: EncNoOperand(BYTE(0F8H))
   | Lex.MStc: EncNoOperand(BYTE(0F9H))
+  | Lex.MStd: EncNoOperand(BYTE(0FDH))
   | Lex.MIret: EncNoOperand(BYTE(0CFH))
   | Lex.MNop: EncNoOperand(BYTE(090H))
   | Lex.MInt3: EncNoOperand(BYTE(0CCH))

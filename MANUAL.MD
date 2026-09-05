@@ -73,7 +73,7 @@ END Hello.
 ```
 
 ```
-TOC286.EXE /ENTRY=Run Hello.Mod
+TOC.EXE /ENTRY=Run Hello.Mod
 Hello.exe
 ```
 
@@ -436,17 +436,22 @@ of which can be combined in one comment separated by commas:
 
 ## Compiling and linking
 
-`toc286.exe` is the whole toolchain in one binary: dependency scanner,
-incremental compiler, and smart linker.
+`toc.exe` drives the whole toolchain: dependency scanner, incremental
+compiler, and smart linker.
+
+It is a **driver**, not a monolith: `toc.exe` execs `tocc.exe` to compile and
+`tocl.exe` to link, so no single DOS process ever holds both.  All three
+binaries must sit **in the same directory** — the driver looks for its
+children next to itself.
 
 ```
-toc286.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] <Root.Mod>
+toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/CD|/CP] <Root.Mod>
 ```
 
 | Command | Behavior |
 |---|---|
-| `toc286.exe Root.Mod` | **Compile-only.** Scans transitive imports, recompiles anything stale, emits `.om` files. No link step — this is how you build a library. |
-| `toc286.exe /ENTRY=Run Root.Mod` | **Compile + link.** Same scan/compile, then links every `.om` into `Root.exe` (name auto-derived from the module name). |
+| `toc.exe Root.Mod` | **Compile-only.** Scans transitive imports, recompiles anything stale, emits `.om` files. No link step — this is how you build a library. |
+| `toc.exe /ENTRY=Run Root.Mod` | **Compile + link.** Same scan/compile, then links every `.om` into `Root.exe` (name auto-derived from the module name). |
 
 Switches are case-insensitive except the value after `/ENTRY=`, which keeps
 its case:
@@ -467,7 +472,7 @@ its case:
 - **`/CP`** — 16-bit DPMI protected-mode **New Executable (NE)** output,
   structured to match a Borland-Pascal `/CP` reference; confirmed working
   end-to-end (including self-hosting) on real DPMI16 hardware via HX-DOS
-  (see `DOCS/NE-BP.MD`). `/G` is not valid with `/CP`. This is **still a
+  (see `DOCS/NE-BP.MD`). `/G` works with `/CP` as well as `/CD`. This is **still a
   16-bit, segmented target** — same memory model, same far pointers, same
   64 KB code/data segment limits as `/CD` (see `DOCS/PORTING.MD` §3.5); the
   only real difference is that segment registers hold protected-mode LDT
@@ -478,17 +483,15 @@ its case:
   below). Every `/CP`-linked `.EXE` embeds the DPMI-extender loader stub
   (`NESTAB.BIN`, sourced from the HX-DOS extender — historically also called
   `DPMIST16.BIN`) ahead of its NE header. The compiler ships as two
-  binaries built from this same source: `BIN/TOC.EXE` (`/CD`, "clean DOS")
-  and `BIN/TOC286.EXE` (`/CP`, DPMI16). Reach for `TOC286.EXE` when plain
-  DOS conventional memory (the 640 KB ceiling) isn't enough to run
-  `TOC.EXE` itself — running under a DPMI host gives the compiler access to
-  memory beyond that limit.
+  `/CP` selects the output format only — the compiler itself is always the
+  same real-mode toolchain.
 
 ```
-TOC286.EXE MyLib.Mod                     REM compile-only → MyLib.om
-TOC286.EXE /ENTRY=Run MyProg.Mod         REM compile + link → MyProg.exe
-TOC286.EXE /M /ENTRY=Run MyProg.Mod      REM force-check every import's timestamp
-TOC.EXE /G /ENTRY=Run MyProg.Mod         REM link with Turbo-Debugger symbols (/G not valid with /CP)
+TOC.EXE MyLib.Mod                     REM compile-only → MyLib.om
+TOC.EXE /ENTRY=Run MyProg.Mod         REM compile + link → MyProg.exe
+TOC.EXE /M /ENTRY=Run MyProg.Mod      REM force-check every import's timestamp
+TOC.EXE /CP /ENTRY=Run MyProg.Mod     REM link as a DPMI16 NE executable
+TOC.EXE /G /ENTRY=Run MyProg.Mod      REM link with Turbo-Debugger symbols
 ```
 
 **`OBERON_LIB`** tells the compiler where to find the standard library
@@ -499,7 +502,7 @@ current directory.
 SET OBERON_LIB=C:\TOC\OBERON.OM;D:\OLIB\NET.OM;D:\OLIB\UI.OM
 ```
 
-`toc286.exe` also looks for `OBERON.OM` next to its own binary automatically,
+`toc.exe` also looks for `OBERON.OM` next to its own binary automatically,
 so on a normal install you often don't need to set this at all.
 
 **Output layout.** A normal compile writes `ModName.rdf` + `ModName.def` as
@@ -833,7 +836,7 @@ variable.
 ### `LogErr` — toolchain-wide error/diagnostic state
 
 The single error state and single place any message is printed, used
-internally by `toc286.exe`/`tolib.exe`/`rdfgrep.exe`/`tasm.exe`/`tlink.exe`
+internally by `toc.exe`/`tolib.exe`/`rdfgrep.exe`/`tasm.exe`/`tlink.exe`
 (and available to any user program that wants the same fail-fast
 diagnostic convention).
 
@@ -855,7 +858,7 @@ for the process, matching this toolchain's fail-fast convention (see
 ### `Rdoff` — RDOFF2 object file reader/writer
 
 Reads and writes RDOFF2 `.rdf` object files (segments, GLOBAL/IMPORT/RELOC/
-SEGRELOC/BSS records) — the format `toc286.exe`'s code generator emits and its
+SEGRELOC/BSS records) — the format `toc.exe`'s code generator emits and its
 linker consumes. See [`DOCS/RDOFF2.MD`](DOCS/RDOFF2.MD) for the binary
 layout this module implements.
 
@@ -953,7 +956,7 @@ MODULE MyProg;
 ```
 
 ```
-toc286.exe /G /ENTRY=Run MyProg.Mod
+toc.exe /G /ENTRY=Run MyProg.Mod
 ```
 
 The block carries modules, source file names, symbols, and a line-number

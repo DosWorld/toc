@@ -801,8 +801,9 @@ variants, never to widen the check.
 
 ### Memory-leak discipline — ZERO tolerance  ← CRITICAL
 
-The compiler runs many module compiles **in one process** (the all-in-one build
-driver and any single-shot `oc /ENTRY=Run Root.Mod`).  A leak of even a few hundred
+The compiler runs many module compiles **in one process** (`TOCC.EXE` compiles
+the whole dependency tree in a single run, as does any single-shot
+`toc /ENTRY=Run Root.Mod`).  A leak of even a few hundred
 bytes per module compounds across a dependency tree and exhausts the DOS heap — the
 symptom is a misleading `error: cannot write <Mod>.rdf` (the per-file 8 KB `Files`
 buffer's `NEW` returns NIL) when compiling an import-heavy module such as `PARSER.MOD`.

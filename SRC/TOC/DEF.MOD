@@ -1,4 +1,4 @@
-(*$D-,O+*)
+(*$D-,O-*)
 MODULE Def;
 (*
   Port of def.c/def.h to Oberon-07.
@@ -384,6 +384,29 @@ BEGIN
   END;
   short[j] := 0X
 END MakeShort;
+
+(* modId for an imported PROC symbol.
+   Historically this interned the .def's own full link name ("Files_Open"),
+   one unique long string PER IMPORTED PROCEDURE -- while the symbol's own
+   name ("Files.Open") was interned separately, so every imported proc cost
+   StrTab two near-identical entries differing by a single character.  At
+   433 imported procs for the heaviest module that is pure duplication.
+
+   Only the MODULE half is actually needed: PEXPR2's designator path
+   rebuilds the link name as "<module>_<ident>" from the IMPORT symbol's own
+   modId before it ever looks at the proc's, and every .def PROC entry is
+   "<MODULE>_<short>" (verified across the stdlib: 159 procs, zero
+   exceptions).  So interning the module name -- one shared entry per
+   imported MODULE instead of one per imported PROC -- carries the same
+   information.
+
+   `alias` is the fallback for a .def with no MODULE line (the legacy
+   format), matching what the rest of DefRead does with `alias`. *)
+PROCEDURE ProcModId(modname, alias: ARRAY OF CHAR): StrTab.TStrTabId;
+BEGIN
+  IF modname[0] # 0X THEN RETURN StrTab.Intern(modname) END;
+  RETURN StrTab.Intern(alias)
+END ProcModId;
 
 (* Build qname = prefix + "." + suffix into dst. *)
 PROCEDURE BuildQName(prefix, suffix: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
@@ -794,7 +817,7 @@ BEGIN
         s := Syms.SymNew(qname, Syms.KProc);
         s.adr := 0; s.rdoffId := -1;
         s.type := pt; s.exported := TRUE;
-        s.modId := StrTab.Intern(fullname);
+        s.modId := ProcModId(modname, alias);
         curInline := pt
       ELSIF Strings.Equal(kw, "PROC") THEN
         ReadToken(line, i, tok);
@@ -805,7 +828,7 @@ BEGIN
           s := Syms.SymNew(qname, Syms.KProc);
           s.adr := 0; s.rdoffId := -1;
           s.type := pt; s.exported := TRUE;
-          s.modId := StrTab.Intern(fullname);
+          s.modId := ProcModId(modname, alias);
           curProc := pt
         ELSE
           (* legacy: seg offset *)
@@ -814,7 +837,7 @@ BEGIN
           s := Syms.SymNew(qname, Syms.KProc);
           s.adr := ofs; s.rdoffId := -1;
           s.type := Syms.TypeNewProc(Syms.TypeNotype);
-          s.exported := TRUE; s.modId := StrTab.Intern(fullname)
+          s.exported := TRUE; s.modId := ProcModId(modname, alias)
         END
       END
     END

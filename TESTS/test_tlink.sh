@@ -33,11 +33,17 @@ ROOT="$(pwd)"
 BOOTOC="$ROOT/BOOT/TOC.EXE"
 BINOM="$ROOT/BIN/OBERON.OM"
 BINTRUBOOM="$ROOT/BIN/TRUBO.OM"
+BINRDFGREP="$ROOT/BIN/RDFGREP.EXE"
 TASMDIR="$ROOT/SRC/TASM"
 TLINKDIR="$ROOT/SRC/TLINK"
 FIXDIR="$ROOT/TESTS/FIX"
 XT="${XT:-xt}"
-MAX=500000000
+# 2000000000 matches test_tasm.sh's own BUILDMAX for the identical
+# BOOT/TOC.EXE-based TASM.MOD build -- 500000000 here was found too tight
+# once TLINK.MOD grew large enough (NE.MOD's own addition included) that
+# the same build genuinely needs more instructions to finish, not stuck
+# in a real loop (see OVR-BUG.MD's own note on this exact class of flake).
+MAX=2000000000
 
 if ! command -v "$XT" >/dev/null 2>&1; then
     echo "SKIP: xt emulator not found — set XT=/path/to/xt to enable the TLINK test"
@@ -49,11 +55,19 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$ROOT/TMP"
+# TOC.EXE is only a driver now; it execs its TOCC/TOCL siblings from its own
+# directory.  ChildPath derives their names from the driver's own basename by
+# stripping a trailing "TOC" -- "TOC_BOOT" has no such suffix, so it falls
+# back to the bare names.  Stage all three accordingly.
 cp "$BOOTOC" "$WORK/TOC_BOOT.EXE"
+cp "$ROOT/BOOT/TOCC.EXE" "$WORK/TOCC.EXE"
+cp "$ROOT/BOOT/TOCL.EXE" "$WORK/TOCL.EXE"
 cp "$BINOM" "$WORK/OBERON.OM"
 cp "$BINTRUBOOM" "$WORK/TRUBO.OM"
 cp "$TASMDIR"/*.MOD "$WORK/"
-cp "$TLINKDIR/TLINK.MOD" "$TLINKDIR/TEXE.MOD" "$TLINKDIR/BGI2.MOD" "$TLINKDIR/BIN.MOD" "$WORK/"
+cp "$TLINKDIR/TLINK.MOD" "$TLINKDIR/TEXE.MOD" "$TLINKDIR/BGI2.MOD" "$TLINKDIR/BIN.MOD" "$TLINKDIR/NE.MOD" "$WORK/"
+cp "$TLINKDIR/NESTAB.RDF" "$WORK/"
+if [ -f "$BINRDFGREP" ]; then cp "$BINRDFGREP" "$WORK/RDFGREP.EXE"; fi
 cp "$FIXDIR/TLINKHI.ASM" "$FIXDIR/TLINKDRV.ASM" "$FIXDIR/TLKMAIN.ASM" "$FIXDIR/TLKMOD2.ASM" \
    "$FIXDIR/TLKNOSTART.ASM" "$FIXDIR/TLKUNRES.ASM" "$FIXDIR/TLKDUPA.ASM" "$FIXDIR/TLKDUPB.ASM" \
    "$FIXDIR/TLKJMPCOM.ASM" "$FIXDIR/TLKBGI.ASM" "$FIXDIR/TLKDD.ASM" "$WORK/"
@@ -419,6 +433,51 @@ if [ -f "$WORK/TLKTEST.EXE" ]; then
     fi
 else
     echo "FAIL: /T=exe did not produce TLKTEST.EXE"
+    FAIL=$((FAIL+1))
+fi
+
+# --- /T=ne (New Executable, structural checks only) --------------------------
+# NE output cannot run under xt (MZ-only, see DOCS/NE-BP.MD) -- verified by
+# structural byte inspection instead, the same technique SRC/TOC/LINKNE.MOD's
+# own /CP target uses. TLKMAIN.RDF/TLKMOD2.RDF (already assembled above for
+# the multi-module /T=exe test) double as the /T=ne fixture too: 'start' is
+# in module 1's CODE, and TLKMOD2 owns a cross-module DATA reference,
+# exercising NE.MOD's own OnReloc/OnSegReloc paths, not just a single-module
+# link.
+echo "[tlink] linking /T=ne (New Executable, structural checks only) ..."
+rm -f "$WORK/TLKTEST.NE"
+( cd "$WORK" && "$XT" run --max=$MAX TLINK.exe /T=ne TLKMAIN.RDF TLKMOD2.RDF TLKTEST.NE >link-ne.log 2>&1 ) \
+    || { echo "FAIL: /T=ne link failed"; cat "$WORK/link-ne.log"; FAIL=$((FAIL+1)); }
+if [ -f "$WORK/TLKTEST.NE" ]; then
+    echo "PASS: /T=ne -> TLKTEST.NE produced"
+    PASS=$((PASS+1))
+    if [ -f "$WORK/RDFGREP.EXE" ]; then
+        if ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE ne-signature TLKTEST.NE >/dev/null 2>&1 ); then
+            echo "PASS: /T=ne -> TLKTEST.NE has 'NE' signature at e_lfanew"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: /T=ne -> TLKTEST.NE missing 'NE' signature"
+            FAIL=$((FAIL+1))
+        fi
+        if ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE ne-seg-count TLKTEST.NE 2 >/dev/null 2>&1 ); then
+            echo "PASS: /T=ne -> TLKTEST.NE has exactly 2 NE segments (CODE+DATA)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: /T=ne -> TLKTEST.NE segment count != 2"
+            FAIL=$((FAIL+1))
+        fi
+        if ( cd "$WORK" && "$XT" run --max=$MAX RDFGREP.EXE ne-entry-seg TLKTEST.NE 1 >/dev/null 2>&1 ); then
+            echo "PASS: /T=ne -> TLKTEST.NE entry CS = 1 (the CODE segment)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL: /T=ne -> TLKTEST.NE entry CS != 1"
+            FAIL=$((FAIL+1))
+        fi
+    else
+        echo "SKIP: /T=ne structural checks (BIN/RDFGREP.EXE not built)"
+    fi
+else
+    echo "FAIL: /T=ne did not produce TLKTEST.NE"
     FAIL=$((FAIL+1))
 fi
 

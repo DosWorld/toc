@@ -1,4 +1,4 @@
-(*$D-,O+*)
+(*$D-,O-*)
 MODULE LinkNE;
 (*
   NE-specific consumer of Link's target-agnostic core: writes a Windows/OS-2
@@ -20,9 +20,9 @@ MODULE LinkNE;
   clears every module's own isOverlay unconditionally at link time
   (Link.CalculateLayout, DOCS/OVR.MD §2 -- $O+ is /CD-only regardless of
   which module carries the directive), this module links fully resident
-  when IT IS the actual /CP target being built (TOC286.EXE) -- $O+ only
-  has a real effect on THIS module's own callers when THEY link /CD,
-  i.e. TOC.EXE's own build, never TOC286.EXE's.
+  when IT IS the actual /CP target being built -- $O+ only has a real
+  effect on THIS module's own callers when THEY link /CD, i.e. the
+  compiler's own /CD build, never a /CP one.
 
   Segment model (DOCS/NE-BP.MD Part 2 §2.2): one NE CODE segment per used module's
   own CODE segment, one NE DATA segment per used module's own DATA segment, and
@@ -250,7 +250,7 @@ END SegOf;
 
 (* Locate the NE segment index of (module m, seg) — walks the segment table.
    For the shared BSS, m is NIL and seg is Rdoff.SegBss. *)
-PROCEDURE SegIndexOf*(ns: State; m: Link.Module; seg: INTEGER): INTEGER;
+PROCEDURE SegIndexOf(ns: State; m: Link.Module; seg: INTEGER): INTEGER;
   VAR n: SegNode; i, k: INTEGER;
 BEGIN
   n := ns^.segHead; i := 0;

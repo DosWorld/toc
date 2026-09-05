@@ -122,20 +122,6 @@ BEGIN
   END
 END NormalizeSlashes;
 
-(* Join dir and file into dst, inserting "\" separator if needed. *)
-PROCEDURE PathJoin(VAR dst: ARRAY OF CHAR; dir, file: ARRAY OF CHAR);
-  VAR i, j: INTEGER;
-BEGIN
-  i := 0;
-  WHILE (i < LEN(dst) - 1) & (dir[i] # 0X) DO dst[i] := dir[i]; INC(i) END;
-  IF (i > 0) & (dst[i-1] # "\") & (i < LEN(dst) - 1) THEN
-    dst[i] := "\"; INC(i)
-  END;
-  j := 0;
-  WHILE (i < LEN(dst) - 1) & (file[j] # 0X) DO dst[i] := file[j]; INC(i); INC(j) END;
-  dst[i] := 0X
-END PathJoin;
-
 (* Search for defname — first in ModName.OM (CWD), then ModName.OM in exe dir,
    then in each OBERON_LIB archive, then OBERON.OM (CWD), then OBERON.OM in exe dir. *)
 PROCEDURE FindImportFile(defname: ARRAY OF CHAR; VAR out: Files.File): BOOLEAN;
@@ -161,7 +147,7 @@ BEGIN
 
   (* 1.5. ModName.OM in exe directory *)
   IF exeDir[0] # 0X THEN
-    PathJoin(omPath, exeDir, omname);
+    Dos.PathJoin(omPath, exeDir, omname);
     IF TryExtract(omPath, defname, out) THEN RETURN TRUE END
   END;
 
@@ -189,7 +175,7 @@ BEGIN
 
   (* 4. OBERON.OM in exe directory *)
   IF exeDir[0] # 0X THEN
-    PathJoin(omPath, exeDir, "OBERON.OM");
+    Dos.PathJoin(omPath, exeDir, "OBERON.OM");
     IF TryExtract(omPath, defname, out) THEN RETURN TRUE END
   END;
 

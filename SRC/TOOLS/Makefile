@@ -16,8 +16,14 @@ $(OBERON_OM): $(BIN_DIR)/$(OBERON_OM)
 $(TRUBO_OM): $(BIN_DIR)/$(TRUBO_OM)
 	cp $(BIN_DIR)/$(TRUBO_OM) $(TRUBO_OM)
 
-$(TOC): $(BIN_DIR)/$(TOC)
+# The toolchain is three binaries: TOC.EXE is only a driver and execs
+# TOCC.EXE/TOCL.EXE from its OWN directory, so all three must be staged
+# here together -- staging the driver alone gives "toc: cannot exec
+# TOCC.EXE" on the first compile.
+$(TOC): $(BIN_DIR)/$(TOC) $(BIN_DIR)/TOCC.EXE $(BIN_DIR)/TOCL.EXE
 	cp $(BIN_DIR)/$(TOC) $(TOC)
+	cp $(BIN_DIR)/TOCC.EXE TOCC.EXE
+	cp $(BIN_DIR)/TOCL.EXE TOCL.EXE
 
 # ── rdfgrep ────────────────────────────────────────────────────────────
 # toc.exe auto-names the output from the module name: RDFGREP.MOD → RDFGREP.exe

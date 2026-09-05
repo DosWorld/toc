@@ -43,6 +43,25 @@ CONST
   MinHeapParas = 16;         (* OvrSetBuf's minimum, mirroring MEM_INIT's own
                                  "at least 16 paragraphs" floor in SYSTEM.ASM *)
   ParaSize     = 16;
+  NumHeapBlocks = 2;         (* Multi-block overlay buffer (2026-08-21,
+                                 OVR-BUG.MD follow-up): SYSTEM.Alloc hands
+                                 out one DOS block at a time, hard-capped
+                                 near 64KB (WORD paras * WORD ParaSize must
+                                 itself fit a WORD) -- a single such block
+                                 cannot hold every module that can be
+                                 legitimately resident AT ONCE (the module
+                                 currently executing, pinned by inUse/its
+                                 own epilogue counter, PLUS whatever it
+                                 calls into) once the overlay module pool
+                                 grew large enough (PExpr2.MOD).  OvrSetBuf
+                                 allocates NumHeapBlocks independent blocks
+                                 instead of one; every block runs its own
+                                 independent bump-pointer-with-wraparound
+                                 allocator (LoadModule tries block 0 first,
+                                 exactly the original single-block logic,
+                                 falling over to block 1 only once block 0's
+                                 own eviction loop is truly exhausted) --
+                                 see LoadModule's own comment. *)
   PageSize     = 16384;      (* EMS page size, DOCS/OVR.MD §13.7 --
                                  EMS.MOD's own page-mapped copy granularity,
                                  NOT this module's scratch-buffer size (see
@@ -65,7 +84,12 @@ CONST
   (* Per-module on-disk header size (DOCS/OVR.MD §11.1, §6): fixupLen(2) +
      xfixupLen(2) + codeLen(4) + siteCount(2) + resumeCount(2) = 12 bytes.
      Widened from 10 (codeLen WORD -> LONGINT) 2026-08-11 -- see
-     ModuleHeaderDesc's own codeLen comment. *)
+     ModuleHeaderDesc's own codeLen comment.  Deliberately NOT widened
+     again for the OVR-BUG.MD epilogue-counter fix -- BOOT/TOC.EXE (the
+     sole bootstrap) has this writer's old form permanently compiled in
+     and cannot be updated by an agent; see ModuleHeaderDesc's own
+     dataParaRel/counterOfs comments (removed) and ReadCounter below for
+     how the fix avoids needing any new on-disk field at all. *)
   ModuleHdrSize = 12;
 
   (* Call-site table ownerGlobalId sentinel -- matches Link.OvrNoOwner
@@ -82,6 +106,17 @@ CONST
                           that record's own comment *)
 
 TYPE
+  (* HeapBlockDesc: one independent overlay-buffer block (2026-08-21,
+     OVR-BUG.MD follow-up -- see NumHeapBlocks' own comment).  orgParas/
+     ptrParas/endParas are exactly the original single-buffer
+     ovrHeapOrg/Ptr/EndParas fields, now per-block; buf mirrors the
+     original ovrHeapBuf (the real SYSTEM.Alloc pointer, needed for
+     SYSTEM.Free). *)
+  HeapBlockDesc = RECORD
+    buf: SYSTEM.ADDRESS;
+    orgParas, ptrParas, endParas: WORD
+  END;
+
   (* Per-module header record layout, DOCS/OVR.MD §6.  hdrFileOfs is
      NOT part of the original's DATA-segment layout (it has no equivalent
      offset in DOCS/OVR.MD's table) -- it is this port's own bookkeeping,
@@ -204,6 +239,9 @@ TYPE
   END;
 
 VAR
+  i: INTEGER;  (* module BEGIN block's own loop var, zeroing ovrHeaps
+                  (see NumHeapBlocks' own comment; this runtime does not
+                  zero-init module globals, project-wide rule) *)
   (* ---- state mirroring the original's DATA-segment globals, DOCS/OVR.MD
      §6 ---- *)
   ovrDosHandle: Files.File;
@@ -227,16 +265,8 @@ VAR
                                   no change of its own. *)
   ovrFileMode:  BYTE;
 
-  ovrHeapOrgParas, ovrHeapPtrParas, ovrHeapEndParas: WORD; (* segment values *)
+  ovrHeaps: ARRAY NumHeapBlocks OF HeapBlockDesc;
   ovrHeapSizeParas: WORD;
-  ovrHeapBuf: SYSTEM.ADDRESS;  (* the actual SYSTEM.Alloc block backing the
-                                   overlay buffer, or NIL -- kept separately
-                                   from ovrHeapOrgParas (which only has the
-                                   segment, needed for SYSTEM.Free's own
-                                   pointer) so a second OvrSetBuf call can
-                                   free the previous block instead of
-                                   leaking it (this project's zero-heap-
-                                   leaks rule, CLAUDE.md) *)
   ovrRetrySize: LONGINT;
 
   ovrLoadList:  ModuleHeader;
@@ -261,21 +291,34 @@ VAR
   prevExitProc: SYSTEM.ADDRESS; (* saved by Init before installing
                                     ExitCleanup, so it can chain onward --
                                     see ExitCleanup's own comment *)
-  ovrResumeTrapTableSeg: WORD; (* OVERLAY.ASM's resumeTrapTable own
-                                   segment, cached by Init -- fixed for
-                                   the life of the program (this whole
-                                   module is resident).  Stale-return-
-                                   address fix, 2026-08-08, see
-                                   Link.AddOvrReturnTrampoline's own
-                                   comment. *)
-  ovrResumeTrapTableOfs: WORD; (* resumeTrapTable's own IN-SEGMENT byte
-                                   offset -- NOT assumed to be 0 (found
-                                   2026-08-08: it isn't -- see
-                                   Overlay_ResumeTrapTableOfs's own
-                                   comment for the crash this caused).
-                                   slot(globalId)'s real offset is this
-                                   PLUS globalId*5, never globalId*5
-                                   alone. *)
+  ovrResumeTrapTable: SYSTEM.ADDRESS; (* heap block: ovrEntryIdCount 4-byte
+                                   slots (DOCS/OVR-ID-WIDEN-PLAN.MD steps 1+2,
+                                   2026-08-26) -- used to be a fixed
+                                   256-slot static array in OVERLAY.ASM;
+                                   now SYSTEM.Alloc'd by Init, sized to the
+                                   real program's own ovrEntryIdCount, same
+                                   idiom as ovrDirectory below.  Segment is
+                                   fixed once allocated (never freed/moved
+                                   again for the life of the program, same
+                                   guarantee the old static array gave —
+                                   Stale-return-address fix, 2026-08-08,
+                                   see Link.AddOvrReturnTrampoline's own
+                                   comment). *)
+  ovrResumeTrapTableSeg: WORD; (* cached segment half of ovrResumeTrapTable,
+                                   extracted the same way AllocHeapBlock's
+                                   own comment documents (LONGINT(blk) DIV
+                                   65536, never SYSTEM.SEG(blk) -- that
+                                   returns SS for a local, a real bug fixed
+                                   2026-08-12 elsewhere in this file). *)
+  ovrResumeTrapTableOfs: WORD; (* cached offset half -- always 0 in practice
+                                   (SYSTEM.Alloc is paragraph-granular, see
+                                   Init's own comment) but kept as an
+                                   explicit field rather than hardcoding 0
+                                   at every use site, matching ovrDirectory's
+                                   own style; slot(globalId)'s real offset
+                                   is this PLUS globalId*5, never globalId*5
+                                   alone, in case that assumption ever
+                                   changes. *)
 
 (* ---- OVERLAY.ASM externals (see that file for what each does) ---- *)
 
@@ -283,11 +326,8 @@ PROCEDURE InstallHandler; FAR; EXTERNAL;
 PROCEDURE RemoveHandler; FAR; EXTERNAL;
 PROCEDURE PatchTrampoline(siteSeg, siteOfs: WORD; toResident: BOOLEAN;
                           targetSeg, targetOfs: WORD); FAR; EXTERNAL;
-PROCEDURE ReadTrampolineId(siteSeg, siteOfs: WORD): BYTE; FAR; EXTERNAL;
-PROCEDURE ReadTrampolineEntryOfs(siteSeg, siteOfs: WORD): WORD; FAR; EXTERNAL;
-PROCEDURE ResumeTrapTableSeg(): WORD; FAR; EXTERNAL;
-PROCEDURE ResumeTrapTableOfs(): WORD; FAR; EXTERNAL;
-PROCEDURE InitResumeTrapTable; FAR; EXTERNAL;
+PROCEDURE ReadTrampolineId(siteSeg, siteOfs: WORD): WORD; FAR; EXTERNAL;
+PROCEDURE InitResumeTrapTable(tableSeg, tableOfs, count: WORD); FAR; EXTERNAL;
 
 (* Free every ModuleHeader node in ovrLoadList -- DOCS/OVR.MD §11's own
    addition (the original algorithm has no equivalent free path,
@@ -326,9 +366,10 @@ END FreeModuleList;
    again, and the previous handler still runs after this one); actual
    cleanup happens after that restore.  Removing the trap handler,
    freeing EMS, and freeing the overlay heap buffer are all individually
-   guarded (ovrTrapInstalled/ovrUseEms/ovrHeapBuf#NIL), so this is safe to
-   run regardless of how far Init/OvrSetBuf/InitEMS got. *)
+   guarded (ovrTrapInstalled/ovrUseEms/ovrHeaps[i].buf#NIL), so this is
+   safe to run regardless of how far Init/OvrSetBuf/InitEMS got. *)
 PROCEDURE ExitCleanup; FAR;
+  VAR i: INTEGER;
 BEGIN
   SYSTEM.SetExitProc(prevExitProc);
   IF ovrTrapInstalled THEN
@@ -339,11 +380,18 @@ BEGIN
     EMS.Free(ovrEmsHandle);
     ovrUseEms := FALSE
   END;
-  IF ovrHeapBuf # NIL THEN
-    SYSTEM.Free(ovrHeapBuf); ovrHeapBuf := NIL
+  i := 0;
+  WHILE i < NumHeapBlocks DO
+    IF ovrHeaps[i].buf # NIL THEN
+      SYSTEM.Free(ovrHeaps[i].buf); ovrHeaps[i].buf := NIL
+    END;
+    INC(i)
   END;
   IF ovrDirectory # NIL THEN
     SYSTEM.Free(ovrDirectory); ovrDirectory := NIL
+  END;
+  IF ovrResumeTrapTable # NIL THEN
+    SYSTEM.Free(ovrResumeTrapTable); ovrResumeTrapTable := NIL
   END;
   FreeModuleList
 END ExitCleanup;
@@ -455,8 +503,11 @@ END DetectFormat;
 
 (* LoadDirectory: read the .OVR file's own directory (DOCS/OVR.MD §11.1)
    into a heap buffer -- entryIdCount (WORD) at ovrFileBase-relative offset
-   0, then entryIdCount LONGINT file offsets right after.  Frees any
-   previous ovrDirectory first (guards a second Init call the same way
+   0, then entryIdCount (fileOfs: LONGINT; entryOfs: WORD) 6-byte pairs
+   right after (widened from a 4-byte fileOfs-only slot, DOCS/OVR-ID-
+   WIDEN-PLAN.MD step 2 option (c), 2026-08-26 -- see LinkOvr.WriteOvrFile's
+   own header comment for the full reasoning).  Frees any previous
+   ovrDirectory first (guards a second Init call the same way
    OvrSetBuf/InitEMS already guard their own state).  Returns FALSE on
    any read failure, leaving ovrDirectory NIL/ovrEntryIdCount 0. *)
 PROCEDURE LoadDirectory(): BOOLEAN;
@@ -471,7 +522,7 @@ BEGIN
   ovrEntryIdCount := WORD(hdr[0]) + WORD(hdr[1]) * 256;
   IF ovrEntryIdCount = 0 THEN RETURN TRUE END;   (* no overlay modules at all *)
 
-  dirBytes := WORD(LONGINT(ovrEntryIdCount) * LONGINT(4));
+  dirBytes := WORD(LONGINT(ovrEntryIdCount) * LONGINT(6));
   ovrDirectory := SYSTEM.ADDRESS(SYSTEM.Alloc(INTEGER(dirBytes)));
   IF ovrDirectory = NIL THEN ovrEntryIdCount := 0; RETURN FALSE END;
 
@@ -500,13 +551,31 @@ PROCEDURE DirEntry(entryId: WORD): LONGINT;
       b0, b1, b2, b3: WORD;
 BEGIN
   p := ovrDirectory;
-  INC(p, LONGINT(entryId) * LONGINT(4));
+  INC(p, LONGINT(entryId) * LONGINT(6));
   b0 := WORD(ORD(p^[0])); b1 := WORD(ORD(p^[1]));
   b2 := WORD(ORD(p^[2])); b3 := WORD(ORD(p^[3]));
   base := LONGINT(b0) + LONGINT(b1)*LONGINT(256)
         + LONGINT(b2)*LONGINT(65536) + LONGINT(b3)*LONGINT(16777216);
   RETURN base + ovrPayloadStart
 END DirEntry;
+
+(* DirEntryOfs: entry id's own directory-stored in-module code offset
+   (bytes +4/+5 of its 6-byte slot) -- DOCS/OVR-ID-WIDEN-PLAN.MD step 2
+   option (c), 2026-08-26.  Replaces the old call-site-embedded entryOfs
+   read (Overlay_ReadTrampolineEntryOfs, now unused/removable) as the
+   authoritative source for an ORDINARY entry's own in-module code
+   offset; a resume-point global id's directory slot always holds 0 here
+   (LinkOvr.DirectResumeDirSlots never writes anything else), matching
+   the pre-existing convention that a resume id's real jump target comes
+   from the resume record's own on-disk "ofs" field instead, never from
+   here. *)
+PROCEDURE DirEntryOfs(entryId: WORD): WORD;
+  VAR p: SYSTEM.ADDRESS;
+BEGIN
+  p := ovrDirectory;
+  INC(p, LONGINT(entryId) * LONGINT(6) + LONGINT(4));
+  RETURN WORD(ORD(p^[0])) + WORD(ORD(p^[1])) * 256
+END DirEntryOfs;
 
 (* Init: open the overlay file (DOCS/OVR.MD §13.1).
    Parameters: fileName -- the overlay file to open, tried as given, then
@@ -543,13 +612,56 @@ BEGIN
   END;
 
   (* Stale-return-address fix (2026-08-08, Solution 2 regression) -- see
-     Link.AddOvrReturnTrampoline's own comment.  Idempotent to call again
-     on a second Init (harmless re-fill of the same 256 slots), so no
-     ovrResumeTableInited-style guard is needed the way ovrTrapInstalled
-     needs one for the vector install. *)
-  ovrResumeTrapTableSeg := ResumeTrapTableSeg();
-  ovrResumeTrapTableOfs := ResumeTrapTableOfs();
-  InitResumeTrapTable;
+     Link.AddOvrReturnTrampoline's own comment.  Table is now SYSTEM.Alloc'd
+     here, sized to THIS program's own ovrEntryIdCount (DOCS/OVR-ID-WIDEN-
+     PLAN.MD step 1, 2026-08-26 -- used to be a fixed 256-slot static ASM
+     array, unconditionally present regardless of program size).  Freed
+     first so a second Init call re-sizes cleanly instead of leaking the
+     previous allocation (same guard shape as FreeModuleList/LoadDirectory
+     above for their own second-Init cases).  entryIdCount=0 (no overlay
+     modules at all) correctly allocates nothing -- InitResumeTrapTable's
+     own count=0 case is a no-op fill, and ovrResumeTrapTableSeg/Ofs stay 0,
+     never dereferenced since no resume point can exist without at least
+     one $O+ entry. *)
+  IF ovrResumeTrapTable # NIL THEN
+    SYSTEM.Free(ovrResumeTrapTable); ovrResumeTrapTable := NIL
+  END;
+  ovrResumeTrapTableSeg := 0; ovrResumeTrapTableOfs := 0;
+  IF ovrEntryIdCount > 0 THEN
+    (* LONGINT arithmetic throughout, narrowed to WORD only at the very
+       end: ovrEntryIdCount*4 (4-byte slots -- id:WORD only, entryOfs no
+       longer stored here at all, DOCS/OVR-ID-WIDEN-PLAN.MD step 2
+       option (c), 2026-08-26) can exceed WORD range (65535) for a large
+       enough program -- SYSTEM.Alloc's own parameter is WORD (a single
+       DOS allocation request is capped well under 64K anyway by the
+       conventional-memory budget in practice), so a request that would
+       overflow is a genuine "too many overlay entries to fit"
+       condition, reported the same way an ordinary allocation failure
+       is. *)
+    IF LONGINT(ovrEntryIdCount) * LONGINT(4) > LONGINT(65535) THEN
+      Files.Close(ovrDosHandle); ovrHaveHandle := FALSE;
+      ovrResult := ovrNoMemory; RETURN ovrResult
+    END;
+    ovrResumeTrapTable := SYSTEM.ADDRESS(SYSTEM.Alloc(WORD(LONGINT(ovrEntryIdCount) * LONGINT(4))));
+    IF ovrResumeTrapTable = NIL THEN
+      Files.Close(ovrDosHandle); ovrHaveHandle := FALSE;
+      ovrResult := ovrNoMemory; RETURN ovrResult
+    END;
+    (* SYSTEM.SEG(ovrResumeTrapTable) would be wrong here -- it returns the
+       segment ovrResumeTrapTable ITSELF is stored in (a module global,
+       so this module's own DATA segment), not the segment half of the
+       far-pointer VALUE it holds.  Same extraction AllocHeapBlock uses,
+       and the same real bug (2026-08-12) this comment there documents.
+       Offset is always 0: SYSTEM.Alloc is a paragraph-granular allocator
+       (SYSTEM.ASM's SYSTEM_Alloc rounds every request up to whole
+       paragraphs), so the returned far pointer's offset half is always
+       0 -- AllocHeapBlock's own paragraph-count treatment of orgParas
+       relies on this same fact without needing to state it explicitly,
+       since it only ever uses the block as a paragraph-addressed base. *)
+    ovrResumeTrapTableSeg := WORD(LONGINT(ovrResumeTrapTable) DIV LONGINT(65536));
+    ovrResumeTrapTableOfs := 0;
+    InitResumeTrapTable(ovrResumeTrapTableSeg, ovrResumeTrapTableOfs, ovrEntryIdCount)
+  END;
 
   ovrResult := ovrOk;
   RETURN ovrResult
@@ -559,10 +671,12 @@ END Init;
    This toolchain's Oberon runtime has no "shrink the heap ceiling"
    primitive exposed to library code (SYSTEM.Alloc/Free manage a
    free-list, not a movable ceiling an ordinary module can adjust) --
-   so ovrHeapOrg/ovrHeapPtr/ovrHeapEnd here track the overlay buffer as
-   its own independent region, allocated via a plain SYSTEM.Alloc block.
-   The overlay buffer's own bookkeeping is a simple bump allocator
-   between ovrHeapOrg and ovrHeapEnd. *)
+   so each ovrHeaps[i]'s own orgParas/ptrParas/endParas track ITS block as
+   an independent region, allocated via a plain SYSTEM.Alloc block.  Each
+   block's own bookkeeping is a simple bump allocator between orgParas and
+   endParas -- exactly the original (pre-2026-08-21) single-buffer design,
+   just replicated NumHeapBlocks times (see that CONST's own comment for
+   why one block stopped being enough). *)
 
 (* NOTE: the size < ovrHeapSizeParas clamp below is currently a no-op:
    ovrHeapSizeParas is never assigned anywhere in this file (stays 0 from
@@ -574,13 +688,22 @@ END Init;
    rather than removed, so it starts working the moment something sets
    ovrHeapSizeParas -- but right now MinHeapParas below is the only floor
    that actually does anything. *)
-PROCEDURE OvrSetBuf*(size: LONGINT);
+(* AllocHeapBlock: allocate ovrHeaps[i]'s own SYSTEM.Alloc block, sized
+   `size` bytes (floored to MinHeapParas paragraphs) -- shared by
+   OvrSetBuf/OvrSetBuf2 below.  size=0 leaves the block genuinely empty
+   (buf=NIL, org=ptr=end=0): LoadModule's own "cannot possibly fit"
+   fast-fail check (needParas > endParas-orgParas) already makes a
+   zero-size block silently unusable, without needing a separate
+   "is this block enabled" flag anywhere else in the file. *)
+PROCEDURE AllocHeapBlock(i: INTEGER; size: LONGINT): BOOLEAN;
   VAR paras: WORD; blk: SYSTEM.ADDRESS;
 BEGIN
-  IF ~ovrHaveHandle THEN ovrResult := ovrError; RETURN END;
-  IF ovrLoadList # NIL THEN ovrResult := ovrError; RETURN END;
-  IF size < LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize) THEN
-    size := LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize)
+  IF ovrHeaps[i].buf # NIL THEN
+    SYSTEM.Free(ovrHeaps[i].buf); ovrHeaps[i].buf := NIL
+  END;
+  IF size <= 0 THEN
+    ovrHeaps[i].orgParas := 0; ovrHeaps[i].ptrParas := 0; ovrHeaps[i].endParas := 0;
+    RETURN TRUE
   END;
   paras := WORD((size + LONGINT(ParaSize - 1)) DIV LONGINT(ParaSize));
   IF paras < MinHeapParas THEN paras := MinHeapParas END;
@@ -591,13 +714,8 @@ BEGIN
      (int 04) the moment the product itself doesn't fit signed 16-bit,
      even though both operands individually do. *)
   blk := SYSTEM.ADDRESS(SYSTEM.Alloc(WORD(paras) * WORD(ParaSize)));
-  IF blk = NIL THEN ovrResult := ovrNoMemory; RETURN END;
-
-  (* Free a previous buffer, if OvrSetBuf is being called again before any
-     overlay was ever loaded (ovrLoadList = NIL is only checked above to
-     block RESIZING an in-use buffer, not a second call before first use). *)
-  IF ovrHeapBuf # NIL THEN SYSTEM.Free(ovrHeapBuf) END;
-  ovrHeapBuf := blk;
+  IF blk = NIL THEN RETURN FALSE END;
+  ovrHeaps[i].buf := blk;
 
   (* SYSTEM.SEG(blk) would be wrong here: it returns the segment blk ITSELF
      is stored in (SS, since blk is a local) -- DOCS/OBERLANG.MD's own SEG
@@ -612,16 +730,76 @@ BEGIN
      as code, eventually corrupting far enough to crash (varying symptom per
      build: Invalid opcode / Unhandled interrupt A0 / 04 / 21, all one root
      cause) -- reproduced via EXAMPLES/OVRDEMO/repro5_minimal_double_call/. *)
-  ovrHeapOrgParas := WORD(LONGINT(blk) DIV LONGINT(65536));
-  ovrHeapPtrParas := ovrHeapOrgParas;
-  ovrHeapEndParas := WORD(LONGINT(ovrHeapOrgParas) + LONGINT(paras));
+  ovrHeaps[i].orgParas := WORD(LONGINT(blk) DIV LONGINT(65536));
+  ovrHeaps[i].ptrParas := ovrHeaps[i].orgParas;
+  ovrHeaps[i].endParas := WORD(LONGINT(ovrHeaps[i].orgParas) + LONGINT(paras));
+  RETURN TRUE
+END AllocHeapBlock;
+
+(* OvrSetBuf: sizes block 0 only -- unchanged behavior/signature from the
+   original single-buffer design, so every existing caller (TOC.MOD,
+   every EXAMPLES/OVRDEMO fixture, several deliberately tiny to force
+   eviction pressure as a test tool) keeps working exactly as before,
+   including memory footprint: block 1 stays unallocated (size 0) unless
+   OvrSetBuf2 below is used instead. *)
+PROCEDURE OvrSetBuf*(size: LONGINT);
+BEGIN
+  IF ~ovrHaveHandle THEN ovrResult := ovrError; RETURN END;
+  IF ovrLoadList # NIL THEN ovrResult := ovrError; RETURN END;
+  IF size < LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize) THEN
+    size := LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize)
+  END;
+  IF ~AllocHeapBlock(0, size) THEN ovrResult := ovrNoMemory; RETURN END;
   ovrResult := ovrOk
 END OvrSetBuf;
 
-PROCEDURE OvrGetBuf*(): LONGINT;
+(* OvrSetBuf2 (2026-08-21, OVR-BUG.MD follow-up -- see NumHeapBlocks' own
+   comment): sizes BOTH blocks independently.  size1 need not match size0
+   -- TOC.MOD sizes block 0 at the original 65500 (holds any one overlay
+   module up to that size) and block 1 much smaller (just enough to cover
+   a second, simultaneously-resident module in the pressure case that
+   motivated this), keeping the total memory delta small against DOS's
+   640KB conventional-memory ceiling (already fully committed -- CLAUDE.md/
+   DOCS/OVR.MD §16's own memkb=640 bump history) rather than doubling the
+   whole buffer, which was tried first and genuinely exhausted it
+   ("oc: cannot create .dbg temp" compiling SRC/TASM). *)
+PROCEDURE OvrSetBuf2*(size0, size1: LONGINT);
 BEGIN
-  RETURN LONGINT(WORD(ovrHeapEndParas - ovrHeapOrgParas)) * LONGINT(ParaSize)
+  IF ~ovrHaveHandle THEN ovrResult := ovrError; RETURN END;
+  IF ovrLoadList # NIL THEN ovrResult := ovrError; RETURN END;
+  IF size0 < LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize) THEN
+    size0 := LONGINT(ovrHeapSizeParas) * LONGINT(ParaSize)
+  END;
+  IF ~AllocHeapBlock(0, size0) THEN ovrResult := ovrNoMemory; RETURN END;
+  IF ~AllocHeapBlock(1, size1) THEN ovrResult := ovrNoMemory; RETURN END;
+  ovrResult := ovrOk
+END OvrSetBuf2;
+
+PROCEDURE OvrGetBuf*(): LONGINT;
+  VAR i: INTEGER; total: LONGINT;
+BEGIN
+  total := 0; i := 0;
+  WHILE i < NumHeapBlocks DO
+    total := total + LONGINT(WORD(ovrHeaps[i].endParas - ovrHeaps[i].orgParas)) * LONGINT(ParaSize);
+    INC(i)
+  END;
+  RETURN total
 END OvrGetBuf;
+
+(* InAnyHeap: TRUE iff seg falls inside ANY overlay block's own
+   [orgParas,endParas) range -- the multi-block generalization of the
+   original single-buffer "siteSeg < ovrHeapOrgParas OR >= ovrHeapEndParas"
+   fast-path check (FindSiteOwner's own comment). *)
+PROCEDURE InAnyHeap(seg: WORD): BOOLEAN;
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < NumHeapBlocks DO
+    IF (seg >= ovrHeaps[i].orgParas) & (seg < ovrHeaps[i].endParas) THEN RETURN TRUE END;
+    INC(i)
+  END;
+  RETURN FALSE
+END InAnyHeap;
 
 PROCEDURE OvrSetRetry*(size: LONGINT);
 BEGIN
@@ -649,7 +827,7 @@ PROCEDURE PatchSitesForModule(u: ModuleHeader; toResident: BOOLEAN; destParas: W
    across an eviction so a later call doesn't need to re-read its header
    from disk -- only ExitCleanup's FreeModuleList actually frees the nodes. *)
 PROCEDURE OvrClearBuf*;
-  VAR u: ModuleHeader;
+  VAR u: ModuleHeader; i: INTEGER;
 BEGIN
   IF ~ovrHaveHandle THEN ovrResult := ovrError; RETURN END;
   u := ovrLoadList;
@@ -660,7 +838,11 @@ BEGIN
     END;
     u := u^.next
   END;
-  ovrHeapPtrParas := ovrHeapOrgParas;
+  i := 0;
+  WHILE i < NumHeapBlocks DO
+    ovrHeaps[i].ptrParas := ovrHeaps[i].orgParas;
+    INC(i)
+  END;
   ovrResult := ovrOk
 END OvrClearBuf;
 
@@ -1060,14 +1242,20 @@ END ApplyXFixups;
    still-open "severe performance regression."  Now scans u^.siteCache
    (RegisterModule's own one-time LoadSiteCache read) instead of the
    file -- same logic, same match rule, no disk I/O. *)
-PROCEDURE FindSiteOwner(u: ModuleHeader; siteSeg, siteOfs: WORD): WORD;
+(* VAR ownerSiteFileOfs (Bug 2 fix, OVR-BUG.MD): the MATCHED site record's
+   own siteFileOfs -- the caller-module-relative opcode offset of the
+   call site that actually trapped, needed by FindResumeGlobalId below to
+   disambiguate WHICH of caller's (possibly several) call sites into the
+   same callee entry point this particular trap corresponds to.  Left
+   unset (caller must ignore it) whenever this returns OvrNoOwner. *)
+PROCEDURE FindSiteOwner(u: ModuleHeader; siteSeg, siteOfs: WORD; VAR ownerSiteFileOfs: LONGINT): WORD;
   VAR node: SiteNode; k: INTEGER;
       siteFileOfs: LONGINT; loadSeg, candSeg, candOfs: WORD;
       ownerGlobalId: WORD; ownerHdrFileOfs: LONGINT; owner: ModuleHeader;
       wantLinear, candLinear: LONGINT;
 BEGIN
   IF u^.siteCount = 0 THEN RETURN OvrNoOwner END;
-  IF (siteSeg < ovrHeapOrgParas) OR (siteSeg >= ovrHeapEndParas) THEN
+  IF ~InAnyHeap(siteSeg) THEN
     RETURN OvrNoOwner
   END;
   (* Compare LINEAR addresses (seg*16+ofs), not seg:ofs pairs directly --
@@ -1100,7 +1288,10 @@ BEGIN
       END;
       IF candSeg # 0 THEN
         candLinear := LONGINT(candSeg) * LONGINT(16) + LONGINT(candOfs);
-        IF candLinear = wantLinear THEN RETURN ownerGlobalId END
+        IF candLinear = wantLinear THEN
+          ownerSiteFileOfs := siteFileOfs;
+          RETURN ownerGlobalId
+        END
       END;
       INC(k)
     END;
@@ -1169,6 +1360,7 @@ PROCEDURE PatchSitesForModule;
   VAR node: SiteNode; k: INTEGER;
       siteFileOfs: LONGINT; loadSeg, siteSeg, siteOfs, entryOfs, entryId: WORD;
       ownerGlobalId: WORD; ownerHdrFileOfs: LONGINT; owner: ModuleHeader;
+      calleeHdrFileOfs: LONGINT; callee: ModuleHeader;
 BEGIN
   IF u^.siteCount = 0 THEN RETURN TRUE END;
   loadSeg := LoadSegment();
@@ -1206,42 +1398,62 @@ BEGIN
         END
       END;
       IF siteSeg # 0 THEN
+        (* entryId here is the CALLEE's own entry id -- the entry point
+           THIS site calls INTO, which belongs to whichever module owns
+           entryId, NOT necessarily u (u is only the module whose own
+           call-SITE table is being walked).  Bug fix (2026-09-02,
+           OVR-BUG.MD "EXACT BUG CONFIRMED"): the entryOfsCache lookup/
+           write below used to run against u^.entryOfsCache -- caching
+           the CALLEE's entry offset under u's own module header.
+           ReadCounter unconditionally trusts entryOfsCache[0] as one of
+           ITS OWN module's real entry points (to locate the CgPrologue
+           DATA-segment operand for the epilogue counter read); a
+           foreign callee's entryOfs landing in slot 0 there made
+           ReadCounter parse arbitrary bytes inside u's own code as if
+           they were u's own prologue, returning garbage -- confirmed via
+           OVRINUSE7.LOG showing a nonzero garbage counter value on an
+           otherwise-idle module immediately preceding Bug 6's crash.
+           Fix: resolve the callee's own ModuleHeader (RegisterModule via
+           DirEntry(entryId), mirroring how the ownerGlobalId branch
+           above already resolves an unrelated module by id) and cache
+           into THAT module's own entryOfsCache instead of u's. *)
+        calleeHdrFileOfs := DirEntry(entryId);
+        callee := RegisterModule(calleeHdrFileOfs);
         IF toResident THEN
           (* Each call site may target a DIFFERENT entry point within this
-             same module (OVERLAY.MOD/LINK.MOD's own use of the trampoline's
-             id-byte+3/+4 bytes, see Overlay_ReadTrampolineEntryOfs) -- read
-             THIS site's own in-module code offset before overwriting it with
-             the resident JMP FAR form, so the jump target is destParas:
-             entryOfs, not always destParas:0 (which would jump into
-             whichever entry happens to be first in the module's own code,
-             typically __init).  Use the entryOfsCache once this entryId has
-             been seen before -- the trampoline bytes this READ would
-             otherwise use are the exact bytes the LAST resident-form patch
-             overwrote (EntryOfsNodeRec's own comment: this cache exists
-             precisely because that read is only trustworthy the first
-             time). *)
-          IF ~CachedEntryOfs(u, entryId, entryOfs) THEN
-            entryOfs := ReadTrampolineEntryOfs(siteSeg, siteOfs);
-            CacheEntryOfs(u, entryId, entryOfs)
+             same module -- need THIS site's own in-module code offset
+             before overwriting it with the resident JMP FAR form, so the
+             jump target is destParas:entryOfs, not always destParas:0
+             (which would jump into whichever entry happens to be first
+             in the module's own code, typically __init).  entryOfs now
+             comes straight from the .OVR directory (DirEntryOfs,
+             DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26) --
+             a pure function of entryId, always authoritative, no longer
+             read from THIS call site's own (possibly already-overwritten)
+             bytes at all.  entryOfsCache still used as a speed
+             optimization (skip the directory dereference on repeat
+             hits) but is no longer load-bearing for correctness the way
+             it was under the old call-site-embedded scheme -- see
+             EntryOfsNodeRec's own comment for that now-historical
+             reasoning. *)
+          IF (callee = NIL) OR ~CachedEntryOfs(callee, entryId, entryOfs) THEN
+            entryOfs := DirEntryOfs(entryId);
+            IF callee # NIL THEN CacheEntryOfs(callee, entryId, entryOfs) END
           END;
           PatchTrampoline(siteSeg, siteOfs, TRUE, destParas, entryOfs)
         ELSE
-          (* Restoring the swappable form needs (entryId, entryOfs) written
-             back explicitly too (Overlay_PatchTrampoline's own header
-             comment) -- entryId is already known (read from the call-site
-             table above); entryOfs comes from the SAME cache OvrDispatch's
-             own individual-site patch populates (2026-08-12: LoadModule no
-             longer eagerly patches every site, so the cache is filled one
-             entry at a time, by whichever code path -- this one or
-             OvrDispatch's -- first resident-patches a given site) --
-             falling back to a fresh read (still correct: an entryId whose
-             cache entry is missing here can only mean NONE of its sites
-             have individually trapped yet, so every one of them is still
-             holding its original, honest CD 3F entryOfs bytes) if this
-             entryId was never patched resident in this process at all. *)
-          IF ~CachedEntryOfs(u, entryId, entryOfs) THEN
-            entryOfs := ReadTrampolineEntryOfs(siteSeg, siteOfs);
-            CacheEntryOfs(u, entryId, entryOfs)
+          (* Restoring the swappable form needs entryId written back
+             explicitly (Overlay_PatchTrampoline's own header comment) --
+             already known (read from the call-site table above).
+             entryOfs is STILL passed here (kept for a uniform
+             PatchTrampoline signature across both branches) but the ASM
+             now ignores it in the swappable branch (DOCS/OVR-ID-WIDEN-
+             PLAN.MD step 2 option (c), 2026-08-26: entryOfs no longer
+             lives in the trampoline at all); still resolved via the
+             cache/directory lookup for cheapness, not correctness. *)
+          IF (callee = NIL) OR ~CachedEntryOfs(callee, entryId, entryOfs) THEN
+            entryOfs := DirEntryOfs(entryId);
+            IF callee # NIL THEN CacheEntryOfs(callee, entryId, entryOfs) END
           END;
           PatchTrampoline(siteSeg, siteOfs, FALSE, entryId, entryOfs)
         END
@@ -1253,17 +1465,102 @@ BEGIN
   RETURN TRUE
 END PatchSitesForModule;
 
+(* HasCounter: TRUE iff u is CURRENTLY RESIDENT and has at least one
+   cached entry offset to read a live prologue from (EntryOfsNodeRec) --
+   every $O+ module has a real epilogue counter (Parser.MOD's isOvrEntry
+   INC/DEC always targets DATA offset 0, the pre-existing per-module
+   placeholder -- see that call site's own comment), so this reduces to
+   "can ReadCounter actually reach it right now": u must be loaded
+   (residentSeg#0, its compiled prologue bytes must exist in memory to
+   read the DS operand from) AND have at least one REAL cached entry
+   (entryOfsCache^.count>0 -- entryOfsCache itself is never NIL after
+   RegisterModule's own WarmModuleCaches-driven eager NEW, but starts
+   with count=0 and an unwritten entryOfs[0] slot until the first real
+   CacheEntryOfs call, so entryOfsCache#NIL alone is NOT sufficient).
+   This becomes TRUE the instant a module is first loaded (LoadModule
+   always returns via the trapped site's own OvrDispatch, which caches
+   entryOfs for that entryId before TryEvictOne could ever see this
+   module resident at all) -- see ReadCounter's own comment for why
+   entryOfs specifically, not u^.hdrFileOfs or similar, is what's
+   needed. *)
+PROCEDURE HasCounter(u: ModuleHeader): BOOLEAN;
+BEGIN
+  RETURN (u^.residentSeg # 0) & (u^.entryOfsCache # NIL) & (u^.entryOfsCache^.count > 0)
+END HasCounter;
+
+(* ReadCounter: far-read u's own epilogue counter WORD.
+   Deliberately avoids any NEW .OVR on-disk field (OVR-BUG.MD's own
+   handoff: BOOT/TOC.EXE's writer is permanently fixed at the OLD
+   12-byte header and cannot be updated by an agent) -- everything
+   needed is already resident, once u is loaded:
+     1. u^.residentSeg is u's own current CODE segment (LoadModule's own
+        field, always current).
+     2. Any cached entryOfs (u^.entryOfsCache, first slot of the first
+        chunk -- any one works, they all belong to FAR/exported entry
+        points of the SAME module) points at a real CgPrologue start.
+        CgPrologue's own byte layout (CGEN.MOD, isFar branch) is fixed:
+        55 8B EC 81 EC ll hh 1E B8 lo hi 8E D8 -- the `MOV AX,imm16` at
+        +9/+10 is the ONE instruction Link.OnSegRelocOverlay's own
+        rrefSeg=SegData branch bakes with `lnkMod^.dataPara`
+        (link-time-fixed), and Overlay.ApplyXFixups patches with
+        +LoadSegment() the moment this module is loaded -- so once u is
+        resident, that imm16 IS u's own real, current DATA segment,
+        already fully resolved, sitting in memory needing no further
+        computation at all.
+     3. The counter itself lives at DATA offset 0 in that segment (the
+        pre-existing per-module placeholder every module already
+        reserves -- Parser.MOD's own ParseModule comment).
+   Same raw SYSTEM.PTR + byte-pair idiom ApplyFixupsAt already uses for a
+   far WORD/read (SYSTEM.GET/PUT don't exist in this dialect).
+   Read-only: codegen (Parser.MOD/CGEN.MOD's CgIncDecMem calls) is the
+   only writer, in the module's own compiled INC/DEC-at-prologue/
+   epilogue code -- the runtime never writes either word this reads. *)
+PROCEDURE ReadCounter(u: ModuleHeader): WORD;
+  VAR entryOfs: WORD; opnd: SYSTEM.ADDRESS; dataSeg: WORD; ctr: SYSTEM.ADDRESS;
+BEGIN
+  entryOfs := u^.entryOfsCache^.entryOfs[0];
+  opnd := SYSTEM.PTR(u^.residentSeg, entryOfs + WORD(9));
+  dataSeg := WORD(ORD(opnd^[0])) + WORD(ORD(opnd^[1])) * 256;
+  ctr := SYSTEM.PTR(dataSeg, WORD(0));
+  RETURN WORD(ORD(ctr^[0])) + WORD(ORD(ctr^[1])) * 256
+END ReadCounter;
+
 (* TryEvictOne: find the first ovrLoadList entry that is resident and not
    in use, and evict it (DOCS/OVR.MD §13.4's "never evict inUse#0" rule --
    §17's documented simplification of the full ring+probation
    scheme).  Returns FALSE if every resident module is currently in use
-   (nothing could be evicted). *)
+   (nothing could be evicted).
+   OVR-BUG.MD epilogue-counter fix: inUse and the counter track TWO
+   DIFFERENT, independently-necessary things, not one replacing the
+   other -- the counter tracks "is u's OWN compiled code currently
+   executing" (INC/DEC in u's own prologue/epilogue, correct for the
+   ordinary-call case that used to leak, OvrDispatch's own INC(u^.inUse)
+   comment), while inUse (now ONLY INC'd on resume, never on an ordinary
+   entry -- see that same comment) tracks "is u currently a live
+   cross-overlay CALLER waiting on a nested call to return" (DOCS/OVR.MD
+   §9/§10) -- a real, separate condition the counter cannot see (u's own
+   code is correctly NOT executing while it waits on the stack for a
+   callee, so the counter alone would authorize evicting u right out
+   from under a resume return address still pointing into it).  BOTH
+   must be zero before u is genuinely idle.  Confirmed via a real
+   self-hosting corruption compiling with PEXPR.MOD $O+ (the first
+   module to exercise real cross-overlay resume chains): counter-only
+   eviction evicted a module with inUse=1, corrupting memory a live
+   resume target still needed.
+   HasCounter(u)=FALSE (u not currently resident, or resident but never
+   yet dispatched through any entry point -- see that procedure's own
+   comment) falls back to inUse alone here; the outer `u^.residentSeg#0`
+   check below already excludes a non-resident module from eviction
+   regardless of what `idle` evaluates to in that case, so the fallback
+   value is never actually consulted for it. *)
 PROCEDURE TryEvictOne(): BOOLEAN;
-  VAR u: ModuleHeader;
+  VAR u: ModuleHeader; idle: BOOLEAN;
 BEGIN
   u := ovrLoadList;
   WHILE u # NIL DO
-    IF (u^.residentSeg # 0) & (u^.inUse = 0) THEN
+    IF HasCounter(u) THEN idle := (ReadCounter(u) = 0) & (u^.inUse = 0)
+    ELSE idle := u^.inUse = 0 END;
+    IF (u^.residentSeg # 0) & idle THEN
       IF ~PatchSitesForModule(u, FALSE, 0) THEN RETURN FALSE END;
       u^.residentSeg := 0;
       RETURN TRUE
@@ -1300,6 +1597,49 @@ BEGIN
   RETURN TRUE
 END RegionFree;
 
+(* FindFreeSpot: scan block i's ENTIRE [orgParas, endParas) range, not
+   just from the current bump pointer, for the first position where a
+   needParas-sized region is genuinely free (RegionFree) -- candidate
+   positions are orgParas itself plus every resident module's own end
+   paragraph (residentSeg + itsOwnNeedParas), since those are the only
+   offsets a free gap can ever legitimately start at.  Found 2026-08-25
+   (OVR-BUG.MD Bug 5, the SYSTEM.Halt(209) shape reached once PSTMT.MOD
+   joins the $O+ pool alongside PExpr2.MOD): TryLoadIntoBlock's own
+   monotonic bump pointer can walk PAST a position that would have fit
+   (e.g. the large gap right after orgParas) before that gap's own
+   blocking module(s) get evicted -- once ptrParas has moved on, the
+   original single-obstruction-skip fix (see this procedure's own
+   predecessor, ObstructionEnd, superseded here) could only ever skip
+   FORWARD from wherever ptrParas already was, never back to an earlier,
+   now-free gap.  A concrete repro: PSTMT.MOD resident in the MIDDLE of
+   the block (not at orgParas) leaves a large free span BEFORE it and a
+   small one after; if ptrParas is already past the large span when
+   eviction frees everything else, only the small trailing span was ever
+   considered, and the load failed even though the earlier span was
+   easily big enough.  This full block-wide scan finds ANY qualifying
+   gap regardless of where ptrParas happened to be. *)
+PROCEDURE FindFreeSpot(i: INTEGER; needParas: WORD; VAR spotOut: WORD): BOOLEAN;
+  VAR u: ModuleHeader; uNeed: WORD; cand: WORD;
+BEGIN
+  IF RegionFree(ovrHeaps[i].orgParas, needParas) THEN
+    spotOut := ovrHeaps[i].orgParas; RETURN TRUE
+  END;
+  u := ovrLoadList;
+  WHILE u # NIL DO
+    IF u^.residentSeg # 0 THEN
+      uNeed := WORD((LONGINT(u^.codeLen) + LONGINT(ParaSize - 1)) DIV LONGINT(ParaSize));
+      cand := WORD(LONGINT(u^.residentSeg) + LONGINT(uNeed));
+      IF (LONGINT(cand) >= LONGINT(ovrHeaps[i].orgParas))
+       & (LONGINT(cand) + LONGINT(needParas) <= LONGINT(ovrHeaps[i].endParas))
+       & RegionFree(cand, needParas) THEN
+        spotOut := cand; RETURN TRUE
+      END
+    END;
+    u := u^.next
+  END;
+  RETURN FALSE
+END FindFreeSpot;
+
 (* LoadModule: make u resident.  Allocates u^.codeLen bytes from the overlay
    buffer's bump pointer, evicting not-in-use modules (one at a time) until
    enough room is genuinely free or nothing more can be evicted; wraps
@@ -1326,30 +1666,74 @@ END RegionFree;
    ONE site that actually trapped is patched, by OvrDispatch itself right
    after this call returns; every OTHER site referencing u is patched
    lazily, the first time each one individually traps. *)
-PROCEDURE LoadModule(u: ModuleHeader): BOOLEAN;
-  VAR needParas: WORD; destParas: WORD; codeFileOfs: LONGINT;
-      rc: INTEGER;
+(* TryLoadIntoBlock: the original (pre-2026-08-21) single-buffer LoadModule
+   bump/evict logic, verbatim, parameterized over WHICH block (ovrHeaps[i])
+   to bump-allocate from.  Evicting via TryEvictOne is global (not
+   restricted to block i) -- freeing space anywhere is never wrong, just
+   occasionally not helpful for THIS block specifically; the caller's own
+   per-block loop (LoadModule below) simply re-checks fit after each
+   eviction and gives up on this block once TryEvictOne returns FALSE
+   (nothing left to evict anywhere), falling through to try the next
+   block. *)
+PROCEDURE TryLoadIntoBlock(i: INTEGER; needParas: WORD; VAR destParasOut: WORD): BOOLEAN;
+  VAR spot: WORD;
 BEGIN
-  needParas := WORD((LONGINT(u^.codeLen) + LONGINT(ParaSize - 1)) DIV LONGINT(ParaSize));
-  (* The module cannot possibly fit even in a totally empty buffer -- fail
-     fast rather than looping forever resetting to ovrHeapOrgParas without
-     ever reaching TryEvictOne (that branch only fires on the END-of-
-     buffer condition, which this case can never clear). *)
-  IF LONGINT(needParas) > LONGINT(ovrHeapEndParas) - LONGINT(ovrHeapOrgParas) THEN
+  (* The module cannot possibly fit even in a totally empty block -- fail
+     fast rather than looping forever resetting to orgParas without ever
+     reaching TryEvictOne (that branch only fires on the END-of-block
+     condition, which this case can never clear). *)
+  IF LONGINT(needParas) > LONGINT(ovrHeaps[i].endParas) - LONGINT(ovrHeaps[i].orgParas) THEN
     RETURN FALSE
   END;
-  IF LONGINT(ovrHeapPtrParas) + LONGINT(needParas) > LONGINT(ovrHeapEndParas) THEN
-    ovrHeapPtrParas := ovrHeapOrgParas
+  IF LONGINT(ovrHeaps[i].ptrParas) + LONGINT(needParas) > LONGINT(ovrHeaps[i].endParas) THEN
+    ovrHeaps[i].ptrParas := ovrHeaps[i].orgParas
   END;
-  WHILE (LONGINT(ovrHeapPtrParas) + LONGINT(needParas) > LONGINT(ovrHeapEndParas))
-      OR ~RegionFree(ovrHeapPtrParas, needParas) DO
-    IF LONGINT(ovrHeapPtrParas) + LONGINT(needParas) > LONGINT(ovrHeapEndParas) THEN
-      ovrHeapPtrParas := ovrHeapOrgParas
+  WHILE (LONGINT(ovrHeaps[i].ptrParas) + LONGINT(needParas) > LONGINT(ovrHeaps[i].endParas))
+      OR ~RegionFree(ovrHeaps[i].ptrParas, needParas) DO
+    IF LONGINT(ovrHeaps[i].ptrParas) + LONGINT(needParas) > LONGINT(ovrHeaps[i].endParas) THEN
+      ovrHeaps[i].ptrParas := ovrHeaps[i].orgParas
     ELSIF ~TryEvictOne() THEN
-      RETURN FALSE   (* overlay buffer too small even with everything evictable freed *)
+      (* Every module TryEvictOne could ever free has already been freed --
+         it is now globally exhausted (OVR-BUG.MD Bug 5).  This is NOT
+         necessarily "the block is too small": the monotonic bump pointer
+         (ptrParas) may simply have walked PAST a gap that's genuinely
+         free NOW, well before eviction actually freed it (a module
+         resident in the MIDDLE of the block, e.g. a caller like PSTMT.MOD
+         mid-call, splits the block into a span before it and a span after
+         it -- ptrParas, having already advanced past the first span while
+         probing, can never walk BACKWARD to revisit it under the plain
+         bump/skip scheme this loop otherwise implements).  Before giving
+         up, do one full block-wide scan (FindFreeSpot) for ANY position
+         -- not just forward from ptrParas -- that's free now; if none
+         exists, the block genuinely has no big enough contiguous span
+         even after every eviction, and giving up is correct. *)
+      IF FindFreeSpot(i, needParas, spot) THEN
+        ovrHeaps[i].ptrParas := spot
+      ELSE
+        RETURN FALSE   (* this block too small even with everything evictable freed *)
+      END
     END
   END;
-  destParas := ovrHeapPtrParas;
+  destParasOut := ovrHeaps[i].ptrParas;
+  RETURN TRUE
+END TryLoadIntoBlock;
+
+PROCEDURE LoadModule(u: ModuleHeader): BOOLEAN;
+  VAR needParas: WORD; destParas: WORD; codeFileOfs: LONGINT;
+      rc: INTEGER; i: INTEGER; loaded: BOOLEAN;
+BEGIN
+  needParas := WORD((LONGINT(u^.codeLen) + LONGINT(ParaSize - 1)) DIV LONGINT(ParaSize));
+  (* Try each block in turn (block 0 first, exactly the original single-
+     block search order/behavior when NumHeapBlocks=1 would have been the
+     whole story) -- falls over to the next block only once the current
+     one's own TryLoadIntoBlock genuinely can't make room (full AND
+     nothing left evictable anywhere). *)
+  i := 0; loaded := FALSE;
+  WHILE (i < NumHeapBlocks) & ~loaded DO
+    loaded := TryLoadIntoBlock(i, needParas, destParas);
+    IF ~loaded THEN INC(i) END
+  END;
+  IF ~loaded THEN RETURN FALSE END;
 
   codeFileOfs := u^.hdrFileOfs + LONGINT(ModuleHdrSize) + LONGINT(u^.fixupLen)
                + LONGINT(u^.xfixupLen) + LONGINT(u^.siteCount) * LONGINT(8)
@@ -1384,7 +1768,7 @@ BEGIN
      patched lazily, on its own first trap, whether or not its target
      module needed loading. *)
   u^.residentSeg := destParas;
-  ovrHeapPtrParas := WORD(LONGINT(destParas) + LONGINT(needParas));
+  ovrHeaps[i].ptrParas := WORD(LONGINT(destParas) + LONGINT(needParas));
   INC(ovrLoadCount);
   RETURN TRUE
 END LoadModule;
@@ -1436,26 +1820,56 @@ BEGIN
 END ResumeCallee;
 
 (* FindResumeGlobalId: the INVERSE lookup of ResumeCallee -- given caller's
-   own resume table and the entry id (calleeId) of the module caller JUST
-   called (the id that trapped as an ORDINARY entry), find the resume
-   record caller itself owns for THAT specific call and return its own
-   globalId (the resume trampoline's id, resumeTrapTable's own slot
+   own resume table, the entry id (calleeId) of the module caller JUST
+   called (the id that trapped as an ORDINARY entry), and siteFileOfs (the
+   caller-module-relative opcode offset of the call site that actually
+   trapped, from FindSiteOwner's own matching scan), find the ONE resume
+   record caller itself owns for THAT specific call site and return its
+   own globalId (the resume trampoline's id, resumeTrapTable's own slot
    index).  Needed for the stale-return-address fix (2026-08-08, Solution
    2 regression) -- OvrDispatch's ordinary-entry path must know WHICH
    resident-table slot to bake as the return address, not just THAT the
    call is cross-overlay (FindSiteOwner already established that).  Also
    called every time a cross-overlay call site traps (ownerGlobalId #
    OvrNoOwner branch of OvrDispatch) -- same in-memory u^.resumeCache
-   ResumeCallee above uses, not the file. *)
-PROCEDURE FindResumeGlobalId(caller: ModuleHeader; calleeId: WORD; VAR resumeGlobalId: WORD): BOOLEAN;
-  VAR node: ResumeNode; k: INTEGER;
+   ResumeCallee above uses, not the file.
+   BUG FIX (2026-08-21, OVR-BUG.MD "Bug 2"): matching on calleeId ALONE
+   is wrong whenever caller has more than one call site targeting the
+   SAME callee entry point (e.g. PEXPR.MOD calling the same overlay
+   entry from dozens of distinct sites, including recursive call
+   patterns) -- AddOvrReturnTrampoline (LINK.MOD) allocates one resume
+   record PER CALL SITE, each with its own distinct globalId and its own
+   distinct "ofs" (the caller-relative offset to resume AT, right after
+   THAT site's own 5 trampoline bytes) , so a calleeId-only scan can
+   return an arbitrary one of several sites' resume records -- whichever
+   happens to come first in the (most-recently-added-first, see
+   AddOvrReturnTrampoline's prepend) chunk chain -- with no guarantee it
+   is the one belonging to the site that actually trapped.  The caller
+   then gets redirected, on the callee's eventual RETF, to resume at the
+   WRONG offset inside its own code: silent corruption (confirmed via
+   PEXPR.MOD $O+, whose call pattern is the first in this project's
+   history to have a caller with real multi-site traffic into the same
+   overlay entry).  Disambiguated the only way that is unambiguous: the
+   resume record's own on-disk "ofs" field is always siteFileOfs+5 --
+   the call site's own reserved footprint is 5 bytes (matching the
+   resident JMP-FAR rewrite form's own fixed width), unaffected by the
+   swappable trampoline's own byte count (DOCS/OVR-ID-WIDEN-PLAN.MD step
+   2 option (c), 2026-08-26 settled this at 4 bytes; a brief, reverted
+   intermediate attempt made the trampoline itself 6 bytes and this
+   +6, but the call site's own RESERVED width was never actually
+   affected either way -- see Link.AddOvrReturnTrampoline's own retOfs
+   computation), so matching on BOTH calleeId AND ofs=siteFileOfs+5
+   identifies the exact site. *)
+PROCEDURE FindResumeGlobalId(caller: ModuleHeader; calleeId: WORD; siteFileOfs: LONGINT; VAR resumeGlobalId: WORD): BOOLEAN;
+  VAR node: ResumeNode; k: INTEGER; wantOfs: WORD;
 BEGIN
   IF caller^.resumeCount = 0 THEN RETURN FALSE END;
+  wantOfs := WORD(siteFileOfs) + WORD(5);
   node := caller^.resumeCache;
   WHILE node # NIL DO
     k := 0;
     WHILE k < node^.count DO
-      IF node^.calleeGlobalId[k] = calleeId THEN
+      IF (node^.calleeGlobalId[k] = calleeId) & (node^.ofs[k] = wantOfs) THEN
         resumeGlobalId := node^.globalId[k];
         RETURN TRUE
       END;
@@ -1535,37 +1949,42 @@ END FindResumeGlobalId;
    caller's own segment is re-resolved every time, never baked stale. *)
 PROCEDURE OvrDispatch*(siteSeg, siteOfs: WORD; VAR targetSeg, targetOfs: WORD;
                         VAR isResumeOut: WORD; VAR retSegOut, retOfsOut: WORD);
-  VAR id: BYTE; hdrFileOfs: LONGINT; u, callee, caller: ModuleHeader; entryOfs: WORD;
+  VAR id: WORD; hdrFileOfs: LONGINT; u, callee, caller: ModuleHeader; entryOfs: WORD;
       calleeId: WORD; calleeHdrFileOfs: LONGINT; isResume: BOOLEAN;
       ownerGlobalId: WORD; ownerHdrFileOfs: LONGINT; resumeGlobalId: WORD;
-      staleEntryOfs: WORD;
+      staleEntryOfs: WORD; ownerSiteFileOfs: LONGINT;
 BEGIN
   IF ~ovrHaveHandle OR (ovrDirectory = NIL) THEN SYSTEM.Halt(208) END;
   INC(ovrTrapCount);
 
   id := ReadTrampolineId(siteSeg, siteOfs);
-  IF WORD(id) >= ovrEntryIdCount THEN SYSTEM.Halt(209) END;
+  IF WORD(id) >= ovrEntryIdCount THEN SYSTEM.Halt(291) END;
   hdrFileOfs := DirEntry(WORD(id));
 
   u := RegisterModule(hdrFileOfs);
   IF u = NIL THEN
-    SYSTEM.Halt(209)
+    SYSTEM.Halt(292)
   END;
 
-  (* entryOfs is THIS site's own in-module code offset (Overlay_
-     ReadTrampolineEntryOfs), not necessarily the same entry point
-     another site targets -- must be read BEFORE any patch write touches
-     this site's own bytes+3/+4.  Only meaningful for an ORDINARY entry;
-     for a RESUME trap it reads the resident table's own always-zero
-     trailing bytes (Overlay_InitResumeTrapTable never writes anything
-     else there) and is OVERWRITTEN below, once ResumeCallee resolves
-     the real value from the resume record's own on-disk "ofs" field
-     (stale-return-address fix, 2026-08-08 -- see ResumeCallee's own
-     comment for the bug this fixes). *)
-  entryOfs := ReadTrampolineEntryOfs(siteSeg, siteOfs);
+  (* entryOfs is id's own in-module code offset -- now read straight
+     from the .OVR directory (DirEntryOfs), not from the call site's own
+     bytes at all (DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c),
+     2026-08-26: entryOfs moved out of the trampoline format entirely,
+     since it is purely a function of id, never call-site-specific).
+     Only meaningful for an ORDINARY entry; for a RESUME trap id's own
+     directory slot always holds 0 (LinkOvr.DirectResumeDirSlots never
+     writes anything else there) and is OVERWRITTEN below, once
+     ResumeCallee resolves the real value from the resume record's own
+     on-disk "ofs" field (stale-return-address fix, 2026-08-08 -- see
+     ResumeCallee's own comment for the bug this fixes). *)
+  entryOfs := DirEntryOfs(WORD(id));
 
-  (* Default: same segment/offset+5 as the trap site itself -- correct
-     unless the cross-overlay branch below overrides it. *)
+  (* Default: same segment/offset+5 as the trap site itself -- the call
+     site's own reserved footprint is 5 bytes regardless of the
+     swappable trampoline's own byte count (DOCS/OVR-ID-WIDEN-PLAN.MD
+     step 2 option (c), 2026-08-26 settled on a 4-byte trampoline; a
+     brief, reverted intermediate attempt used +6) -- correct unless the
+     cross-overlay branch below overrides it. *)
   retSegOut := siteSeg; retOfsOut := siteOfs + WORD(5);
 
   (* Cross-overlay calls (DOCS/OVR.MD §9): if this id
@@ -1598,7 +2017,7 @@ BEGIN
        "resolve everything, then act" ordering; DirEntry(ownerGlobalId)
        is safe to call before u's own load since it only reads the
        (already-loaded) on-disk directory, not any module's resident code. *)
-    ownerGlobalId := FindSiteOwner(u, siteSeg, siteOfs);
+    ownerGlobalId := FindSiteOwner(u, siteSeg, siteOfs, ownerSiteFileOfs);
     IF ownerGlobalId # OvrNoOwner THEN
       ownerHdrFileOfs := DirEntry(ownerGlobalId);
       caller := RegisterModule(ownerHdrFileOfs);
@@ -1606,10 +2025,19 @@ BEGIN
       (* Stale-return-address fix: redirect the synthesized return
          address through the resident table instead of caller's own
          (possibly soon-stale) segment -- see this procedure's own
-         header comment. *)
-      IF (caller # NIL) & FindResumeGlobalId(caller, WORD(id), resumeGlobalId) THEN
+         header comment.  ownerSiteFileOfs (Bug 2 fix, OVR-BUG.MD)
+         identifies WHICH of caller's own call sites into u actually
+         trapped, so FindResumeGlobalId picks the matching resume
+         record even when caller has several call sites into the same
+         callee entry point. *)
+      IF (caller # NIL) & FindResumeGlobalId(caller, WORD(id), ownerSiteFileOfs, resumeGlobalId) THEN
         retSegOut := ovrResumeTrapTableSeg;
-        retOfsOut := ovrResumeTrapTableOfs + resumeGlobalId * WORD(5)
+        (* *WORD(4): the resume table's own slot width -- 4 bytes
+           (id:WORD only, entryOfs no longer stored in any trampoline
+           slot at all, DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c),
+           2026-08-26; a brief, reverted intermediate attempt made this
+           *WORD(6)). *)
+        retOfsOut := ovrResumeTrapTableOfs + resumeGlobalId * WORD(4)
       END
     END
   END;
@@ -1651,21 +2079,39 @@ BEGIN
     END
   END;
 
-  (* inUse nesting, continued: an ORDINARY entry increments u's own
-     inUse (one INC per genuine call, matching TryEvictOne's "never
-     evict inUse#0" contract).  A RESUME re-increments u's own inUse
-     too -- u (the caller, resuming) went idle the moment it made the
+  (* inUse nesting, continued: a RESUME re-increments u's own inUse --
+     u (the caller, resuming) went idle the moment it made the
      now-returning call (decremented above, in a PRIOR dispatch, by
      THIS module's own caller-DEC branch when u's outgoing call site
      itself trapped) and becomes busy again now that control is back
-     with it.  This replaces the old "resume never increments, caller
-     stays inUse for its whole activation" rule -- the one that made
-     eviction of an idle-but-on-stack caller structurally impossible
-     (see DOCS/OVR.MD §10 for the full before/after). *)
-  INC(u^.inUse);
+     with it.  This is the cross-overlay caller-idle signal (DOCS/OVR.MD
+     §10) -- still real, still needed, untouched by the epilogue-counter
+     fix below.
+     An ORDINARY entry used to ALSO INC(u^.inUse) here unconditionally
+     (matching TryEvictOne's old "never evict inUse#0" contract) -- but
+     for a module WITH a real epilogue counter (HasCounter), that job now
+     belongs entirely to the counter (INC'd by u's own compiled prologue,
+     DEC'd by its epilogue, tracking real in-body execution independent of
+     the trap mechanism -- OVR-BUG.MD).  Still INC-ing inUse here
+     unconditionally for such a module left inUse permanently elevated
+     the instant ANY ordinary call ever traps once -- TryEvictOne's old
+     "prefer the counter, else inUse" logic then let counter=0 alone
+     authorize eviction while inUse stayed stuck at that stale nonzero
+     value FOREVER, silently masking the real problem: a module's own
+     inUse could go stale (nonzero, meaning "some earlier caller relationship
+     never resolved") while its counter correctly said idle, and something
+     else still trusted that inUse value elsewhere -- confirmed via a real
+     self-hosting corruption (compiling with PEXPR.MOD $O+, the first
+     module exercising real cross-overlay resume chains: inUse=1 persisted
+     on a module whose counter=0, TryEvictOne evicted it anyway, corrupting
+     memory a live resume return address still pointed into).  Skipping the
+     ordinary-entry INC entirely for a HasCounter module keeps inUse
+     reserved purely for cross-overlay caller/callee bookkeeping (the DEC/
+     INC pairs above and below), the one job it still does correctly. *)
+  IF isResume OR ~HasCounter(u) THEN INC(u^.inUse) END;
   targetSeg := u^.residentSeg;
   targetOfs := entryOfs;
-  IF isResume THEN isResumeOut := 1 ELSE isResumeOut := 0 END
+  IF isResume THEN isResumeOut := 1 ELSE isResumeOut := 0 END;
 END OvrDispatch;
 
 (*$L OVERLAY.RDF*)
@@ -1679,8 +2125,12 @@ BEGIN
   ovrFileBase := 0;
   ovrPayloadStart := 0;
   ovrFileMode := 0;
-  ovrHeapOrgParas := 0; ovrHeapPtrParas := 0; ovrHeapEndParas := 0;
-  ovrHeapBuf := NIL;
+  i := 0;
+  WHILE i < NumHeapBlocks DO
+    ovrHeaps[i].orgParas := 0; ovrHeaps[i].ptrParas := 0; ovrHeaps[i].endParas := 0;
+    ovrHeaps[i].buf := NIL;
+    INC(i)
+  END;
   ovrHeapSizeParas := 0;
   ovrRetrySize := 0;
   ovrLoadList := NIL;
@@ -1691,5 +2141,7 @@ BEGIN
   ovrTrapInstalled := FALSE;
   prevExitProc := NIL;
   ovrEntryIdCount := 0;
-  ovrDirectory := NIL
+  ovrDirectory := NIL;
+  ovrResumeTrapTable := NIL;
+  ovrResumeTrapTableSeg := 0; ovrResumeTrapTableOfs := 0
 END Overlay.

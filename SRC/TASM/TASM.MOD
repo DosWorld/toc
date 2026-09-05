@@ -197,14 +197,14 @@ PROCEDURE RunBin2Obj(srcPath, name: ARRAY OF CHAR; segId: INTEGER; outObj: Rdoff
   VAR f: Files.File; size: LONGINT; ok: BOOLEAN;
 BEGIN
   IF ~Files.Reset(f, srcPath) THEN
-    LogErr.Error2("tasm: cannot open ", srcPath); RETURN FALSE
+    LogErr.Error2("cannot open ", srcPath); RETURN FALSE
   END;
   size := Files.Size(f);
   IF size = 0 THEN
     (* a 0-byte blob global is almost certainly a wrong path -- loud
        beats silent here, since the resulting .rdf would otherwise look
        plausible (one GLOBAL record, empty segment) with no diagnostic. *)
-    LogErr.Error2("tasm: empty input file: ", srcPath); Files.Close(f); RETURN FALSE
+    LogErr.Error2("empty input file: ", srcPath); Files.Close(f); RETURN FALSE
   END;
   (* LONGINT() cast is generation-proof: MaxBlobSize (= SegLimit-1 = 64999)
      may fold as INTEGER or WORD depending on which compiler generation
@@ -212,7 +212,7 @@ BEGIN
      INTEGER folding and rejected every input.  The cast always loads the
      constant's true value. *)
   IF size > LONGINT(MaxBlobSize) THEN
-    LogErr.Error2("tasm: input exceeds 64K segment limit: ", srcPath);
+    LogErr.Error2("input exceeds 64K segment limit: ", srcPath);
     Files.Close(f); RETURN FALSE
   END;
   Rdoff.RdfAddGlobal(outObj, name, BYTE(segId), LONGINT(0));
@@ -232,7 +232,7 @@ BEGIN
     outObj^.dataLen := WORD(size)
   END;
   Files.Close(f);
-  IF ~ok THEN LogErr.Error2("tasm: error reading ", srcPath) END;
+  IF ~ok THEN LogErr.Error2("error reading ", srcPath) END;
   RETURN ok
 END RunBin2Obj;
 
@@ -262,7 +262,7 @@ BEGIN
       ELSIF Strings.EqualICase(logLevel, "warn") THEN LogErr.SetLevel(LogErr.LWARN)
       ELSIF Strings.EqualICase(logLevel, "error") THEN LogErr.SetLevel(LogErr.LERROR)
       ELSE
-        LogErr.Error2("tasm: /LOG=: unknown level (want debug/info/warn/error) ", logLevel);
+        LogErr.Error2("/LOG=: unknown level (want debug/info/warn/error) ", logLevel);
         Parse.FreePredefs; RETURN ExitUsage
       END
     ELSIF MatchSwitchVal(arg, "/BIN=", binVal) THEN
@@ -272,7 +272,7 @@ BEGIN
       IF Strings.EqualICase(binVal, "code") THEN binMode := TRUE; binSeg := Rdoff.SegCode
       ELSIF Strings.EqualICase(binVal, "data") THEN binMode := TRUE; binSeg := Rdoff.SegData
       ELSE
-        LogErr.Error2("tasm: /BIN=: unknown segment (want code or data) ", binVal);
+        LogErr.Error2("/BIN=: unknown segment (want code or data) ", binVal);
         Parse.FreePredefs; RETURN ExitUsage
       END
     ELSIF MatchSwitchVal(arg, "/NAME=", nameVal) THEN
@@ -283,7 +283,7 @@ BEGIN
          Assemble via Parse.ApplyPredefs, exactly like a source-level
          %define seen before line 1. *)
       IF ~SplitPredef(dRest, dName, dValue) THEN
-        LogErr.Error2("tasm: invalid -D (want -Dname or -Dname=value): ", arg);
+        LogErr.Error2("invalid -D (want -Dname or -Dname=value): ", arg);
         Parse.FreePredefs; RETURN ExitUsage
       END;
       Parse.AddPredef(dName, dValue)
@@ -293,33 +293,33 @@ BEGIN
          reject it loudly instead. *)
       IF srcPath[0] = 0X THEN Strings.Copy(arg, srcPath)
       ELSE
-        LogErr.Error2("tasm: unexpected extra argument ", arg); Parse.FreePredefs; RETURN ExitUsage
+        LogErr.Error2("unexpected extra argument ", arg); Parse.FreePredefs; RETURN ExitUsage
       END
     ELSE
-      LogErr.Error2("tasm: unknown option ", arg); Parse.FreePredefs; RETURN ExitUsage
+      LogErr.Error2("unknown option ", arg); Parse.FreePredefs; RETURN ExitUsage
     END;
     INC(i)
   END;
   IF srcPath[0] = 0X THEN Usage; Parse.FreePredefs; RETURN ExitUsage END;
   IF ~Files.FileExists(srcPath) THEN
-    LogErr.Error2("tasm: no such file: ", srcPath); Parse.FreePredefs; RETURN ExitIo
+    LogErr.Error2("no such file: ", srcPath); Parse.FreePredefs; RETURN ExitIo
   END;
   (* §J.2: /NAME= is REQUIRED in bin mode, and a usage error (not silent
      ignoring, per C11's lesson) in assemble mode. *)
   IF binMode & (nameVal[0] = 0X) THEN
-    LogErr.Error("tasm: /BIN= mode requires /NAME=GlobalName"); Parse.FreePredefs; RETURN ExitUsage
+    LogErr.Error("/BIN= mode requires /NAME=GlobalName"); Parse.FreePredefs; RETURN ExitUsage
   END;
   IF ~binMode & (nameVal[0] # 0X) THEN
-    LogErr.Error("tasm: /NAME= is only valid with /BIN="); Parse.FreePredefs; RETURN ExitUsage
+    LogErr.Error("/NAME= is only valid with /BIN="); Parse.FreePredefs; RETURN ExitUsage
   END;
   IF binMode & ~ValidGlobalName(nameVal) THEN
-    LogErr.Error2("tasm: invalid global name: ", nameVal); Parse.FreePredefs; RETURN ExitUsage
+    LogErr.Error2("invalid global name: ", nameVal); Parse.FreePredefs; RETURN ExitUsage
   END;
 
   Files.ReplaceExt(srcPath, ".RDF", outPath);
 
   NEW(obj);
-  IF obj = NIL THEN LogErr.Error("tasm: out of memory"); Parse.FreePredefs; RETURN ExitIo END;
+  IF obj = NIL THEN LogErr.Error("out of memory"); Parse.FreePredefs; RETURN ExitIo END;
   Rdoff.RdfInit(obj);
   IF LogErr.HaveErr() THEN DISPOSE(obj); Parse.FreePredefs; RETURN ExitIo END;
 
@@ -331,7 +331,7 @@ BEGIN
 
   IF ok & ~LogErr.HaveErr() THEN
     IF ~Files.ReWrite(f, outPath) THEN
-      LogErr.Error2("tasm: cannot write ", outPath);
+      LogErr.Error2("cannot write ", outPath);
       Rdoff.RdfFree(obj); DISPOSE(obj); Parse.FreePredefs; RETURN ExitIo
     END;
     Rdoff.RdfWriteTo(obj, f);
@@ -342,7 +342,7 @@ BEGIN
     IF LogErr.HaveErr() THEN Files.SetDeleteOnClose(f, TRUE) END;
     Files.Close(f);
     IF ~LogErr.HaveErr() THEN
-      LogErr.Info2("tasm: wrote ", outPath)
+      LogErr.Info2("wrote ", outPath)
     END
   END;
 

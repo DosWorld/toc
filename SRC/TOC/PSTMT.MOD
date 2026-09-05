@@ -1,11 +1,11 @@
-(*$D-*)
+(*$D-,O-*)
 MODULE PStmt;
 (*
   Statement parser: IF, WHILE, REPEAT, FOR, CASE, RETURN, procedure calls,
   assignment, sysproc calls (NEW/DISPOSE/INC/DEC/ASSERT).
   Uses shared state from PExpr.
 *)
-IMPORT Scan, Syms, Cgen, Rdoff, PExpr, TDbg, Strings, LogErr;
+IMPORT Scan, Syms, Cgen, Rdoff, PExpr, PExpr2, TDbg, Strings, LogErr;
 
 (* ---- BpNode linked list for backpatch chains ---- *)
 
@@ -153,6 +153,8 @@ END ParseRepeat;
 VAR retPatchList*: BpNode;  (* per-proc RETURN backpatch chain *)
     curProloguePatch*: LONGINT;  (* offset of frame-size word in SUB SP,imm16 *)
     curProcDepth*: INTEGER;
+    dbgParseStatement: WORD;  (* OVR-BUG.MD Bug 5 trace probe, temporary *)
+    dbgAssignDesignator: WORD;  (* OVR-BUG.MD Bug 5 trace probe, temporary *)
 
 (* Patch the frame-size word (the imm16 of `SUB SP,imm16`) at curProloguePatch
    with the current scope's local size, little-endian.  Called whenever a hidden
@@ -442,7 +444,7 @@ BEGIN
   Cgen.CgSubAxImm(lo);
   Cgen.CgCmpAxImmUnsigned(nSlots - 1);
   Cgen.CgCondNear(Cgen.OpJa, defaultBp);   (* out of [lo,hi]: fall to default *)
-  Cgen.Emit2(0D1H, 0E0H);                  (* SHL AX,1 — word-index scaling *)
+  Cgen.CgShlAx1();                  (* SHL AX,1 — word-index scaling *)
   Cgen.EmitCodeStr("8B,D8");               (* MOV BX,AX *)
   (* JMP is 5 bytes (2E FF A7 xx xx); the table starts right after it. *)
   Cgen.CgJmpTableCs(WORD(Cgen.CgPc() + LONGINT(5)));
@@ -629,7 +631,7 @@ BEGIN
   PExpr.Expect(Scan.TLparen);
   CASE id OF
     Syms.SpNew:
-      PExpr.ParseDesignator(ptr);
+      PExpr2.ParseDesignator(ptr);
       ptt := ptr.type;
       IF (ptt # Syms.NoType) &
          ((ptt.form = Syms.TFPointer) OR (ptt.form = Syms.TFAddress)) THEN
@@ -642,7 +644,7 @@ BEGIN
          below will clobber both — save them now, restore just before
          CgStoreItem. *)
       saveEsbx := (ptr.mode = Cgen.MReg) & ptr.isRef;
-      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(053H)          (* PUSH BX *)
+      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(BYTE(Cgen.OpPushBx))          (* PUSH BX *)
       ELSIF saveEsbx THEN Cgen.EmitCodeStr("06,53") END;  (* PUSH ES; PUSH BX *)
       mAllocId := PExpr.GetSystemImport("SYSTEM_Alloc");
       IF PExpr.sc.sym = Scan.TComma THEN
@@ -667,12 +669,12 @@ BEGIN
         Cgen.Emit2(040H, 040H);                 (* INC AX / INC AX *)
         Cgen.CgPatchShort(bpNil)
       END;
-      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(05BH)         (* POP BX *)
+      IF saveEsbx & ptr.nearBase THEN Cgen.Emit1(BYTE(Cgen.OpPopBx))         (* POP BX *)
       ELSIF saveEsbx THEN Cgen.EmitCodeStr("5B,07") END;  (* POP BX; POP ES *)
       Cgen.CgStoreItem(ptr)
 
   | Syms.SpDispose:
-      PExpr.ParseDesignator(ptr);
+      PExpr2.ParseDesignator(ptr);
       ptt := ptr.type;
       IF (ptt # Syms.NoType) &
          ((ptt.form = Syms.TFPointer) OR (ptt.form = Syms.TFAddress)) THEN
@@ -694,9 +696,9 @@ BEGIN
       Cgen.CgCallFar(mFreeId)
 
   | Syms.SpInc, Syms.SpDec:
-      PExpr.ParseDesignator(vitem); vstore := vitem;
-      isLongV := (vstore.type # Syms.NoType) & (vstore.type.form = Syms.TFLongint);
-      isAddrV := (vstore.type # Syms.NoType) & (vstore.type.form = Syms.TFAddress);
+      PExpr2.ParseDesignator(vitem); vstore := vitem;
+      isLongV := Syms.IsForm(vstore.type, Syms.TFLongint);
+      isAddrV := Syms.IsForm(vstore.type, Syms.TFAddress);
       isByteV := (vstore.type # Syms.NoType) &
                  ((vstore.type.form = Syms.TFChar) OR
                   (vstore.type.form = Syms.TFByte) OR
@@ -736,8 +738,8 @@ BEGIN
             Cgen.Emit1(BYTE(Cgen.OpPushAx));
             Cgen.CgLoadItem(vstep);
             IF isLongV THEN
-              isLongStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFLongint);
-              isWordStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFWord);
+              isLongStep := Syms.IsForm(vstep.type, Syms.TFLongint);
+              isWordStep := Syms.IsForm(vstep.type, Syms.TFWord);
               IF isWordStep THEN Cgen.Emit2(BYTE(031H), BYTE(0D2H))
               ELSIF ~isLongStep THEN Cgen.Emit1(BYTE(099H)) END;
               Cgen.EmitCodeStr("89,C3,89,D1,58,5A");  (* MOV BX,AX; MOV CX,DX; POP AX; POP DX *)
@@ -770,8 +772,8 @@ BEGIN
                combine, store.  Handles INTEGER/WORD/ADDRESS/LONGINT/BYTE. *)
             Cgen.CgLoadItem(vstep);
             IF isLongV THEN
-              isLongStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFLongint);
-              isWordStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFWord);
+              isLongStep := Syms.IsForm(vstep.type, Syms.TFLongint);
+              isWordStep := Syms.IsForm(vstep.type, Syms.TFWord);
               IF isWordStep THEN Cgen.Emit2(BYTE(031H), BYTE(0D2H))  (* XOR DX,DX *)
               ELSIF ~isLongStep THEN Cgen.Emit1(BYTE(099H)) END;     (* CWD *)
               Cgen.EmitCodeStr("89,C3,89,D1");   (* MOV BX,AX; MOV CX,DX *)
@@ -835,8 +837,8 @@ BEGIN
              wrongly treat a step with bit 15 set as negative.  BYTE/INTEGER
              are signed-range-safe under CWD (BYTE's AH is always 0 after
              CgLoadItem, so CWD yields DX=0 for it too). *)
-          isLongStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFLongint);
-          isWordStep := (vstep.type # Syms.NoType) & (vstep.type.form = Syms.TFWord);
+          isLongStep := Syms.IsForm(vstep.type, Syms.TFLongint);
+          isWordStep := Syms.IsForm(vstep.type, Syms.TFWord);
           IF isWordStep THEN
             Cgen.Emit1(BYTE(031H)); Cgen.Emit1(BYTE(0D2H))  (* XOR DX, DX *)
           ELSIF ~isLongStep THEN
@@ -999,6 +1001,7 @@ PROCEDURE ParseStatement(retType: Syms.TypeDesc);
       iform, rform: INTEGER;
       skipSave: BOOLEAN;
 BEGIN
+  INC(dbgParseStatement);
   (* debug info: one line record at the first code of each new source line *)
   TDbg.AddLine(WORD(Cgen.CgPc()), PExpr.sc.line);
   IF PExpr.sc.sym = Scan.TIdent THEN
@@ -1024,7 +1027,8 @@ BEGIN
     IF (sym # Syms.NoSym) & (sym.kind = Syms.KSysProc) THEN
       Scan.Next(PExpr.sc); ParseSysprocCall(sym.sysId); RETURN
     END;
-    PExpr.ParseDesignator(item);
+    INC(dbgAssignDesignator);
+    PExpr2.ParseDesignator(item);
     IF (item.mode = Cgen.MSysProc) THEN
       ParseSysprocCall(INTEGER(item.val)); RETURN
     END;
@@ -1119,9 +1123,9 @@ BEGIN
         IF rhs.type.size < item.type.size THEN count := rhs.type.size
         ELSE count := item.type.size END;
         Cgen.CgLoadAddrItem(rhs.mode, rhs.adr);
-        Cgen.Emit2(08BH, 0F0H);  (* MOV SI, AX *)
+        Cgen.CgMovSiAx();  (* MOV SI, AX *)
         Cgen.CgLoadAddrItem(item.mode, item.adr);
-        Cgen.Emit2(08BH, 0F8H);  (* MOV DI, AX *)
+        Cgen.CgMovDiAx();  (* MOV DI, AX *)
         Cgen.CgEsFromMode(item.mode);    (* ES = SS or DS *)
         Cgen.CgRepMovsb(INTEGER(count), rhs.mode = Cgen.MLocal);
         RETURN
@@ -1174,9 +1178,9 @@ BEGIN
          ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
         count := item.type.size;
         Cgen.CgLoadAddrItem(rhs.mode, rhs.adr);
-        Cgen.Emit2(08BH, 0F0H);  (* MOV SI, AX *)
+        Cgen.CgMovSiAx();  (* MOV SI, AX *)
         Cgen.CgLoadAddrItem(item.mode, item.adr);
-        Cgen.Emit2(08BH, 0F8H);  (* MOV DI, AX *)
+        Cgen.CgMovDiAx();  (* MOV DI, AX *)
         Cgen.CgEsFromMode(item.mode);
         Cgen.CgRepMovsb(INTEGER(count), rhs.mode = Cgen.MLocal);
         RETURN
@@ -1189,9 +1193,9 @@ BEGIN
          ((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal)) &
          ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
         count := item.type.size;
-        IF rhs.mode = Cgen.MLocal THEN Cgen.Emit1(01EH) END;  (* PUSH DS *)
+        IF rhs.mode = Cgen.MLocal THEN Cgen.Emit1(BYTE(Cgen.OpPushDs)) END;  (* PUSH DS *)
         Cgen.CgLoadAddrItem(rhs.mode, rhs.adr);
-        Cgen.Emit2(08BH, 0F0H);   (* MOV SI, AX *)
+        Cgen.CgMovSiAx();   (* MOV SI, AX *)
         Cgen.CgLesBxItem(item.mode, item.adr);
         Cgen.Emit2(08BH, 0FBH);   (* MOV DI, BX *)
         Cgen.CgLoadImm(INTEGER(count)); Cgen.Emit2(08BH, 0C8H);  (* MOV CX, AX *)
@@ -1200,7 +1204,7 @@ BEGIN
           Cgen.EmitCodeStr("8C,D2,8E,DA")  (* MOV DX,SS; MOV DS,DX *)
         END;
         Cgen.Emit2(0F3H, 0A4H);   (* REP MOVSB: DS:SI -> ES:DI *)
-        IF rhs.mode = Cgen.MLocal THEN Cgen.Emit1(01FH) END;  (* POP DS *)
+        IF rhs.mode = Cgen.MLocal THEN Cgen.CgPopDs() END;  (* POP DS *)
         RETURN
       END;
       (* Record assign: plain local/global dest, far-ref source (isRef).
@@ -1231,27 +1235,27 @@ BEGIN
          ((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal)) &
          ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MReg)) THEN
         count := item.type.size;
-        Cgen.Emit1(01EH);                      (* PUSH DS (restore after MOVSB) *)
+        Cgen.Emit1(BYTE(Cgen.OpPushDs));                      (* PUSH DS (restore after MOVSB) *)
         IF (rhs.mode = Cgen.MReg) & rhs.nearBase THEN
           (* §4.1: BX alone = src near addr -- synthesize ES before the
              PUSH ES below, so the saved "src seg" is genuine either way. *)
-          Cgen.Emit2(08BH, 0F3H);               (* MOV SI, BX *)
+          Cgen.CgMovSiBx();               (* MOV SI, BX *)
           Cgen.CgEsFromMode(PExpr.NearRootMode(rhs))
         ELSIF rhs.mode = Cgen.MReg THEN
-          Cgen.Emit2(08BH, 0F3H)                (* MOV SI, BX -- ES:BX already = src far addr *)
+          Cgen.CgMovSiBx()                (* MOV SI, BX -- ES:BX already = src far addr *)
         ELSE
           Cgen.CgLesBxItem(rhs.mode, rhs.adr);  (* ES:BX = src far addr *)
-          Cgen.Emit2(08BH, 0F3H)                (* MOV SI, BX *)
+          Cgen.CgMovSiBx()                (* MOV SI, BX *)
         END;
-        Cgen.Emit1(006H);                       (* PUSH ES (save src seg -- CgEsFromMode below clobbers ES/DX) *)
+        Cgen.Emit1(BYTE(Cgen.OpPushEs));                       (* PUSH ES (save src seg -- CgEsFromMode below clobbers ES/DX) *)
         Cgen.CgLoadAddrItem(item.mode, item.adr);
-        Cgen.Emit2(08BH, 0F8H);                 (* MOV DI, AX -- dest near addr *)
+        Cgen.CgMovDiAx();                 (* MOV DI, AX -- dest near addr *)
         Cgen.CgEsFromMode(item.mode);           (* ES = dest segment (SS or DS) *)
         Cgen.EmitCodeStr("58,8E,D8");            (* POP AX (src seg); MOV DS, AX *)
         Cgen.CgLoadImm(INTEGER(count)); Cgen.Emit2(08BH, 0C8H);  (* MOV CX, AX *)
         Cgen.Emit1(BYTE(Cgen.OpCld));
         Cgen.Emit2(0F3H, 0A4H);                 (* REP MOVSB: DS:SI -> ES:DI *)
-        Cgen.Emit1(01FH);                       (* POP DS *)
+        Cgen.CgPopDs();                       (* POP DS *)
         RETURN
       END;
       (* Record-through-far-pointer assignment: REP MOVSB with DS-swap.
@@ -1276,7 +1280,7 @@ BEGIN
          item.isRef & rhs.isRef &
          (item.mode # Cgen.MReg) THEN
         count := item.type.size;
-        Cgen.Emit1(01EH);             (* PUSH DS *)
+        Cgen.Emit1(BYTE(Cgen.OpPushDs));             (* PUSH DS *)
         IF (rhs.mode = Cgen.MReg) & rhs.nearBase THEN
           (* §4.1: synthesize ES before stashing, so DX:SI holds a genuine
              far src pair either way. *)
@@ -1287,16 +1291,16 @@ BEGIN
         END;
         Cgen.CgLesBxItem(item.mode, item.adr);
         Cgen.Emit2(08BH, 0FBH);       (* MOV DI, BX *)
-        Cgen.Emit1(006H);             (* PUSH ES *)
+        Cgen.Emit1(BYTE(Cgen.OpPushEs));             (* PUSH ES *)
         IF rhs.mode = Cgen.MReg THEN
           Cgen.EmitCodeStr("8E,C2,89,F3")  (* MOV ES,DX; MOV BX,SI -- restore src far addr *)
         ELSE
           Cgen.CgLesBxItem(rhs.mode, rhs.adr)
         END;
-        Cgen.Emit2(08BH, 0F3H);       (* MOV SI, BX *)
+        Cgen.CgMovSiBx();       (* MOV SI, BX *)
         Cgen.EmitCodeStr("06,1F,07"); (* PUSH ES; POP DS; POP ES (DS=src, ES=dst) *)
         Cgen.CgRepMovsb(INTEGER(count), FALSE);
-        Cgen.Emit1(01FH);             (* POP DS  (restore data segment) *)
+        Cgen.CgPopDs();             (* POP DS  (restore data segment) *)
         RETURN
       END;
 
@@ -1325,7 +1329,7 @@ BEGIN
         IF ~rhs.isRef &
            ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
           Cgen.CgLoadAddrItem(rhs.mode, rhs.adr);    (* AX = src ofs *)
-          Cgen.Emit2(08BH, 0D8H);                    (* MOV BX, AX *)
+          Cgen.CgMovBxAx();                    (* MOV BX, AX *)
           Cgen.CgEsFromMode(rhs.mode)                (* ES = SS or DS *)
         ELSIF rhs.isRef &
               ((rhs.mode = Cgen.MLocal) OR (rhs.mode = Cgen.MGlobal)) THEN
@@ -1349,13 +1353,13 @@ BEGIN
         rhs.type := Syms.TypeLongint
       END;
       Cgen.CgLoadItem(rhs);
-      IF (item.type # Syms.NoType) & (item.type.form = Syms.TFLongint) &
+      IF Syms.IsForm(item.type, Syms.TFLongint) &
          (rhs.type # Syms.NoType) & (rhs.type.form # Syms.TFLongint) THEN
         IF (rhs.type.form = Syms.TFByte) OR (rhs.type.form = Syms.TFChar) OR
            (rhs.type.form = Syms.TFBoolean) OR (rhs.type.form = Syms.TFWord) THEN
-          Cgen.Emit2(033H, 0D2H)  (* XOR DX,DX — zero-extend (WORD/BYTE/CHAR/BOOLEAN are unsigned) *)
+          Cgen.CgZeroDx()  (* XOR DX,DX — zero-extend (WORD/BYTE/CHAR/BOOLEAN are unsigned) *)
         ELSE
-          Cgen.Emit1(099H)        (* CWD — sign-extend INTEGER *)
+          Cgen.CgCwd()        (* CWD — sign-extend INTEGER *)
         END
       END;
       IF skipSave THEN
@@ -1365,13 +1369,13 @@ BEGIN
         (* §4.1: only BX is actually needed; the ES half saved alongside it
            (synthesized at the save site) is dead weight here -- pop and
            discard it via SP adjustment instead of a real POP ES. *)
-        Cgen.Emit1(05BH);              (* POP BX *)
+        Cgen.Emit1(BYTE(Cgen.OpPopBx));              (* POP BX *)
         Cgen.Emit2(083H, 0C4H); Cgen.Emit1(002H)  (* ADD SP, 2 (discard saved seg) *)
       ELSIF (item.mode = Cgen.MReg) & item.isRef THEN
         Cgen.EmitCodeStr("5B,07")  (* POP BX; POP ES *)
       END;
       Cgen.CgStoreItem(item)
-    ELSIF (item.type # Syms.NoType) & (item.type.form = Syms.TFProc) &
+    ELSIF Syms.IsForm(item.type, Syms.TFProc) &
           ((item.mode = Cgen.MLocal) OR (item.mode = Cgen.MGlobal) OR
            ((item.mode = Cgen.MReg) & item.isRef)) THEN
       PExpr.MarkRead(item);
@@ -1382,11 +1386,11 @@ BEGIN
         IF item.nearBase THEN Cgen.CgEsFromMode(PExpr.NearRootMode(item)) END;
         Cgen.EmitCodeStr("53,06");  (* PUSH BX; PUSH ES (save slot addr) *)
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.tagIdOrNParams > 0) THEN
-          PExpr.ParseActualParameters(pt) END;
+          PExpr2.ParseActualParameters(pt) END;
         Cgen.CgCallProcVarRefTail(pt.lenOrDescOrArg)
       ELSE
         IF (PExpr.sc.sym = Scan.TLparen) OR (pt.tagIdOrNParams > 0) THEN
-          PExpr.ParseActualParameters(pt) END;
+          PExpr2.ParseActualParameters(pt) END;
         (* Proc-typed VARs are always FAR (see PARSER.MOD ParseType). *)
         IF varGlobal THEN Cgen.CgCallProcVarMem(WORD(varAdr))
         ELSE Cgen.CgCallProcVarBp(varAdr) END
@@ -1394,7 +1398,7 @@ BEGIN
     ELSIF (item.mode = Cgen.MProc) & (item.type # Syms.NoType) & ItemInline(item) THEN
       PExpr.MarkRead(item);
       IF (PExpr.sc.sym = Scan.TLparen) OR (item.type.tagIdOrNParams > 0) THEN
-        PExpr.EmitInlineCall(item.type) END
+        PExpr2.EmitInlineCall(item.type) END
     ELSIF (item.mode = Cgen.MProc) OR (item.mode = Cgen.MImport) THEN
       PExpr.MarkRead(item);
       rdId := item.rdoffId; codeOfs := item.adr;
@@ -1402,7 +1406,7 @@ BEGIN
       pt2 := item.type;
       IF pt2 = Syms.NoType THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
       IF (PExpr.sc.sym = Scan.TLparen) OR (pt2.tagIdOrNParams > 0) THEN
-        PExpr.ParseActualParameters(pt2) END;
+        PExpr2.ParseActualParameters(pt2) END;
       (* DOCS/OVR.MD §9: mirrors PEXPR.MOD ParseFactor's
          own isImp & isFr & overlayMode gate -- a procedure called as a bare
          statement (no assignment/expression context, e.g. "Ovrdemo2.Run;")
@@ -1411,7 +1415,7 @@ BEGIN
       IF isImp & isFr & PExpr.overlayMode & ~PExpr.targetCP THEN Cgen.CgCallFarOvr(rdId)
       ELSIF isImp & isFr THEN Cgen.CgCallFar(rdId)
       ELSIF isImp THEN Cgen.CgCallNear(rdId)
-      ELSIF item.fwdSym # Syms.NoSym THEN PExpr.FwdEmitCall(item.fwdSym, isFr)
+      ELSIF item.fwdSym # Syms.NoSym THEN PExpr2.FwdEmitCall(item.fwdSym, isFr)
       ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)
       ELSE Cgen.CgCallLocal(codeOfs) END
     END
@@ -1431,8 +1435,17 @@ BEGIN
   WHILE IsLex(Scan.TSemi) DO ParseStatement(retType) END
 END ParseStatementSequence;
 
+(* RawInit: the module's own one-time init, moved out of a BEGIN block so
+   this module can be $O+ (DOCS/OVR.MD §4 forbids a BEGIN block on an
+   overlay-eligible module -- OVR-BUG.MD's own "other findings" section
+   scoped this exact move).  retPatchList/curProloguePatch/curProcDepth
+   need NO explicit reset here: Parser.ParseModule already resets all
+   three itself, once per compile (PARSER.MOD's own per-compile-reset
+   block), making PStmt's own init of them here purely redundant -- only
+   bpOomNode (the OOM fallback node BpPush hands out) is real, load-
+   bearing, one-time state.  Called once from TOC.MOD's SetupOvr, mirroring
+   PExpr2.WireHook's own call site (before any real parsing starts). *)
 BEGIN
-  retPatchList := NIL; curProloguePatch := 0; curProcDepth := 0;
   NEW(bpOomNode);
   IF bpOomNode = NIL THEN
     (* The OOM fallback node itself failed at startup: latch so the first

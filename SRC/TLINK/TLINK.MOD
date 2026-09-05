@@ -10,6 +10,7 @@ MODULE TLink;
     tlink /t=com [@list] input... output.com          (default mode)
     tlink /t=sys /A:xxxx [/N:name] input... output.sys
     tlink /t=exe input... output.exe
+    tlink /t=sexe input... output.exe
     tlink /t=texe input... output.exe                  (tiny model, MZ wrapper)
     tlink /t=bgi2 [/D=descr] [/C=copyright] input... output.bgi
                                                         (Borland BGI v2.0 driver,
@@ -26,15 +27,17 @@ MODULE TLink;
   DWORD size, sequential, '.'-prefixed entries (e.g. ".sig") are metadata
   and skipped.
 *)
-IMPORT Dos, Files, LogErr, Rdoff, Strings, StrTab, Tar, TExe, Bgi2, Bin, Out;
+IMPORT Dos, Files, LogErr, Rdoff, Strings, StrTab, Tar, TExe, Bgi2, Bin, NE, Out;
 
 CONST
   ModeCom = 0;
   ModeSys = 1;
-  ModeExe = 2;
+  ModeSExe = 2;
   ModeTExe = 3;
-  ModeBgi2 = 4;
-  ModeBin = 5;
+  ModeExe = 4;
+  ModeNe = 5;
+  ModeBgi2 = 6;
+  ModeBin = 7;
 
   MaxPath = 128;
   MaxName = 64;
@@ -115,6 +118,8 @@ VAR
   bgiDescr:    ARRAY MaxPath OF CHAR;   (* /D=: BGI banner text, /T=bgi2 only *)
   bgiCopyr:    ARRAY MaxPath OF CHAR;   (* /C=: BGI copyright line, /T=bgi2 only *)
   orgValue:    INTEGER;   (* /ORG=: assumed load address bias, /T=bin only (default 0) *)
+  neStackSize: LONGINT;   (* /S=: DATA segment's own stack reservation, /T=ne only
+                              (default 8192, matches SRC/TOC/LINK.MOD's own StackDef) *)
 
 (* ---- string / path helpers ---- *)
 
@@ -566,8 +571,12 @@ BEGIN
      layout math (ResolveTarget's SegData case, PatchMem) assumes DS=SS=DGROUP,
      so TLINK owns establishing DS.  All module code shifts up by headerSize;
      finalCodeOfs already threads through every reloc, so nothing else changes.
-     WriteOutputExe emits the stub bytes and points the MZ entry IP at 0. *)
-  headerSize := 7;
+     WriteOutputExe emits the stub bytes and points the MZ entry IP at 0.
+     ModeNe needs NO such stub: a real NE loader sets DS=SS to the auto data
+     segment (the NE header's own field) itself before the entry point ever
+     runs -- headerSize=0, entryIp points straight at 'start' (see
+     WriteOutputNe). *)
+  IF mode = ModeNe THEN headerSize := 0 ELSE headerSize := 7 END;
   codeBase := LONGINT(headerSize); dataBase := LONGINT(0);
   m := modHead;
   WHILE m # NIL DO
@@ -612,7 +621,7 @@ END PatchMem4;
 PROCEDURE PatchMem(rseg: INTEGER; offset: LONGINT; val: LONGINT; width: INTEGER);
   VAR buf: Rdoff.SegBuf; o: INTEGER; cur: WORD;
 BEGIN
-  IF mode = ModeExe THEN
+  IF (mode = ModeSExe) OR (mode = ModeNe) THEN
     (* small model: code and data are two independent buffers, each
        offset is already relative to its own buffer's start *)
     IF rseg = Rdoff.SegCode THEN buf := codeBuf ELSE buf := dataBuf END;
@@ -736,6 +745,68 @@ BEGIN
   PatchMem(rseg, patchAddr, fixup, rwidth)
 END OnReloc;
 
+(* TargetIsCode: TRUE iff rrefSeg (a RELOC/SEGRELOC's own target reference)
+   resolves to this program's single CODE segment, FALSE if it resolves to
+   the single DATA/BSS segment -- the only two possible NE targets in
+   tlink.exe's own flat two-segment model (ModeNe never emits or consumes
+   an external-import reloc the way LinkNE.MOD's KERNEL.INITTASK sentinel
+   does: every RELOC/SEGRELOC this toolchain produces resolves to code,
+   data, bss, or another linked module's own export -- all of which live in
+   exactly one of these two NE segments). *)
+PROCEDURE TargetIsCode(rrefSeg: INTEGER): BOOLEAN;
+  VAR e: SymEntry;
+BEGIN
+  IF rrefSeg = Rdoff.SegCode THEN RETURN TRUE
+  ELSIF (rrefSeg = Rdoff.SegData) OR (rrefSeg = Rdoff.SegBss) THEN RETURN FALSE
+  ELSE
+    ImpFind(rrefSeg, e);
+    IF ~SymFound(e) THEN LogErr.Error("tlink: relocation to missing import"); RETURN FALSE END;
+    RETURN SymSegId(e) = Rdoff.SegCode
+  END
+END TargetIsCode;
+
+(* NeOnReloc: /T=ne's own OnReloc, driving NE.OnReloc/NE.MOD's own
+   placeholder-and-record model instead of TLINK's ordinary baking OnReloc.
+   An IP-relative fixup (rrel # 0, near call/branch) stays baked exactly
+   like every other mode -- position-independent, no NE reloc needed
+   (mirrors LinkNE.MOD's own OnReloc). Only the absolute case (rrel = 0)
+   routes through NE.OnReloc: patchAddr is the buffer-relative patch site
+   (finalCodeOfs/finalDataOfs + rofs, matching ModeSExe's own PatchMem
+   convention); the target offset is ResolveTarget's own return value,
+   which (for every case ResolveTarget already handles: self-CODE/DATA/
+   BSS or an import) is already relative to the TARGET's own segment, not
+   curMod's -- exactly what the NE loader needs to write at load time. *)
+PROCEDURE NeOnReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER; rrefSeg: INTEGER; rrel: INTEGER); FAR;
+  VAR patchAddr, fixup: LONGINT; ok: BOOLEAN; isCode: BOOLEAN;
+BEGIN
+  IF rrel # 0 THEN
+    OnReloc(rseg, rofs, rwidth, rrefSeg, rrel);
+    RETURN
+  END;
+  isCode := rseg = Rdoff.SegCode;
+  IF isCode THEN patchAddr := curMod.finalCodeOfs + rofs
+  ELSE patchAddr := curMod.finalDataOfs + rofs
+  END;
+  fixup := ResolveTarget(rrefSeg, ok);
+  IF ~ok THEN RETURN END;
+  NE.OnReloc(codeBuf, dataBuf, isCode, WORD(patchAddr), TargetIsCode(rrefSeg), WORD(fixup))
+END NeOnReloc;
+
+(* NeOnSegReloc: /T=ne's own SEGRELOC handler -- the site carries a
+   segment/selector value; NE.OnSegReloc reads the compiler-baked offset
+   already sitting at the site (a self-segment SEGRELOC's own offset half,
+   same convention LinkNE.MOD's OnSegReloc uses) before stamping the BPC
+   placeholder. *)
+PROCEDURE NeOnSegReloc(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER; rrefSeg: INTEGER; rrel: INTEGER); FAR;
+  VAR isCode: BOOLEAN; patchAddr: LONGINT;
+BEGIN
+  isCode := rseg = Rdoff.SegCode;
+  IF isCode THEN patchAddr := curMod.finalCodeOfs + rofs
+  ELSE patchAddr := curMod.finalDataOfs + rofs
+  END;
+  NE.OnSegReloc(codeBuf, dataBuf, isCode, WORD(patchAddr), TargetIsCode(rrefSeg))
+END NeOnSegReloc;
+
 (* SEGRELOC only matters in EXE mode: patch the segment-base word and
    record an MZ relocation entry so DOS fixes it up again at load time
    (the small-model image can load at any paragraph). In COM/SYS (tiny)
@@ -773,7 +844,7 @@ END OnSegReloc;
    Parameters: none (reads modHead/mode/totalCodeLen/totalDataLen).
    Result: none (failures latch via LogErr). *)
 PROCEDURE PerformLinking;
-  VAR m, owner: Module; e: SymEntry; k: WORD; memBefore: WORD;
+  VAR m, owner: Module; e: SymEntry; k: WORD;
 BEGIN
   NEW(codeBuf, WORD(totalCodeLen));
   IF codeBuf = NIL THEN LogErr.Error("tlink: out of memory (code buffer)"); RETURN END;
@@ -794,27 +865,36 @@ BEGIN
     IF m.used THEN
       Rdoff.ReadCode(m.fileName, m.libOfs, m.hdrSize, codeBuf, WORD(m.finalCodeOfs), WORD(m.codeSize));
       IF m.dataSize > LONGINT(0) THEN
-        IF mode = ModeExe THEN
+        IF (mode = ModeSExe) OR (mode = ModeNe) THEN
           Rdoff.ReadData(m.fileName, m.libOfs, m.hdrSize, dataBuf, WORD(m.finalDataOfs), WORD(m.dataSize))
         ELSE
           Rdoff.ReadData(m.fileName, m.libOfs, m.hdrSize, dataBuf, WORD(m.finalDataOfs - totalCodeLen), WORD(m.dataSize))
         END
       END;
       curMod := m;
-      memBefore := SYSTEM.MemAvail();
       ImpReset;
       (* two-pass, matching SRC/TOC/LINK.MOD's own PerformLinking: collect
          IMPORT records first (a RELOC may reference an import that appears
          later in the same header-record stream), then apply RELOC/SEGRELOC.
-         SEGRELOC only matters in EXE mode (see OnSegReloc's comment). *)
+         SEGRELOC only matters in EXE/NE mode (see OnSegReloc's comment). In
+         ModeSExe, OnSegReloc's AddReloc calls append to the process-lifetime
+         relHead/relTail MZ-relocation list (consumed by WriteOutputExe,
+         never freed per-module) -- that growth is real, expected output,
+         not a per-module leak, which is why no leak guard wraps this
+         per-module loop; see the single whole-run guard in Run instead.
+         ModeNe similarly grows NE.MOD's own process-lifetime reloc chains
+         (NeOnReloc/NeOnSegReloc -> NE.OnReloc/NE.OnSegReloc), released only
+         once by NE.ResetRelocs, called once before this whole loop starts
+         (see Run). *)
       Rdoff.ScanRelocs(m.fileName, m.libOfs, m.hdrSize, OnImportForLink, NIL, NIL);
-      IF mode = ModeExe THEN
+      IF mode = ModeSExe THEN
         Rdoff.ScanRelocs(m.fileName, m.libOfs, m.hdrSize, NIL, OnReloc, OnSegReloc)
+      ELSIF mode = ModeNe THEN
+        Rdoff.ScanRelocs(m.fileName, m.libOfs, m.hdrSize, NIL, NeOnReloc, NeOnSegReloc)
       ELSE
         Rdoff.ScanRelocs(m.fileName, m.libOfs, m.hdrSize, NIL, OnReloc, NIL)
       END;
-      ImpFree;
-      LeakGuard(memBefore, "PerformLinking (per-module import scan)")
+      ImpFree
     END;
     m := m.next
   END;
@@ -835,11 +915,19 @@ BEGIN
     FindSymbol("start", e);
     IF ~SymFound(e) THEN LogErr.Error("tlink: 'start' entry symbol not found"); RETURN END;
     owner := SymOwner(e);
-    IF mode = ModeExe THEN
+    IF mode = ModeSExe THEN
       entryIp := WORD(SymOffset(e));
       IF SymSegId(e) = Rdoff.SegCode THEN entryIp := entryIp + WORD(owner.finalCodeOfs)
       ELSIF SymSegId(e) = Rdoff.SegData THEN entryIp := entryIp + WORD(owner.finalDataOfs)
       END
+    ELSIF mode = ModeNe THEN
+      (* the NE header's own entry-CS field is a fixed 1-based segment
+         index (NE.SegCode) -- unlike ModeSExe's MZ header, there is no
+         data-relative entry case to support: 'start' must live in CODE. *)
+      IF SymSegId(e) # Rdoff.SegCode THEN
+        LogErr.Error("tlink: /T=ne: 'start' must be in the CODE segment"); RETURN
+      END;
+      entryIp := WORD(SymOffset(e) + owner.finalCodeOfs)
     ELSE
       entryIp := WORD(SymOffset(e) + owner.finalCodeOfs)
     END
@@ -1040,6 +1128,26 @@ PROCEDURE ProcessBinaryInput(name: ARRAY OF CHAR);
 BEGIN ScanFile(name)
 END ProcessBinaryInput;
 
+(* ParseDecimal: plain decimal (not hex, unlike /ORG=) -- matches how a
+   stack-size switch is conventionally specified in this project (e.g.
+   SRC/TOC's own "$M stack,min,max" directive, DOCS/OBERLANG.MD). *)
+PROCEDURE ParseDecimal(s: ARRAY OF CHAR; label: ARRAY OF CHAR): LONGINT;
+  VAR v: LONGINT; i: INTEGER; msg: ARRAY 64 OF CHAR;
+BEGIN
+  v := LONGINT(0); i := 0;
+  IF s[0] = 0X THEN
+    Strings.Copy("tlink: ", msg); Strings.Append(label, msg); Strings.Append(" requires a decimal value", msg);
+    LogErr.Error(msg); RETURN LONGINT(0)
+  END;
+  WHILE s[i] # 0X DO
+    IF (s[i] >= "0") & (s[i] <= "9") THEN v := v * LONGINT(10) + LONGINT(ORD(s[i]) - ORD("0"))
+    ELSE LogErr.Error2("tlink: invalid decimal value: ", s); RETURN v
+    END;
+    INC(i)
+  END;
+  RETURN v
+END ParseDecimal;
+
 (* MatchSwitchVal: case-insensitive prefix match; on success copies the
    remainder of 'arg' (after 'pfx') into 'val'.
    Parameters: arg — the command-line argument; pfx — the switch prefix to
@@ -1081,8 +1189,12 @@ BEGIN
   Out.String("Options:"); Out.Ln;
   Out.Ln;
   Out.String(" /T=com      Tiny model .COM output (default)"); Out.Ln;
-  Out.String(" /T=exe      Small model .EXE output"); Out.Ln;
+  Out.String(" /T=sexe     Small model .EXE output"); Out.Ln;
   Out.String(" /T=texe     Tiny model .EXE output (DS=CS=SS=PSP, no JMP stub)"); Out.Ln;
+  Out.String(" /T=ne       New Executable (NE) output (DPMI16/OS2-1.x /CP"); Out.Ln;
+  Out.String("             shape, same as toc.exe's own /CP target)"); Out.Ln;
+  Out.String(" /S=nnnn     DATA segment stack reservation, decimal, /T=ne only"); Out.Ln;
+  Out.String("             (default 8192)"); Out.Ln;
   Out.String(" /T=sys      Tiny model .SYS device driver output"); Out.Ln;
   Out.String(" /A=xxxx     Device attribute (hex) - implies /T=sys"); Out.Ln;
   Out.String(" /N=name     Device name (max 8 chars, /T=sys only)"); Out.Ln;
@@ -1126,6 +1238,7 @@ BEGIN
   sysName := "        ";
   bgiDescr := ""; bgiCopyr := "";
   orgValue := 0;
+  neStackSize := LONGINT(8192);
   modHead := NIL; modTail := NIL;
   symHead := NIL; symTail := NIL;
   noSym.node := NIL; noSym.slot := 0;
@@ -1145,8 +1258,10 @@ BEGIN
     ELSIF MatchSwitchVal(arg, "/T=", val) THEN
       IF Strings.EqualICase(val, "com") THEN mode := ModeCom
       ELSIF Strings.EqualICase(val, "sys") THEN mode := ModeSys
-      ELSIF Strings.EqualICase(val, "exe") THEN mode := ModeExe
+      ELSIF Strings.EqualICase(val, "exe") THEN mode := ModeSExe
+      ELSIF Strings.EqualICase(val, "sexe") THEN mode := ModeSExe
       ELSIF Strings.EqualICase(val, "texe") THEN mode := ModeTExe
+      ELSIF Strings.EqualICase(val, "ne") THEN mode := ModeNe
       ELSIF Strings.EqualICase(val, "bgi2") THEN mode := ModeBgi2
       ELSIF Strings.EqualICase(val, "bin") THEN mode := ModeBin
       ELSE LogErr.Error2("tlink: unknown /T= mode: ", val); RETURN 1
@@ -1164,6 +1279,8 @@ BEGIN
       Strings.Copy(val, bgiCopyr)
     ELSIF MatchSwitchVal(arg, "/ORG=", val) THEN
       orgValue := ParseHex(val, "/ORG=")
+    ELSIF MatchSwitchVal(arg, "/S=", val) THEN
+      neStackSize := ParseDecimal(val, "/S=")
     ELSIF arg[0] = "@" THEN
       Strings.Extract(arg, 1, Strings.Length(arg) - 1, val);
       ParseListFile(val)
@@ -1177,13 +1294,15 @@ BEGIN
 
   Dos.ParamStr(argc, outFileName);
 
+  NE.ResetRelocs;
   SmartLink;
   IF LogErr.HaveErr() THEN RETURN 1 END;
-  IF mode = ModeExe THEN CalculateLayoutSmall ELSE CalculateLayoutTiny END;
+  IF (mode = ModeSExe) OR (mode = ModeNe) THEN CalculateLayoutSmall ELSE CalculateLayoutTiny END;
   IF LogErr.HaveErr() THEN RETURN 1 END;
   PerformLinking;
   IF LogErr.HaveErr() THEN RETURN 1 END;
-  IF mode = ModeExe THEN WriteOutputExe
+  IF mode = ModeSExe THEN WriteOutputExe
+  ELSIF mode = ModeNe THEN NE.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, neStackSize, entryIp, outFileName)
   ELSIF mode = ModeTExe THEN TExe.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, entryIp, outFileName)
   ELSIF mode = ModeBgi2 THEN Bgi2.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, outFileName, bgiDescr, bgiCopyr)
   ELSIF mode = ModeBin THEN Bin.Write(codeBuf, dataBuf, totalCodeLen, totalDataLen, totalBssLen, outFileName)

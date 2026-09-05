@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,O-*)
 MODULE Parser;
 (*
   Oberon compiler — declaration parsing (CONST/TYPE/VAR/PROCEDURE) and
@@ -6,7 +6,7 @@ MODULE Parser;
   Expressions: PExpr.  Statements: PStmt.
 *)
 IMPORT Dos, Files, LogErr, Scan, Syms, Cgen, Rdoff, Tar, Def, Import,
-       PExpr, PStmt, TDbg, Strings, StrTab;
+       PExpr, PExpr2, PStmt, TDbg, Strings, StrTab;
 
 CONST
   NameLen    = 33;
@@ -708,10 +708,12 @@ PROCEDURE ParseProcDecl;
       savedRetList: PStmt.BpNode;
       savedProloguePatch: LONGINT; savedProcDepth: INTEGER;
       skipNested: Cgen.Backpatch;
+      beforeJmp, afterJmp: LONGINT;
       inlNode, inlTail: Syms.InlineNode;
       idx: INTEGER; fp: Syms.Symbol; found: BOOLEAN;
       wordA: ARRAY 16 OF CHAR; wid: StrTab.TStrTabId;
       rtmp: Syms.TypeDesc; nInl: INTEGER;
+      isOvrEntry: BOOLEAN;
 BEGIN
   Scan.Next(PExpr.sc);  (* consume PROCEDURE *)
   IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("procedure name expected"); RETURN END;
@@ -768,9 +770,23 @@ BEGIN
         sym.fwdDecl := TRUE;
         Syms.SymCloseScope(); RETURN
       ELSIF Strings.Equal(wordA, "EXTERNAL") THEN
-        Scan.Next(PExpr.sc); PExpr.Expect(Scan.TSemi);
+        Scan.Next(PExpr.sc);
+        (* Optional explicit import name (EXTERNAL "Mod_Proc";) -- names the
+           RDOFF import symbol verbatim instead of the usual
+           <thisModule>_<name> mangling.  Needed to reach an export owned by
+           ANOTHER Oberon module (e.g. PExpr2_ParseFactor from inside
+           PExpr.MOD) without a real IMPORT, which Oberon's no-circular-
+           imports rule forbids here (PExpr2 already IMPORTs PExpr) -- see
+           OVR-BUG.MD "Bug 5" root-cause fix.  Every existing EXTERNAL
+           declaration (SYSTEM.ASM/EMS.ASM-backed) has no string literal
+           and keeps the old mangled-name behavior unchanged. *)
+        IF PExpr.sc.sym = Scan.TString THEN
+          Strings.Copy(PExpr.sc.sval, gname); Scan.Next(PExpr.sc)
+        ELSE
+          Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname)
+        END;
+        PExpr.Expect(Scan.TSemi);
         Syms.TypeCalcArgSize(pt);
-        Strings.Copy(parserModName, gname); Strings.Append("_", gname); Strings.Append(name, gname);
         sym.rdoffId := Rdoff.RdfAddImport(Cgen.CgObj, gname);
         sym.adr := 0;
         Syms.SymCloseScope(); RETURN
@@ -827,7 +843,8 @@ BEGIN
      linker's own symbol table (LINK.MOD's FindImport/SymOwner) is keyed
      by that same mangled name, never the bare proc name, so OvrEntryId's
      lookup at link time only works if the .OVR member matches it. *)
-  IF exported & (sym.level = 0) & PExpr.overlayMode THEN
+  isOvrEntry := exported & (sym.level = 0) & PExpr.overlayMode;
+  IF isOvrEntry THEN
     modIsOverlay := TRUE;
     AddOvrEntry(gname)
   END;
@@ -845,10 +862,48 @@ BEGIN
   prologuePatch := Cgen.CgPc() + LONGINT(5);
   PStmt.curProloguePatch := prologuePatch;
   Cgen.CgPrologue(0, pt.isFar);
+  (* OVR-BUG.MD epilogue counter: INC only after CgPrologue's own DS
+     reload to THIS module's own data segment (isFar is always TRUE
+     here -- isOvrEntry implies exported implies pt.isFar, set at
+     line ~748) -- the counter lives at DATA offset 0, reusing the
+     pre-existing, unconditional 2-byte placeholder every module already
+     reserves there (Cgen.EmitDataZero(2), ParseModule's own compile-start
+     -- see that call site's own comment).  Deliberately NOT a freshly
+     allocated slot: a new per-module WORD would need its own DATA offset
+     transmitted to SRC/LIB/OVERLAY.MOD somehow, which would in turn need
+     a new .OVR on-disk header field -- impossible without updating
+     BOOT/TOC.EXE's own compiled-in writer (CLAUDE.md: never modified by
+     an agent) -- see OVR-BUG.MD and LINKOVR.MOD's own header comment for
+     the full story of why the first version of this fix had to be
+     reverted.  Reusing the always-0 placeholder needs no new on-disk
+     information at all: SRC/LIB/OVERLAY.MOD's ReadCounter derives the
+     module's own runtime DATA segment straight from its already-resident,
+     already-patched CgPrologue bytes instead. *)
+  IF isOvrEntry THEN Cgen.CgIncDecMem(TRUE, TRUE, FALSE, LONGINT(0)) END;
 
+  (* §2.11 (DOCS/CODEGEN-SIZE.MD): the JMP over ParseDeclSeq's own span
+     only matters if that call emits code (a nested PROCEDURE) -- the
+     overwhelming majority of calls declare only CONST/TYPE/VAR (symbol-
+     table-only, zero code) and the jump lands on the very next
+     instruction, a pure no-op.  Whether ParseDeclSeq will emit anything
+     isn't knowable without either deep lookahead (skip over arbitrary
+     CONST/TYPE/VAR bodies to see if a PROCEDURE keyword follows -- a much
+     larger, error-prone piece of lookahead than this fix is worth) or
+     checking after the fact: emit the jump as before, parse the decls,
+     then compare CgPc() against where we started.  If NOTHING was
+     emitted beyond the jump's own 3 bytes, roll the code buffer back to
+     before the jump (safe: nothing else -- no reloc, no debug symbol --
+     can have anchored to those 3 bytes in between, since nothing else
+     was emitted either).  Otherwise patch the jump exactly as before. *)
+  beforeJmp := Cgen.CgPc();
   Cgen.CgJmpNear(skipNested);
+  afterJmp := Cgen.CgPc();
   ParseDeclSeq();
-  Cgen.CgPatchNear(skipNested);
+  IF Cgen.CgPc() = afterJmp THEN
+    Cgen.CgTruncateCode(beforeJmp)
+  ELSE
+    Cgen.CgPatchNear(skipNested)
+  END;
   PStmt.curProloguePatch := prologuePatch;
 
   PStmt.PatchFrameSize;
@@ -861,6 +916,11 @@ BEGIN
   END;
 
   PStmt.BpPatchFree(PStmt.retPatchList);
+  (* OVR-BUG.MD epilogue counter: DEC before CgEpilogue's own DS
+     restore (POP DS) -- every RETURN backpatches to exactly this one
+     tail via retPatchList/BpPatchFree above, so a single DEC here
+     covers every exit path. *)
+  IF isOvrEntry THEN Cgen.CgIncDecMem(TRUE, FALSE, FALSE, LONGINT(0)) END;
   Cgen.CgEpilogue(INTEGER(pt.lenOrDescOrArg), pt.isFar);
   WarnUnusedInScope;
   (* debug info: this procedure's params + locals (class AUTO), then close
@@ -885,7 +945,7 @@ BEGIN
   PStmt.curProcDepth := savedProcDepth;
 
   IF sym.fwdDecl THEN
-    PExpr.FwdPatchCalls(sym, sym.adr);
+    PExpr2.FwdPatchCalls(sym, sym.adr);
     sym.fwdDecl := FALSE
   END;
   PExpr.Expect(Scan.TSemi)
@@ -993,6 +1053,24 @@ END WarnUnusedInScope;
 (* For each IMPORT "<Mod>__init" with no sibling "<Mod>_xxx" reference:
      patch its CALL FAR site(s) to NOPs, then drop the RELOC + SEGRELOC
      records and the IMPORT record itself. *)
+(* Free/contiguous heap at the TRUE peak of a compile — symbol table, Cgen
+   object and every open temp all live at once.  This is the ONLY probe at
+   that instant: every DbgMemSize site fires at a module boundary, i.e. AFTER
+   cleanup, which reads ~150 KB higher and caused this investigation to
+   mis-attribute the peak twice (see DOCS/HISTORY.MD 2026-09-04).  Debug-only;
+   keep it — re-deriving the peak without it means another rebuild. *)
+PROCEDURE DbgPeak;
+VAR m: ARRAY 128 OF CHAR;
+BEGIN
+  IF ~LogErr.IsDebug() THEN RETURN END;
+  Strings.Copy("  [PEAK] avail=", m);
+  Strings.AppendInt(LONGINT(SYSTEM.MemAvail())*16 DIV 1024, m);
+  Strings.Append("kb maxblk=", m);
+  Strings.AppendInt(LONGINT(SYSTEM.MemMaxAvail())*16 DIV 1024, m);
+  Strings.Append("kb", m);
+  LogErr.Debug(m)
+END DbgPeak;
+
 PROCEDURE SanitizeImports;
   VAR imp, impPrev, impNext: Rdoff.ImportNode;
       r: Rdoff.RelocNode;
@@ -1127,10 +1205,20 @@ BEGIN
      this copy (and Scan.Mark/Restore's) must become pointer-held instead. *)
   PExpr.sc := s;
   Syms.SymInit;
-  IF LogErr.HaveErr() THEN RETURN END;
+  (* Every early RETURN must close the scanner: this procedure now OWNS it
+     (see the Scan.Close ownership note further down) and the caller no
+     longer closes, so bailing out without closing would leak the handle and
+     its 8 KB buffer -- which the caller's LeakGuard would immediately and
+     correctly report. *)
+  IF LogErr.HaveErr() THEN Scan.Close(PExpr.sc); RETURN END;
   Cgen.CgInit;
-  IF LogErr.HaveErr() THEN Syms.SymsFree(); RETURN END;
+  IF LogErr.HaveErr() THEN Syms.SymsFree(); Scan.Close(PExpr.sc); RETURN END;
   Import.ResetLoaded();
+  (* Unconditional 2-byte placeholder at every module's own DATA offset 0
+     (avoids a zero-length DATA segment).  Doubles as the OVR-BUG.MD
+     epilogue counter's own slot for a $O+ module -- see ParseProcDecl's
+     own isOvrEntry INC/DEC comment for why this exact slot, not a fresh
+     one, was chosen. *)
   Cgen.EmitDataZero(2);
   PExpr.modUsesFpu := FALSE;
   PExpr.boundsChk := FALSE;
@@ -1153,7 +1241,9 @@ BEGIN
   ProcessSyscomment(PExpr.sc);
   PExpr.Expect(Scan.TModule);
   ProcessSyscomment(PExpr.sc);
-  IF PExpr.sc.sym # Scan.TIdent THEN PExpr.Error("module name expected"); RETURN END;
+  IF PExpr.sc.sym # Scan.TIdent THEN
+    PExpr.Error("module name expected"); Scan.Close(PExpr.sc); RETURN
+  END;
   Strings.Copy(PExpr.sc.id, modName); Scan.Next(PExpr.sc);
   Strings.Copy(modName, parserModName); Strings.Copy(modName, curModName);
   Strings.Copy(modName, PExpr.modName);
@@ -1322,7 +1412,7 @@ BEGIN
     Cgen.EmitDataWord(0);
     initOfs := Cgen.CgPc();
     Rdoff.RdfAddGlobal(Cgen.CgObj, initName, Rdoff.SegCode, initOfs);
-    Cgen.Emit1(01EH);                             (* PUSH DS *)
+    Cgen.Emit1(BYTE(Cgen.OpPushDs));                             (* PUSH DS *)
     Cgen.Emit1(0B8H); dsImmAt := Cgen.CgPc(); Cgen.EmitW(0);  (* MOV AX,imm16 *)
     Rdoff.RdfAddSegReloc(Cgen.CgObj, Rdoff.SegCode, dsImmAt, Rdoff.SegData);
     Cgen.Emit2(08EH, 0D8H);                       (* MOV DS, AX *)
@@ -1332,7 +1422,7 @@ BEGIN
     Rdoff.RdfAddReloc(Cgen.CgObj, Rdoff.SegCode, addrField, 2, Rdoff.SegData, FALSE);
     Cgen.Emit1(000H);
     Cgen.Emit2(074H, 002H);   (* JE .cont (skip POP DS + RETF below) *)
-    Cgen.Emit1(01FH);                             (* POP DS *)
+    Cgen.CgPopDs();                             (* POP DS *)
     Cgen.Emit1(BYTE(Cgen.OpRetf));
     (* .cont: INC word [guardOfs] *)
     Cgen.Emit2(0FFH, 006H);
@@ -1358,7 +1448,7 @@ BEGIN
       ip := ip^.next
     END;
     IF IsLex(Scan.TBegin) THEN ParseStatSeq(Syms.TypeNotype) END;
-    Cgen.Emit1(01FH);                             (* POP DS *)
+    Cgen.CgPopDs();                             (* POP DS *)
     Cgen.Emit1(BYTE(Cgen.OpRetf))
   END;
 
@@ -1373,6 +1463,25 @@ BEGIN
      non-exported globals and procedures.  Per-procedure warnings
      already emitted as each procedure's scope closed. *)
   WarnUnusedInScope;
+
+  (* Source is fully consumed at this point (PExpr.Expect(Scan.TDot) above was
+     the last token) and NOTHING below reads it again -- the whole remaining
+     body is codegen finalisation plus temp-file writing, and it never touches
+     PExpr.sc or Scan.*.  Closing here frees the scanner's own 8 KB Files
+     buffer BEFORE the .rdf/.def/.dbg/.om temps open, cutting one buffer off
+     the peak (DOS-memory reduction, 2026-09-04: up to six files were open
+     simultaneously at the peak, 8 KB of heap each).
+     Warnings below still work: Scanner.filename is a copied string in the
+     record, not read back from the file.
+     OWNERSHIP: the caller (TocMain.CompileModule) holds its own full-record
+     COPY of the Scanner sharing this DOS handle and heap buffer (see the
+     aliasing invariant at the top of this procedure).  Closing here TAKES
+     OVER that responsibility -- the per-copy guards (Scanner.fileOpen,
+     Files' handle # -1 / buf # NIL) all live in the OTHER copy's own fields
+     and would NOT stop it re-closing the handle and re-DISPOSEing the
+     buffer.  The caller's Scan.Close call was therefore removed; do not
+     reinstate it without also removing this one. *)
+  Scan.Close(PExpr.sc);
 
   Strings.Copy(modName, rdfName); Strings.Append(".RDF", rdfName); SYSTEM.UPSTR(rdfName);
   Strings.Copy(modName, defName); Strings.Append(".DEF", defName); SYSTEM.UPSTR(defName);
@@ -1426,64 +1535,79 @@ BEGIN
     IF LogErr.HaveErr() THEN
       IF rfOpen THEN Files.Close(rf) END
     ELSE
-    (* write .def into a temp *)
-    dfOpen := Files.ReWriteTemp(df);
-    IF dfOpen THEN
-      Def.DefWrite(df, modName)
-    ELSE
-      LogErr.Error("oc: cannot create .def temp")
-    END;
-    (* write .DBG into a temp — always present (0-byte when $D-); the writer
-       emits nothing when collection was disabled. *)
-    dgOpen := Files.ReWriteTemp(dg);
-    IF dgOpen THEN
-      TDbg.WriteDbg(dg)
-    ELSE
-      LogErr.Error("oc: cannot create .dbg temp")
-    END;
-    (* write .OVR into a temp -- only for modules with $O+ entry points
-       (DOCS/OVR.MD §11.2); non-overlay modules get no .OVR member at all. *)
-    ovOpen := FALSE;
-    IF modIsOverlay THEN
-      ovOpen := Files.ReWriteTemp(ov);
-      IF ovOpen THEN
-        WriteOvrMember(ov)
-      ELSE
-        LogErr.Error("oc: cannot create .ovr temp")
-      END
-    END;
-    (* Symbol table is no longer needed: .def captures all exported info.
-       Release it now to free DOS heap before the entry-stub generator
-       allocates its own ObjFile. *)
-    Syms.SymsFree();
-    (* pack .om — stream the .rdf/.def temps and any $L extras directly into the
-       tar.  No slurp buffers: TarAddFromFile copies through a 512-byte stack
-       buffer. *)
+    (* Pack .om one member at a time, opening each of .def/.dbg/.ovr's own
+       temp only right before it's written and closing it again right
+       after its content is streamed into the archive -- 2026-09-03,
+       DOS-memory reduction pass.  Previously all of rf/df/dg/ov stayed
+       open SIMULTANEOUSLY from .rdf's own write all the way through the
+       final archive pack (each with its own Files.MOD-internal buffer),
+       which was the real cause of "oc: cannot create .dbg temp"/".ovr
+       temp" failures under a tight --memkb budget -- not a lack of heap,
+       but up to 4 file handles' worth of buffer held open at once for no
+       reason once .rdf's own content was already fully settled.  Safe:
+       nothing reads rf/df/dg/ov back after its own member is packed (the
+       $L-extras merge loop above already finished settling rf's final
+       content before this point), and Tar.TarAddFromFile/TarBegin/TarEnd
+       were already a pure sequential-append design with no requirement
+       that every source file be open at once -- this only changes WHEN
+       each temp opens/closes, not what gets written or in what order. *)
     IF Files.ReWrite(lf, libName) THEN
       Tar.TarBegin(lf);
-      (* stream .rdf temp *)
+      (* stream .rdf temp, then close it immediately -- frees its buffer
+         before .def's own temp ever opens. *)
       Files.Seek(rf, LONGINT(0));
       IF Files.Size(rf) > LONGINT(0) THEN
         Tar.TarAddFromFile(lf, rdfName, rf, Files.Size(rf))
       END;
-      (* stream .def temp *)
+      Files.Close(rf); rfOpen := FALSE;
+
+      (* TEMPORARY PEAK PROBE (memory investigation) -- the true peak of a
+         compile is HERE: symbol table + Cgen object + every open temp are
+         all live at once.  Every existing DbgMemSize site samples only at
+         module boundaries, i.e. after cleanup, which is exactly why the
+         peak was previously mis-attributed. *)
+      DbgPeak;
+      (* write .def into a temp, stream it, close it *)
+      dfOpen := Files.ReWriteTemp(df);
       IF dfOpen THEN
+        Def.DefWrite(df, modName);
         Files.Seek(df, LONGINT(0));
         IF Files.Size(df) > LONGINT(0) THEN
           Tar.TarAddFromFile(lf, defName, df, Files.Size(df))
+        END;
+        Files.Close(df); dfOpen := FALSE
+      ELSE
+        LogErr.Error("oc: cannot create .def temp")
+      END;
+
+      (* write .DBG into a temp, stream it, close it -- always present
+         (0-byte member when $D-) so the archive layout is uniform for
+         the linker. *)
+      dgOpen := Files.ReWriteTemp(dg);
+      IF dgOpen THEN
+        TDbg.WriteDbg(dg);
+        Files.Seek(dg, LONGINT(0));
+        Tar.TarAddFromFile(lf, dbgName, dg, Files.Size(dg));
+        Files.Close(dg); dgOpen := FALSE
+      ELSE
+        LogErr.Error("oc: cannot create .dbg temp")
+      END;
+
+      (* write .OVR into a temp, stream it, close it -- only for modules
+         with $O+ entry points (DOCS/OVR.MD §11.2); non-overlay modules
+         get no .OVR member at all. *)
+      ovOpen := FALSE;
+      IF modIsOverlay THEN
+        IF Files.ReWriteTemp(ov) THEN
+          WriteOvrMember(ov);
+          Files.Seek(ov, LONGINT(0));
+          Tar.TarAddFromFile(lf, ovrName, ov, Files.Size(ov));
+          Files.Close(ov)
+        ELSE
+          LogErr.Error("oc: cannot create .ovr temp")
         END
       END;
-      (* stream .DBG temp — ALWAYS emitted (0-byte member when $D-) so the
-         archive layout is uniform for the linker. *)
-      IF dgOpen THEN
-        Files.Seek(dg, LONGINT(0));
-        Tar.TarAddFromFile(lf, dbgName, dg, Files.Size(dg))
-      END;
-      (* stream .OVR temp — only present for $O+ overlay-eligible modules. *)
-      IF ovOpen THEN
-        Files.Seek(ov, LONGINT(0));
-        Tar.TarAddFromFile(lf, ovrName, ov, Files.Size(ov))
-      END;
+
       Tar.TarEnd(lf);
       Files.Close(lf);
       (* Disk-full / write errors are latched inside Files (wrErr survives
@@ -1493,13 +1617,17 @@ BEGIN
         Files.Delete(libName)
       END
     ELSE
-      LogErr.Error2("oc: cannot create ", libName)
+      LogErr.Error2("oc: cannot create ", libName);
+      Files.Close(rf); rfOpen := FALSE
     END;
-    (* close (auto-delete) the .rdf/.def/.dbg/.ovr temps *)
-    Files.Close(rf);
-    IF dfOpen THEN Files.Close(df) END;
-    IF dgOpen THEN Files.Close(dg) END;
-    IF ovOpen THEN Files.Close(ov) END;
+    (* Symbol table is no longer needed: .def captures all exported info.
+       Release it now to free DOS heap before the entry-stub generator
+       allocates its own ObjFile.  (Moved after the pack loop above,
+       2026-09-03: freeing it earlier bought nothing once rf/df/dg/ov
+       stopped overlapping -- Syms's own heap use and the temp files'
+       Files-buffer use were never actually competing for the same
+       memory at the same instant either way.) *)
+    Syms.SymsFree();
     IF ~LogErr.HaveErr() THEN LogErr.Info2("wrote ", libName) END
     END   (* IF LogErr.HaveErr() *)
   END;
@@ -1541,6 +1669,27 @@ BEGIN
   ovrEntriesTail := NIL; nOvrEntries := 0
 END ParseModule;
 
+(* RawInit: the module's own one-time init, moved out of a BEGIN block so
+   this module can be $O+ (DOCS/OVR.MD §4 forbids a BEGIN block on an
+   overlay-eligible module -- same move as PStmt.RawInit/PExpr2.WireHook's
+   own call site).  Every one of these globals except parserMinMemPara/
+   parserMaxMemPara is ALSO reset once per compile at the top of
+   ParseModule itself (initImpsHead/Tail/nInitImps, extraRdfsHead/Tail,
+   ovrEntriesHead/Tail/nOvrEntries/modIsOverlay -- see ParseModule's own
+   "reset ..." comments) or effectively reset before first real use each
+   compile (nFwdRefs, zeroed at the top of every ParseTypeDecl call) --
+   this RawInit call exists only to give them a defined value before the
+   FIRST compile of the process, matching the old BEGIN block's own
+   behaviour exactly, not to change per-compile semantics.
+   parserMinMemPara/parserMaxMemPara are the one genuine exception: no
+   per-compile reset exists for them anywhere (only a conditional
+   override in the ($M ...) directive parser) -- a pre-existing gap,
+   unrelated to this $O+ conversion, left exactly as before: a module
+   compiled without $M in the same process as an earlier module that DID
+   set $M keeps inheriting that earlier value, same as under the old
+   BEGIN-block scheme (BEGIN only ever ran once per process either way).
+   Called once from TocMain.Run, mirroring PStmt.RawInit's own call site
+   (before any real parsing starts). *)
 BEGIN
   parserModName := ""; parserSystemMode := FALSE;
   parserEntryProc := ""; parserStackSize := 0;

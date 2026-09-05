@@ -171,6 +171,18 @@ PROCEDURE GetSS*: INTEGER;
 PROCEDURE GetCS*: INTEGER;
   INLINE(08CH, 0C8H);
 
+(* GetSP(): the live SP value, read at the call site (i.e. immediately
+   after this procedure's own CALL has pushed the 2/4-byte return
+   address — NOT the caller's pre-call SP; callers wanting a stable
+   per-procedure depth marker should read it once near their own
+   prologue and treat that as the baseline, not compare against a raw
+   constant). MOV AX, SP: 8B C4 (opcode 8B = MOV r16,r/m16; ModRM C4 =
+   mod=11,reg=000(AX),rm=100(SP)) — same whole-body INLINE pattern as
+   GetDS/GetES/GetSS/GetCS above, no SYSTEM.ASM change needed. Added
+   2026-08-23 for OVR-BUG.MD Bug 5's stack-depth assertion. *)
+PROCEDURE GetSP*: WORD;
+  INLINE(08BH, 0C4H);
+
 (* PTR(s, o: WORD): ADDRESS
    Constructs a far pointer from segment s and offset o.
    Caller pushes s first (deepest), then o.

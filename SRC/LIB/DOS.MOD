@@ -272,28 +272,12 @@ END GetEnv;
    INT 21h AH=2Fh.
    Parameters: none.
    Result: far address of the current DTA. *)
-PROCEDURE GetDTA*: SYSTEM.ADDRESS;
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2F00H;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  RETURN SYSTEM.PTR(r.ES, r.BX)
-END GetDTA;
+PROCEDURE GetDTA*: SYSTEM.ADDRESS; FAR; EXTERNAL;
 
 (* SetDTA: set the Disk Transfer Area address, via INT 21h AH=1Ah.
    Parameters: dta — far address to use as the new DTA.
    Result: none. *)
-PROCEDURE SetDTA*(dta : SYSTEM.ADDRESS);
-  VAR r: SYSTEM.Registers; p : POINTER TO CHAR;
-BEGIN
-  p := dta;
-  r.AX := 1A00H;
-  r.DS := SYSTEM.SEG(p^);
-  r.DX := SYSTEM.OFS(p^);
-  r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetDTA;
+PROCEDURE SetDTA*(dta : SYSTEM.ADDRESS); FAR; EXTERNAL;
 
 (* FindFirst: locate the first directory entry matching `Path` (DOS-style
    wildcards `*` and `?` allowed) whose attribute is `Attr`-compatible
@@ -364,164 +348,64 @@ END FindNext;
    directory already exists or cannot be created.  Sets DosError.
    Parameters: Path — ASCIIZ directory path to create.
    Result: TRUE on success, FALSE on failure. *)
-PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN;
-  VAR r: SYSTEM.Registers; pathz: ARRAY 80 OF CHAR; i: INTEGER;
-BEGIN
-  i := 0;
-  WHILE (i < LEN(pathz) - 1) & (Path[i] # 0X) DO
-    pathz[i] := Path[i]; INC(i)
-  END;
-  pathz[i] := 0X;
-  r.AX := 3900H;
-  r.DS := SYSTEM.SEG(pathz);
-  r.DX := SYSTEM.OFS(pathz);
-  r.ES := SYSTEM.GetES();
-  r.Flags := SYSTEM.FCarry;
-  SYSTEM.Intr(21H, r);
-  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
-    DosError := r.AX; RETURN FALSE
-  END;
-  DosError := 0; RETURN TRUE
-END MkDir;
+PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN; FAR; EXTERNAL;
 
 (* ChDir: change current directory.  Returns TRUE on success.  Sets
    DosError.
    Parameters: Path — ASCIIZ directory path to change into.
    Result: TRUE on success, FALSE on failure. *)
-PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN;
-  VAR r: SYSTEM.Registers; pathz: ARRAY 80 OF CHAR; i: INTEGER;
-BEGIN
-  i := 0;
-  WHILE (i < LEN(pathz) - 1) & (Path[i] # 0X) DO
-    pathz[i] := Path[i]; INC(i)
-  END;
-  pathz[i] := 0X;
-  r.AX := 3B00H;
-  r.DS := SYSTEM.SEG(pathz);
-  r.DX := SYSTEM.OFS(pathz);
-  r.ES := SYSTEM.GetES();
-  r.Flags := SYSTEM.FCarry;
-  SYSTEM.Intr(21H, r);
-  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
-    DosError := r.AX; RETURN FALSE
-  END;
-  DosError := 0; RETURN TRUE
-END ChDir;
+PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN; FAR; EXTERNAL;
 
 (* GetDate: retrieve the current system date, via INT 21h AH=2Ah.
    Parameters: Year — output, full year (e.g. 2026); Month — output,
    1..12; Day — output, 1..31; DayOfWeek — output, 0=Sunday..6=Saturday.
    Result: none (all four VAR parameters are filled). *)
-PROCEDURE GetDate*(VAR Year,Month,Day,DayOfWeek: INTEGER);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2A00H;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  Year := r.CX;
-  Month := ORD(SYSTEM.LSR(r.DX, 8));
-  Day := r.DX MOD 256;
-  DayOfWeek := r.AX MOD 256
-END GetDate;
+PROCEDURE GetDate*(VAR Year,Month,Day,DayOfWeek: INTEGER); FAR; EXTERNAL;
 
 (* SetDate: set the system date, via INT 21h AH=2Bh.
    Parameters: Year — full year; Month — 1..12; Day — 1..31.
    Result: none. *)
-PROCEDURE SetDate*(Year,Month,Day: INTEGER);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2B00H;
-  r.CX := Year;
-  r.DX := Day + SYSTEM.LSL(Month, 8);
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetDate;
+PROCEDURE SetDate*(Year,Month,Day: INTEGER); FAR; EXTERNAL;
 
 (* GetTime: retrieve the current system time, via INT 21h AH=2Ch.
    Parameters: Hour — output, 0..23; Minute — output, 0..59;
    Second — output, 0..59; Sec100 — output, hundredths of a second,
    0..99.
    Result: none (all four VAR parameters are filled). *)
-PROCEDURE GetTime*(VAR Hour,Minute,Second,Sec100: INTEGER);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2C00H;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  Hour := ORD(SYSTEM.LSR(r.CX, 8));
-  Minute := r.CX MOD 256;
-  Second := ORD(SYSTEM.LSR(r.DX, 8));
-  Sec100 := r.DX MOD 256
-END GetTime;
+PROCEDURE GetTime*(VAR Hour,Minute,Second,Sec100: INTEGER); FAR; EXTERNAL;
 
 (* SetTime: set the system time, via INT 21h AH=2Dh.
    Parameters: Hour — 0..23; Minute — 0..59; Second — 0..59;
    Sec100 — hundredths of a second, 0..99.
    Result: none. *)
-PROCEDURE SetTime*(Hour,Minute,Second,Sec100: INTEGER);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2D00H;
-  r.CX := Minute + SYSTEM.LSL(Hour, 8);
-  r.DX := Sec100 + SYSTEM.LSL(Second, 8);
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetTime;
+PROCEDURE SetTime*(Hour,Minute,Second,Sec100: INTEGER); FAR; EXTERNAL;
 
 (* GetCBreak: query the current Ctrl-Break check setting, via
    INT 21h AH=33h/AL=00h.
    Parameters: Break — output, TRUE if extended Ctrl-Break checking is
    enabled.
    Result: none (Break is filled in place). *)
-PROCEDURE GetCBreak*(VAR Break: BOOLEAN);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 3300H;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  Break := (r.DX MOD 256) # 0
-END GetCBreak;
+PROCEDURE GetCBreak*(VAR Break: BOOLEAN); FAR; EXTERNAL;
 
 (* SetCBreak: enable or disable extended Ctrl-Break checking, via
    INT 21h AH=33h/AL=01h.
    Parameters: Break — TRUE to enable extended checking, FALSE to
    disable it.
    Result: none. *)
-PROCEDURE SetCBreak*(Break: BOOLEAN);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 3301H;
-  IF Break THEN r.DX := 1 ELSE r.DX := 0 END;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetCBreak;
+PROCEDURE SetCBreak*(Break: BOOLEAN); FAR; EXTERNAL;
 
 (* GetVerify: query the current disk-write verify flag, via
    INT 21h AH=54h.
    Parameters: Verify — output, TRUE if verify-after-write is enabled.
    Result: none (Verify is filled in place). *)
-PROCEDURE GetVerify*(VAR Verify: BOOLEAN);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 5400H;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  Verify := (r.AX MOD 256) # 0
-END GetVerify;
+PROCEDURE GetVerify*(VAR Verify: BOOLEAN); FAR; EXTERNAL;
 
 (* SetVerify: enable or disable disk-write verification, via
    INT 21h AH=2Eh.
    Parameters: Verify — TRUE to enable verify-after-write, FALSE to
    disable it.
    Result: none. *)
-PROCEDURE SetVerify*(Verify: BOOLEAN);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 2E00H;
-  IF Verify THEN r.DX := 1 ELSE r.DX := 0 END;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetVerify;
+PROCEDURE SetVerify*(Verify: BOOLEAN); FAR; EXTERNAL;
 
 (* DiskFree: report the free space on a drive, via INT 21h AH=36h (get
    free disk space): AX=sectors/cluster, BX=free clusters, CX=bytes/sector.
@@ -560,30 +444,14 @@ END DiskSize;
    Parameters: IntNo — interrupt number to query; Vector — output, far
    address of the current handler.
    Result: none (Vector is filled in place). *)
-PROCEDURE GetIntVec*(IntNo: BYTE; VAR Vector: SYSTEM.ADDRESS);
-  VAR r: SYSTEM.Registers;
-BEGIN
-  r.AX := 3500H + IntNo;
-  r.DS := SYSTEM.GetDS(); r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r);
-  Vector := SYSTEM.PTR(r.ES, r.BX)
-END GetIntVec;
+PROCEDURE GetIntVec*(IntNo: BYTE; VAR Vector: SYSTEM.ADDRESS); FAR; EXTERNAL;
 
 (* SetIntVec: install a new handler address for an interrupt vector, via
    INT 21h AH=25h (set interrupt vector).
    Parameters: IntNo — interrupt number to modify; Vector — far address
    of the new handler.
    Result: none. *)
-PROCEDURE SetIntVec*(IntNo: BYTE; Vector: SYSTEM.ADDRESS);
-  VAR r: SYSTEM.Registers; p: POINTER TO CHAR;
-BEGIN
-  p := Vector;
-  r.AX := 2500H + IntNo;
-  r.DS := SYSTEM.SEG(p^);
-  r.DX := SYSTEM.OFS(p^);
-  r.ES := SYSTEM.GetES();
-  SYSTEM.Intr(21H, r)
-END SetIntVec;
+PROCEDURE SetIntVec*(IntNo: BYTE; Vector: SYSTEM.ADDRESS); FAR; EXTERNAL;
 
 (* FExpand: expand a path into its canonical fully-qualified form
    (drive, directory, name), via INT 21h AX=6000h ("truename"); falls
@@ -660,6 +528,39 @@ BEGIN
   END
 END FSplit;
 
+(* PathJoin: concatenate a directory and a filename into dst, inserting a
+   single '\' between them only when one is actually needed (pure string
+   parsing, no DOS call).  The counterpart to FSplit above, whose Dir output
+   already carries its trailing '\' or ':' — passing that Dir straight back in
+   here must NOT produce a doubled separator, which is what the trailing-char
+   test avoids.  Both '\' and '/' count as separators: DOS itself accepts
+   either, and an OBERON_LIB or -c path typed with forward slashes would
+   otherwise be joined as "dir//file".
+   Parameters: dst — output buffer (truncated safely at LEN(dst)-1);
+   dir — directory part, with or without a trailing separator; file — the
+   name to append.
+   Result: none (dst is filled and 0X-terminated).
+
+   Shared by Import.FindImportFile and Link's archive search: both previously
+   kept private near-identical copies that had DIVERGED — Link's tested for
+   '/' and Import's did not — so a forward-slash directory joined correctly
+   in one and produced a doubled separator in the other.  Keep this the single
+   definition (code review, 2026-09-04). *)
+PROCEDURE PathJoin*(VAR dst: ARRAY OF CHAR; dir, file: ARRAY OF CHAR);
+  VAR i, j: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (i < LEN(dst) - 1) & (dir[i] # 0X) DO dst[i] := dir[i]; INC(i) END;
+  IF (i > 0) & (dst[i-1] # "\") & (dst[i-1] # "/") & (i < LEN(dst) - 1) THEN
+    dst[i] := "\"; INC(i)
+  END;
+  j := 0;
+  WHILE (i < LEN(dst) - 1) & (file[j] # 0X) DO
+    dst[i] := file[j]; INC(i); INC(j)
+  END;
+  dst[i] := 0X
+END PathJoin;
+
 (* Exec: load and execute an external .EXE / .COM via INT 21h function 4B00h.
 
    Path is the ASCIIZ path to the executable; CmdLine is the command-tail
@@ -735,6 +636,21 @@ END Exec;
 PROCEDURE SwapVectors*;
 BEGIN
 END SwapVectors;
+
+(* Link in DOS.ASM's object, which implements the 14 EXTERNAL procedures
+   declared above (GetDate/SetDate/GetTime/SetTime/GetCBreak/SetCBreak/
+   GetVerify/SetVerify/GetDTA/SetDTA/GetIntVec/SetIntVec/MkDir/ChDir).
+   Each was a thin INT 21h wrapper whose whole Oberon body was "fill a
+   SYSTEM.Registers record, call SYSTEM.Intr, read the fields back" -- ~30
+   bytes of stack and a store per field to make a two-instruction DOS call.
+
+   DiskFree/DiskSize deliberately stay in Oberon: unlike the rest they do
+   real 32-bit arithmetic (sectors x bytes x clusters), which is clearer
+   and safer here than as a hand-written widening multiply.
+
+   Same .MOD/.ASM pairing as EMS.MOD/EMS.ASM and OVERLAY.MOD/OVERLAY.ASM;
+   regenerate DOS.RDF with `make regen-asm` after editing DOS.ASM. *)
+(*$L DOS.RDF*)
 
 BEGIN
     DosError    := 0;

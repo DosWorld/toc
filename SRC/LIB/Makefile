@@ -30,8 +30,14 @@ install: all
 $(TASM): $(BOOT_DIR)/$(TASM)
 	cp $(BOOT_DIR)/$(TASM) $(TASM)
 
-$(TOC): $(BOOT_DIR)/$(TOC)
+# The toolchain is three binaries: TOC.EXE is only a driver and execs
+# TOCC.EXE/TOCL.EXE from its OWN directory, so all three must be staged
+# here together -- staging the driver alone gives "toc: cannot exec
+# TOCC.EXE" on the first compile.
+$(TOC): $(BOOT_DIR)/$(TOC) $(BOOT_DIR)/TOCC.EXE $(BOOT_DIR)/TOCL.EXE
 	cp $(BOOT_DIR)/$(TOC) $(TOC)
+	cp $(BOOT_DIR)/TOCC.EXE TOCC.EXE
+	cp $(BOOT_DIR)/TOCL.EXE TOCL.EXE
 
 SYSTEM.OM: SYSTEM.RDF SYSTEM.MOD $(TOC)
 	$(XTRUN) $(TOC) $(TOCFLAGS) /SYSTEM SYSTEM.MOD
@@ -39,6 +45,7 @@ SYSTEM.OM: SYSTEM.RDF SYSTEM.MOD $(TOC)
 regen-asm: $(TASM)
 	$(XTRUN) $(TASM) $(TOCFLAGS) SYSTEM.ASM
 	$(XTRUN) $(TASM) $(TOCFLAGS) EMS.ASM
+	$(XTRUN) $(TASM) $(TOCFLAGS) DOS.ASM
 	$(XTRUN) $(TASM) $(TOCFLAGS) DETECT.ASM
 	$(XTRUN) $(TASM) $(TOCFLAGS) WINCB.ASM
 	$(XTRUN) $(TASM) $(TOCFLAGS) KMOUSE.ASM
@@ -72,7 +79,7 @@ STRINGS.OM: STRINGS.MOD SYSTEM.OM $(TOC)
 BASE64.OM: BASE64.MOD STRINGS.OM SYSTEM.OM $(TOC)
 	$(XTRUN) $(TOC) $(TOCFLAGS) BASE64.MOD
 
-DOS.OM: DOS.MOD SYSTEM.OM $(TOC)
+DOS.OM: DOS.RDF DOS.MOD SYSTEM.OM $(TOC)
 	$(XTRUN) $(TOC) $(TOCFLAGS) DOS.MOD
 
 CRT.OM: CRT.MOD SYSTEM.OM $(TOC)

@@ -1177,3 +1177,320 @@ header, the second fixup table, the `RETF`-based dispatch return).
   compile+link+append cycle was independently verified gen2==gen3
   byte-identical for `TOC.EXE`, `TOC.OVR`, and every individual `.OM`.
   See DOCS/OVR.MD §16 for full detail.
+
+## 2026-09-03 — Bug 6 CLOSED: `PSTMT.MOD $O+` (5th overlay module) —
+## root cause was a stale `BOOT/TOC.EXE` bootstrap, not the source
+
+Goal: expand `$O+` overlay coverage from 4 modules
+(`SCAN`/`DEF`/`LINKNE`/`PEXPR2`) to 5 (`+ PSTMT`), completing the
+DOS-memory-pressure reduction plan. `PSTMT.MOD` already carried
+`(*$D-,O+*)` in source; the blocker was a real, reproducible crash on
+ANY true, clean gen1 build (one bootstrapped fresh from `BOOT/TOC.EXE`,
+matching `make test`'s own process exactly): zero output, DOS exit code
+35, before `LogErr.Open` ever ran.
+
+Two real, permanent source bugs were found and fixed along the way
+(both unrelated to the eventual root cause, both kept):
+1. **`Files.BlockRead`'s `avail` computation** (`SRC/LIB/FILES.MOD`)
+   used plain unsigned WORD subtraction (`F.bufSize - F.bufPos`); if
+   `F.bufPos` ever exceeded `F.bufSize` the result wrapped to a huge
+   positive value instead of signalling "buffer exhausted",
+   `SYSTEM.MOVE` then reading past the real 8 KB buffer. Fixed via
+   LONGINT arithmetic with a clamp to 0.
+2. **`PatchSitesForModule`'s entryOfsCache mis-caching**
+   (`SRC/LIB/OVERLAY.MOD`): resolved the CALLEE's own `ModuleHeader`
+   correctly but cached the result into the CALLER's (`u`'s own)
+   `entryOfsCache` instead of the callee's.
+
+Neither fix resolved the actual blocker. Extensive instrumentation
+(file-based canary probes at every stage of `TOC.MOD`'s `Run`/
+`SetupOvr` and `OVERLAY.MOD`'s `OvrDispatch`, then raw
+`INT 21h`-based ASM probes directly in `OVERLAY.ASM`'s `Ovr_TrapEntry`
+— reliable even before any Oberon runtime state is trustworthy)
+eventually decoded the crash's DOS exit code 35 as `SYSTEM.Halt(291)`
+truncated to 8 bits (`0x123 AND 0xFF = 0x23 = 35`) — `OvrDispatch`'s
+own defended "trampoline id out of range" sentinel, meaning the
+trampoline call site's `CD 3F id:WORD` bytes were being read back
+wrong at runtime.
+
+**Root cause, confirmed by direct byte-for-byte diff of the linked
+`TOC.EXE`:** every overlay call site's trampoline LOW id byte was
+correct; the HIGH byte was consistently corrupted — matching this
+project's own documented failure mode for an unsuppressed SEGRELOC
+overwriting the paired trampoline bytes
+(`Link.IsOverlayCallSiteSegReloc` / `LinkMZ.OnSegReloc`, the same class
+of bug fixed twice before, 2026-08-07/08). Critically, this was
+reproducible with **any single module** marked `$O+` (not just
+`PSTMT`, not just a 5-module interaction) — but only on a build
+actually linked by the shipped `BOOT/TOC.EXE`. The identical current
+source, linked instead by any already-working modern `TOC.EXE`,
+produced a correct binary every time. **The bug was in `BOOT/TOC.EXE`
+itself** — a stale bootstrap whose own old linker predates whatever
+fixed this SEGRELOC-suppression path in current `SRC/TOC/LINK.MOD`/
+`LINKMZ.MOD` — not a defect in the source at all.
+
+**Fix:** built a fresh candidate `TOC.EXE` from the current, unmodified
+5-module-`$O+` source using an already-working modern binary as the
+one-time seed, verified it self-hosts byte-identically across three
+generations, and verified it against the complete `make test` suite
+in a scratch copy first (313/313 manifest, 116/116 TASM, 18/18 TLINK,
+12/12 self-host, zero leaks) before handing it to the maintainer.
+**The maintainer installed the candidate into `BOOT/TOC.EXE`** (per
+the project's standing rule — an agent never performs this install).
+A final `make test` run directly against the live project with the
+new bootstrap in place came back fully green: 313/313 manifest,
+116/116 TASM, 18/18 TLINK, 12/12 self-host (`toc1.exe == toc2.exe`),
+zero heap leaks, zero errors.
+
+All 5 target modules (`SCAN`/`DEF`/`LINKNE`/`PEXPR2`/`PSTMT`) are now
+`$O+` and confirmed working end-to-end from the shipped bootstrap.
+`--memkb=640` (already in place since the 2026-08-16 work above) was
+unaffected and unchanged — this was never actually a memory-budget
+bug, despite the "DOS-memory-pressure" framing the investigation
+started under. See `OVR-BUG.MD` for the full multi-session investigation
+log, including several dead ends (an early "probe artifact" verdict
+that was retracted, and a period where the bug was — incorrectly —
+believed to be PSTMT-specific or a 5-module interaction) kept in place
+as a record of what was ruled out and why.
+
+---
+
+* **Linker code streaming + compile temp-file lifecycle (2026-09-03).**
+Two DOS-memory changes made during the `--memkb` investigation, landed in the
+source at the time but only verified end-to-end by the 2026-09-04 `make test`
+run (313/313 manifest, 116/116 TASM, 18/18 TLINK, 12/12 self-host, zero
+leaks). Both are still live; the entry above describing
+`NEW(ls^.codeBuf, Rdoff.SegLimit)` records the *older* design this replaced.
+
+**`LINK.MOD` / `RDOFF.MOD` / `TOCMAIN.MOD` — codeBuf streaming.** The linker
+held a fixed 65000-byte RAM scratch buffer (`ls^.codeBuf`, one `NEW` per link
+regardless of the actual module sizes). Sizing it dynamically was
+architecturally blocked — it is grabbed *before* module scanning precisely to
+avoid the heap fragmentation a pre-scan's own `Files`-buffered reads would
+cause, so any dynamic pre-scan defeats its own purpose (and a raw-I/O bypass
+of `Files.MOD` would itself violate the no-wrapper rule). It was instead
+**eliminated**: a new `Rdoff.ReadCodeToFile` (mirroring the existing
+`ReadDataToFile`, selecting `stype=1` instead of `stype=2`) streams a module's
+CODE segment straight from its `.rdf` into the destination file, and CODE
+relocs now go through `Files.Seek`+`ReadByte`/`WriteByte` against
+`lnkCodeFile`/`lnkCodeBase` — exactly the pattern DATA relocs already used via
+`ls^.dataFile`. `ReserveBuffers` survives as a parameterless no-op to avoid
+touching more call sites than necessary. Measured effect: peak free memory
+during the *linking* phase improved from ~140–144 KB to ~161–174 KB at the
+same `--memkb`. It does **not** move the `--memkb` floor, because the floor is
+set during compilation, not linking.
+
+**`PARSER.MOD` — compile temp-file lifecycle.** The module-write path opened
+`.rdf`, `.def`, `.dbg` and (for `$O+` modules) `.ovr` and kept **all four open
+simultaneously** — each with its own 8 KB `Files.MOD` buffer — from early in
+the procedure until the very end, where they were finally packed into the
+`.om` and closed together. Nothing required this: each temp is read back
+exactly once, during its own packing step, and `TAR.MOD`'s writing API
+(`TarBegin`/`TarAddFromFile`/`TarEnd`) was already a pure sequential-append
+design. The archive is now opened right after the `$L`-extras merge settles
+`.rdf`'s content, and each temp is created, written, streamed into the archive
+and **closed immediately** before the next one opens — so at most one compile
+temp plus the archive itself are ever open. `Syms.SymsFree()` moved to after
+the pack loop.
+
+* **Symbol-table deduplication — `--memkb` floor 598 → 573 KB (2026-09-04).**
+Follow-on to the 2026-09-03 `--memkb` reduction attempt (which was reverted
+without moving the floor, see the CLAUDE.md entry it replaced). This time the
+work was driven by measurement rather than by guessing at the bottleneck, and
+two real duplications were found and removed. Both are **byte-identical in
+output** — every one of the compiler's 14 modules compiles to a bit-for-bit
+identical `.om` before and after each change — so neither alters codegen.
+
+**Measurement first.** The previous session's story ("the floor is set by heap
+fragmentation, and the `.rdf` temp error is a false error") turned out to be
+wrong on both counts. A diagnostic that probed the heap *at the instant of
+failure* — rather than at the per-module `DbgMemSize` boundaries, which sample
+only after cleanup — showed `avail=6kb maxblk=6kb probe8k=FAIL(heap)`: the heap
+really was exhausted and the error was honest. `MemAvail` always equalled
+`MemMaxAvail`, i.e. **zero fragmentation**, because `SYSTEM_INIT` grabs the heap
+as one single DOS block (`min(free, $M max)`) and the coalescing allocator
+merges it back to one block. The floor is simply the sum of four real,
+simultaneous costs: resident image 226 KB + stack 25 KB + overlay buffer 87 KB
++ peak compile working set 252 KB.
+
+The 252 KB working set was then decomposed against the compiler's own SYMSTAT
+telemetry for the heaviest module (`TOCMAIN.MOD`, 20 imports): ~162 KB symbol
+table (2114 symbols, 1156 types, 40 KB StrTab), with the remaining ~90 KB
+attributed at the time to "the Cgen/Rdoff object image held whole in RAM".
+**That attribution was wrong and is retracted** — see the correction at the
+end of this entry.
+
+**Fix 1 — structural type interning (`SRC/TOC/SYMS.MOD`).** Types tracked
+*import count*, not module complexity (`DEF.MOD`, the `.def` import reader,
+holds 18 of the ~30 `TypeNew*` call sites), so the same shape — `ARRAY OF CHAR`,
+`POINTER TO Foo` — was rebuilt once per import path that mentioned it. A new
+open-addressed index (`typeHash`, 1024 buckets = 2 KB of BSS) interns `TFArray`
+and `TFPointer`, keyed on the operand's **pointer value** (seg XOR ofs) so both
+lookup and insert are O(1). (A first draft keyed on the arena slot index and
+had to scan the arena to find it — that reintroduced the O(n²) the index exists
+to avoid, and was rewritten before building.)
+
+Deliberately **not** interned, each for a specific reason now recorded in the
+code: `TFRecord` (`TypeNewRecord` stamps a unique `NextTagId` runtime type tag,
+and fields are appended afterwards by `TypeAddField`); `TFProc` (`TypeNewProc`
+creates an empty signature that `TypeAddParam` fills in later, so its identity
+is not known at construction — this is why `proc=541` is unchanged); and a
+`TFPointer` with an unresolved base (the forward-reference patchers in
+`PARSER.MOD` and `DEF.MOD` mutate `.base` in place afterwards, so sharing such
+a node would splice one module's resolution into another's type). Predeclared
+scalars needed nothing — they were already singletons allocated once in
+`SymInit` and returned by `DEF.MOD`'s `PrimTypeOf`, which is why the waste was
+entirely in the *structured* types wrapping them.
+
+Result at the peak module: types 1158 → 682 (arrays 378 → 70, pointers
+193 → 24), **−20 KB heap**.
+
+**Fix 2 — `modId`/`qname` double-intern (`SRC/TOC/DEF.MOD` + `PEXPR2.MOD`).**
+Every imported procedure interned *two* near-identical long strings differing
+by a single character: `Files_Open` (the link name, as `modId`) and
+`Files.Open` (the source-visible qualified name). Only the module half is
+actually needed — `PEXPR2`'s designator path already rebuilds the link name as
+`<module>_<ident>` from the IMPORT symbol's own `modId` before it ever consults
+the proc's, and the `KVar` branch already relied on exactly that reconstruction;
+only the `KProc` branch re-read a separately interned copy of the same text.
+`DEF.MOD` now interns the **module** name (one shared entry per imported module
+instead of one unique string per imported procedure) via a new `ProcModId`, and
+the `KProc` branch uses the already-computed `impName`. Verified safe before
+changing: every `.def` PROC entry is `<MODULE>_<short>` across the whole
+stdlib — 159 procs, zero exceptions.
+
+Result at the peak module: StrTab 1797 → 1311 entries, 40 KB → 28 KB,
+**−12 KB heap**.
+
+**Combined:** symbol table 163 KB → 133 KB (−19%), net ~28 KB less heap per
+compile after the 2 KB `typeHash` image cost. Measured `--memkb` floor
+**598 → 573 KB**, bisected with a fast single-module repro (`TOCMAIN.MOD`
+alone reproduces the floor in ~30 s, versus ~9 min for a full self-host
+bisection) — and the pre-change binary was re-measured through the *identical*
+procedure (598 PASS / 590 FAIL) so the comparison is apples-to-apples rather
+than across differently-configured runs.
+
+**Verification:** 14/14 modules byte-identical for each fix independently; a
+3-generation self-host fixpoint (gen2 == gen3 byte-identical) for the type
+dedup; and a full `make test`: **313/313 manifest, 116/116 TASM, 18/18 TLINK,
+12/12 self-host (`toc1.exe == toc2.exe` — no bootstrap lag), zero heap leaks,
+zero errors.** `BOOT/TOC.EXE` untouched throughout.
+
+**Also kept** (small, debug-only measurement tools that made the above
+possible, and make it re-measurable without a rebuild): `node-count` in
+`SRC/TOOLS/RDFGREP.MOD` (IMPORT/GLOBAL node counts + their heap cost),
+`StrTab.TextUsed()` (text bytes *used* vs `MemBytes()`'s allocated capacity),
+and `maxblk`/`frag` alongside `avail` in `TOCMAIN.MOD`'s `DbgMemSize` — that
+last pair is what distinguishes genuine fragmentation from plain exhaustion,
+and its absence is what made the previous session misdiagnose this problem.
+
+**Two dead ends from this session, recorded so they are not retried:**
+1. **A `SYSTEM.ASM` double-free hardening was proposed, implemented with the
+   maintainer's sign-off, then found unnecessary and reverted byte-identically**
+   (the reassembled `SYSTEM.RDF` matches the original md5 `fac3dee1…`). The
+   claimed hole — that a stale pointer could pass `SYSTEM_Free`'s
+   already-`STATUS_FREE` guard after coalescing and free a *different* live
+   allocation — is unreachable: payload = header + 1 paragraph is a bijection,
+   so any block whose header lands on a retired header *is* the block the stale
+   pointer refers to, making the free legitimate. A regression test written to
+   prove the bug instead proved its absence (`stale = w`).
+2. **RDOFF `ImportNode`/`GlobalNode` StrTab-interning + chunking was evaluated
+   and rejected on measurement.** Estimated at ~400 nodes / ~22 KB; the
+   `node-count` tool showed the real peak is **171 nodes / 8.3 KB** (worst
+   module `CGEN`), of which only 5.5 KB needs the record-shape change that
+   would touch 14 external read sites in `PARSER.MOD` and `RDFGREP.MOD`,
+   including character-level scans of `imp^.name`. Not worth the blast radius.
+
+**CORRECTION (same day, before any follow-on work was attempted): there is no
+"object image held in RAM".** The 90 KB attributed to it above was a
+*residual* — measured working set minus measured symbol table — repeated
+afterwards as though it had been measured directly. It has not survived
+checking. `ObjFileRec` holds `codeFile`/`dataFile` as `Files.File` handles,
+and `EmitByte` writes every emitted byte straight to a temp via
+`Files.WriteByte`: **code and data have always been streamed to disk**, at a
+cost of one 8 KB `Files` buffer each. What the RDOFF object really holds in
+RAM is its relocation chunks plus import/global nodes, measured with
+`rdfgrep node-count` (extended in this session to report reloc counts):
+worst case **~19 KB** (`PARSER.MOD`: 1422 relocs in 6 chunk nodes = 12.4 KB,
+plus 138 import/global nodes = 7.9 KB). So `Rdoff.ReadCodeToFile` streaming is
+**not** the lever this entry originally suggested — that work was already
+done. This is the same measure-before-estimating failure the entry warns about
+two paragraphs above, committed again in the same session.
+
+**Remaining, for anyone resuming this**, with every figure below measured
+rather than inferred: duplication is exhausted, 573 KB is not 400 KB, and the
+223 KB post-dedup working set breaks down as **76 KB** symbols (2114 at peak,
+genuinely one per real binding: 433 imported procs plus ~900 params — `Files`
+alone is 35 procs → 67 params — with nothing to merge), **28 KB** StrTab
+(91% full, nothing to reclaim), **27 KB** types, **~19 KB** RDOFF object,
+**~32 KB** of `Files` 8 KB buffers, and **~40 KB not yet attributed to any
+measured component** — that unattributed remainder, not the retracted object
+image, is where the next investigation should start (candidates: the parser's
+own transient allocations, `Import`'s loaded-`.def` list, `TDbg`, the
+scanner). Separately, outside the working set, the **87 KB** overlay buffer is
+paid unconditionally at startup, and `SetupOvr` runs before `/CD` vs `/CP` is
+even known — see the 2026-09-03 revert for why shrinking it naively breaks
+`ne/cp-signature`.
+Also latent but not currently triggered: `Import.AlreadyLoaded` keys on the
+*alias*, so `IMPORT Files, F := Files` parses the same `.def` twice
+(measured +105 syms). It must **not** be "fixed" by keying on the module name —
+symbols are stored as `<alias>.<name>`, so the second alias genuinely needs its
+own set; a real fix means decoupling storage from naming.
+
+---
+
+* **Compile/link process split made permanent; `TOC286.EXE` retired; SPHO
+removed (2026-09-05).**
+
+The all-in-one `TOC.EXE` was split into a three-binary toolchain, moved from
+the `SRC/PROTO/` prototype into `SRC/TOC/` as the permanent arrangement:
+
+| Binary | `$M stack,min,max` | Role |
+|---|---|---|
+| `TOC.EXE` | `4000, 2000, 8000` | Driver. No compiler, no linker code — parses argv, execs `TOCC.EXE`, then (with `/ENTRY=`) execs `TOCL.EXE`. |
+| `TOCC.EXE` | `26000, 64000, 650000` | Compile half: dep-scan + incremental compile; writes `.om` files and the `.LNK` control file. |
+| `TOCL.EXE` | `8000, 16000, 650000` | Link half: reads `.LNK`, emits `/CD` (MZ) or `/CP` (NE). |
+
+**Why:** no single DOS process holds both the compiler and the linker any
+more. The measured `--memkb` self-compile floor went **573 → 463 KB**. This
+also removed the unconditional 87 KB overlay buffer that the all-in-one
+binary paid at startup on *every* run, including pure links — the three-binary
+toolchain uses no `$O+` overlays at all (`$O+` remains fully supported for
+user programs).
+
+Two mechanisms worth knowing, both the cause of real bugs during the move:
+- The driver locates its children **in its own directory, by its own basename
+  prefix**, so a staged `_TOC.EXE` execs `_TOCC.EXE`/`_TOCL.EXE` and never the
+  half-written binaries being built beside it. Every Makefile that stages the
+  toolchain must therefore stage **all three** binaries together — staging only
+  `TOC.EXE` fails with `toc: cannot exec TOCC.EXE`.
+- `xt` does not propagate the DOS environment to a `Dos.Exec`'d child, so
+  `OBERON_LIB` is invisible to `TOCC`/`TOCL`. The driver snapshots it at the
+  **top** of `RunBody` (per ENV-BUG.MD, a `Files.Reset`/`Close` cycle or an
+  `Exec` corrupts the next `Dos.GetEnv`) and passes it to `TOCL` as argv[2].
+
+**`TOC286.EXE` retired.** It existed solely so the compiler could run under a
+DPMI host and escape the 640 KB conventional-memory ceiling; the split removed
+that pressure. `SRC/TOC/TOC286.MOD` and the `toc286` make target are gone.
+**The `/CP` NE target itself is unaffected and fully supported** — `/CD` vs
+`/CP` selects the link output format only. `/CP` is exercised by the `ne/*`
+manifest rows, `test_tlink.sh`'s `/T=ne` rows, and `EXAMPLES/TETRIS`'
+`TET286.EXE` target. Corrected while updating docs: `/G` **does** work with
+`/CP` (`LinkNE.WriteDebugInfo`, 2026-08-05); `MANUAL.MD` had claimed otherwise.
+
+**SPHO removed** (maintainer). `SRC/SPHO/`, `SRC/TASM/SPHO.MOD`, `DOCS/SPHO.MD`
+were already gone; this pass removed the orphaned `spho` target from the
+top-level `Makefile` (it pointed at a deleted directory) and `EXAMPLES/CLIPDRV/`
+(entirely `.SMD` sources, unbuildable without SPHO), and de-referenced the one
+surviving `SPHO.MOD` mention in a `SRC/TASM/PARSE.MOD` comment.
+
+**Dead code removed** in the same pass: `Link.DbgSymCount` (a temporary
+2026-08-20 diagnostic, zero callers), four `dbg*` counters in `PEXPR2.MOD`, and
+the orphan fixture `SRC/TOC/PSTHANG.MOD`. Twelve over-exported procedures had
+their `*` marker dropped across `CGEN`/`LINK`/`LINKNE`/`PEXPR`/`SYMS` — by the
+Visibility/NEAR rule this makes them NEAR, saving bytes at both call site and
+callee. **Method note:** an initial pass wrongly classified four FPU emitters
+(`CgFldRealNearBx` et al.) as dead because the reference check searched only the
+*qualified* form `Cgen.CgFld…`; they are called **unqualified from inside
+`CGEN.MOD` itself**. A dead-code check must count intra-module unqualified calls,
+not just `Module.Proc` references.

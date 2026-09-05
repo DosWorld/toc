@@ -1937,8 +1937,8 @@ END TryPercentDirective;
    directive keywords DB/DW/DD/TIMES -- used to detect a colon-less
    implicit label immediately followed by a data declaration. DD was
    missing here (only DB/DW/TIMES were checked): a colon-less LONGINT
-   global ("xmsApiEntry dd 0", the shape SPHO.MOD's own EmitVarDecl
-   emits for a TyLong VAR) fell through to "unknown directive or
+   global ("xmsApiEntry dd 0", the shape a LONGINT VAR declaration
+   emits) fell through to "unknown directive or
    mnemonic" instead of being recognized as an implicit label + DD
    declaration, even though the exact same colon-less form already
    worked for DB/DW. *)

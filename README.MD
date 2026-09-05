@@ -69,9 +69,11 @@ That means:
 - **Zero heap leaks, guaranteed.** Every compile and every link reports
   `0 leaked paragraphs` — enforced by `LeakGuard` instrumentation and
   regression tests, not just hoped for.
-- **All-in-one driver.** `toc.exe` is the dep-scanner, incremental compiler,
-  and smart linker in one binary and one command — no makefiles required to
-  build an Oberon program.
+- **One-command driver.** `toc.exe` is the dep-scanner, incremental compiler,
+  and smart linker behind a single command — no makefiles required to build an
+  Oberon program.  Under the hood it is three binaries (`toc.exe` drives
+  `tocc.exe` to compile and `tocl.exe` to link), so no single DOS process ever
+  has to hold both the compiler and the linker in 640 KB.
 - **Real DOS constraints, handled properly.** Per-module 64 KB code segments,
   far pointers (segment:offset), a large memory model, EMS-backed temp files,
   and a linker that streams instead of holding everything in RAM.
@@ -128,7 +130,7 @@ END Hello.
 ```
 
 ```bash
-BIN\TOC286.EXE /ENTRY=Run Hello.Mod
+BIN\TOC.EXE /ENTRY=Run Hello.Mod
 Hello.exe
 ```
 
@@ -172,7 +174,7 @@ END Example.
 ```
 
 ```
-BIN\TOC286.EXE /ENTRY=Run Example.Mod
+BIN\TOC.EXE /ENTRY=Run Example.Mod
 Example.exe
 5 4 3 2 1
 ```
@@ -214,16 +216,20 @@ SYMS.MOD   CGEN.MOD --> RDOFF.MOD   IMPORT.MOD --> .rdf object file
                           LINK.MOD  --> smart-linked MZ .EXE
 ```
 
-`toc.exe` bundles all of the above plus dependency scanning into one binary.
-`toc /ENTRY=Run MyProg.Mod` scans, compiles whatever's stale, and links — one
-command, no makefile needed for user programs.
+`toc.exe` bundles all of the above plus dependency scanning behind one command.
+`toc /ENTRY=Run MyProg.Mod` scans, compiles whatever's stale, and links — no
+makefile needed for user programs.  `toc.exe` itself is a small driver that
+execs `tocc.exe` (compile) and then `tocl.exe` (link); all three ship together
+and must stay in the same directory.
 
 ### Self-hosting bootstrap
 
 ```
-BOOT/TOC.EXE   (checked-in seed binary — never touched by `make`)
+BOOT/{TOC,TOCC,TOCL}.EXE  (checked-in seed binaries — never touched by `make`)
   |-- SRC/LIB/*.MOD   -> BIN/OBERON.OM   (standard library archive)
-  |-- SRC/TOC/*.MOD   -> BIN/TOC.EXE     (compiler + linker + dep-scan)
+  |-- SRC/TOC/*.MOD   -> BIN/TOC.EXE     (driver)
+                         BIN/TOCC.EXE    (compile half)
+                         BIN/TOCL.EXE    (link half)
 
 BIN/TOC.EXE
   |-- SRC/TOOLS/TOLIB.MOD   -> BIN/TOLIB.EXE    (archive manager)

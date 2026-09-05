@@ -351,6 +351,20 @@ BEGIN
   Files.Seek(obj^.codeFile, save)
 END PatchCodeByte;
 
+(* TruncateCode — roll the code segment back to an earlier length, used
+   ONLY to discard a just-emitted span that turned out unneeded (see
+   DOCS/CODEGEN-SIZE.MD §2.11) with ZERO other emission (reloc, patch,
+   debug symbol) anchored to the bytes being discarded.  Unlike
+   PatchCodeByte (an out-of-sequence overwrite that restores the append
+   position afterward), this LEAVES codeFile positioned at `to` — EmitByte/
+   EmitBlock's normal append-at-current-position behaviour then correctly
+   overwrites the discarded bytes with whatever is emitted next. *)
+PROCEDURE TruncateCode*(obj: ObjFile; to: LONGINT);
+BEGIN
+  Files.Seek(obj^.codeFile, to);
+  obj^.codeLen := WORD(to)
+END TruncateCode;
+
 (* PeekCodeByte: read back a single byte previously written to the code
    segment, without disturbing the current append position.
    Parameters: obj — the object file being built; offset — byte offset
@@ -1543,5 +1557,65 @@ BEGIN
   END;
   Files.Close(f)
 END ReadDataToFile;
+
+(*
+  Read a module's CODE segment bytes directly into an ALREADY-OPEN
+  destination file at a given byte offset, instead of into a RAM SegBuf --
+  the file-backed counterpart of ReadCode, mirroring ReadDataToFile above
+  byte-for-byte except for the segment type selector (1 = code, not 2 =
+  data).  Added so Link.MOD can drop its own 65000-byte resident code
+  buffer (ls^.codeBuf) the same way ReadDataToFile already let it drop
+  the equivalent data buffer -- see Link.MOD's own ProcessModule/
+  ProcessOverlayModule for the caller side (stream code straight into the
+  spill file, then patch relocs there via seek/read/write, exactly like
+  PatchDataFile already does for the data file).
+
+  Parameters: path -- file to read; libOfs -- byte offset within path
+  where the RDOFF2 image starts; hdrSize -- size of the header-record
+  area (as filled by ScanHeader); dst -- destination file, ALREADY OPEN
+  for writing; dstOfs -- byte offset within dst to start writing;
+  codeSize -- number of code bytes to copy.
+  Result: none (failures latch via LogErr). dst's seek position is left
+  at dstOfs + codeSize; caller must re-seek before its next write if it
+  relies on a specific position afterward.
+*)
+PROCEDURE ReadCodeToFile*(VAR path: ARRAY OF CHAR; libOfs, hdrSize: LONGINT;
+                          VAR dst: Files.File; dstOfs: LONGINT; codeSize: WORD);
+  VAR f: Files.File;
+      dataStart: LONGINT;
+      stype, dummy: INTEGER;
+      slen: LONGINT;
+      done: BOOLEAN;
+      segPos: LONGINT;
+BEGIN
+  IF ~Files.Reset(f, path) THEN LogErr.Error2("Cannot open: ", path); RETURN END;
+  dataStart := libOfs + LONGINT(14) + hdrSize;
+  Files.Seek(f, dataStart);
+  done := FALSE; segPos := dataStart;
+  WHILE ~done DO
+    Files.ReadWord(f, stype);
+    IF stype <= 0 THEN done := TRUE
+    ELSE
+      Files.ReadWord(f, dummy);           (* num *)
+      Files.ReadWord(f, dummy);           (* reserved *)
+      Files.ReadDWord(f, slen);           (* length *)
+      segPos := segPos + LONGINT(10);
+      IF stype = 1 THEN                   (* wantType: code *)
+        Files.Seek(f, segPos);
+        Files.Seek(dst, dstOfs);
+        IF ~Files.BlockCopy(f, dst, LONGINT(codeSize)) THEN
+          Files.Close(f); LogErr.Error2("Read error in ", path); RETURN
+        END;
+        done := TRUE
+      ELSIF slen > LONGINT(0) THEN
+        segPos := segPos + slen;
+        Files.Seek(f, segPos)
+      ELSE
+        done := TRUE
+      END
+    END
+  END;
+  Files.Close(f)
+END ReadCodeToFile;
 
 END Rdoff.

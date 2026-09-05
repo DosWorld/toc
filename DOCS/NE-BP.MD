@@ -286,10 +286,12 @@ so we need not generate them.
 
 **Status: ARCHIVED — CONFIRMED WORKING END-TO-END ON REAL DPMI16 HARDWARE
 (2026-08-05, re-confirmed 2026-08-06 after bug #6)**, via the HX-DOS
-extender. `BIN/TOC286.EXE` (the same compiler as `TOC.EXE`, linked `/CP`
-instead of `/CD` — see `SRC/TOC/TOC286.MOD`) compiles and links correctly
-under DPMI16, with zero heap leaks, and **self-hosts** (compiling its own
-sources) correctly on real DPMI16 hardware. See §2.4 for the six
+extender. The `/CP` NE output remains fully supported by the current
+compiler. Historically `BIN/TOC286.EXE` (the compiler itself linked `/CP`
+instead of `/CD`) compiled and linked correctly under DPMI16 with zero heap
+leaks, and **self-hosted** (compiling its own sources) on real DPMI16
+hardware; that binary was retired 2026-09-05, once the compile/link process
+split removed the DOS-memory pressure that motivated it. See §2.4 for the six
 real-hardware bugs found and fixed getting here (five during initial
 bring-up, a sixth found from real-hardware use after archival). This target
 is considered complete; no further DPMI16-specific work is planned unless a
@@ -530,19 +532,14 @@ DPMI16 hardware** by the maintainer.
 
 ### 2.5 Building and testing `/CP`
 
-`make`/`make test`/`make testall` build and test **only** `TOC.EXE` (`/CD`,
-MZ) — `xt` cannot execute NE binaries, so it is structurally incapable of
-testing `/CP` output beyond byte-inspection. `BIN/TOC286.EXE` is built
-additively:
-
-```bash
-make -C SRC/TOC toc286   # builds + installs BIN/TOC286.EXE
-```
-
-and must be tested on a real DPMI16 host or DPMI16-capable extender (e.g.
-HX-DOS, or a real DPMI server under DOSBox-X) — there is no automated
-in-repo test for `/CP` execution correctness, only for structural/byte-level
-conformance to this document.
+`xt` cannot execute NE binaries, so it is structurally incapable of testing
+`/CP` output beyond byte-inspection. `/CP` output is therefore verified
+structurally in-repo (the `ne/*` manifest rows, `TESTS/test_tlink.sh`'s
+`/T=ne` rows, and `EXAMPLES/TETRIS`' `TET286.EXE` target, which links a real
+program `/CP`), and must be **run**-tested on a real DPMI16 host or
+DPMI16-capable extender (e.g. HX-DOS, or a real DPMI server under DOSBox-X)
+— there is no automated in-repo test for `/CP` execution correctness, only
+for structural/byte-level conformance to this document.
 
 ### 2.6 Status: archived
 

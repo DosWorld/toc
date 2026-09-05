@@ -45,6 +45,7 @@ CONST
   MInt* = 74; MInt3* = 75;
   MRet* = 76; MRetn* = 77; MRetf* = 78; MIret* = 79;
   MCld* = 80; MCli* = 81; MSti* = 82; MClc* = 83; MStc* = 84; MNop* = 85;
+  MStd* = 170;
   MPushf* = 86; MPopf* = 87;
   MFninit* = 88; MFstcw* = 89; MFwait* = 90;
   MJmp* = 91; MCall* = 92; MLoop* = 93;
@@ -201,6 +202,7 @@ BEGIN
       ELSIF Strings.Equal(name, "SHR")    THEN RETURN MShr
       ELSIF Strings.Equal(name, "STI")    THEN RETURN MSti
       ELSIF Strings.Equal(name, "STC")    THEN RETURN MStc
+      ELSIF Strings.Equal(name, "STD")    THEN RETURN MStd
       ELSIF Strings.Equal(name, "SCASB")  THEN RETURN MScasb
       ELSIF Strings.Equal(name, "SCASW")  THEN RETURN MScasw
       ELSIF Strings.Equal(name, "STOSB")  THEN RETURN MStosb

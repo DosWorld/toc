@@ -4,11 +4,14 @@
 
 | Binary | Source | Purpose |
 |--------|--------|---------|
-| `BOOT/TOC.EXE` | checked-in MS-DOS binary | Bootstrap compiler — seeds the self-hosted build; **never modified by `make`** |
+| `BOOT/TOC.EXE` | checked-in MS-DOS binary | Bootstrap driver — seeds the self-hosted build; **never modified by `make`** |
+| `BOOT/TOCC.EXE` | checked-in MS-DOS binary | Bootstrap compile half; **never modified by `make`** |
+| `BOOT/TOCL.EXE` | checked-in MS-DOS binary | Bootstrap link half; **never modified by `make`** |
 | `BOOT/TOLIB.EXE` | checked-in MS-DOS binary | Bootstrap archive manager — used only during stdlib merge; **never modified by `make`** |
 | `BOOT/TASM.EXE` | checked-in MS-DOS binary | Bootstrap NASM-subset assembler — tool of record for `SYSTEM.ASM`→`SYSTEM.RDF`, `EMS.ASM`→`EMS.RDF`, `DETECT.ASM`→`DETECT.RDF`, `WINCB.ASM`→`WINCB.RDF`, `KMOUSE.ASM`→`KMOUSE.RDF`, `SCREEN.ASM`→`SCREEN.RDF`; **never modified by `make`** |
-| `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **All-in-one** MS-DOS build tool: dep-scan + incremental compile + smart link. Real-mode MZ `.EXE` — the "clean DOS version," used by `make`/`make test`/`make testall` |
-| `BIN/TOC286.EXE` | `SRC/TOC/` (Oberon) | Same compiler as `TOC.EXE`, linked as an NE/DPMI16 protected-mode `.EXE` instead — the "DPMI16 (286) version." Built via `make toc286` (additive; not part of `all`/`test`). Entry point is `TOC286.MOD` (`IMPORT TOC; PROCEDURE Run* = TOC.Run`), so both binaries share 100% of the compiler logic and only differ in link target (`/CD` vs `/CP`) |
+| `BIN/TOC.EXE` | `SRC/TOC/` (Oberon) | **Driver** (`$M 4000,2000,8000`). Holds no compiler and no linker code: parses argv, execs `TOCC.EXE`, then — with `/ENTRY=` — execs `TOCL.EXE` on the `.LNK` control file `TOCC` wrote. Finds both children in its **own** directory, by its own basename prefix (so a staged `_TOC.EXE` finds `_TOCC.EXE`/`_TOCL.EXE`) |
+| `BIN/TOCC.EXE` | `SRC/TOC/` (Oberon) | **Compile half** (`$M 26000,64000,650000`): dep-scan + incremental compile; emits `.om` files and the `.LNK` control file |
+| `BIN/TOCL.EXE` | `SRC/TOC/` (Oberon) | **Link half** (`$M 8000,16000,650000`): reads the `.LNK` control file and smart-links `/CD` (MZ) or `/CP` (NE/DPMI16) output |
 | `BIN/TOLIB.EXE` | `SRC/TOOLS/` (Oberon) | .OM archive manager (list/extract/create/merge); supports `@listfile` |
 | `BIN/RDFGREP.EXE` | `SRC/TOOLS/` (Oberon) | RDOFF/.om/.exe introspection for tests |
 | `BIN/TDINFO.EXE` | `SRC/TOOLS/` (Oberon) | TDS/TDINFO (0x52FB) debug-block inspector for `.exe` files |
@@ -17,7 +20,8 @@
 | `BIN/TLINK.EXE` | `SRC/TLINK/` (Oberon) | Merged RDOFF2 linker: tiny-model `.COM`/`.SYS`/`.BGI` and small-model `.EXE` output (`/T=com\|sys\|exe\|texe\|bgi2`) |
 
 All binaries are MS-DOS MZ executables that run on real MS-DOS or under `xt`.
-`BOOT/TOC.EXE`, `BOOT/TOLIB.EXE`, and `BOOT/TASM.EXE` are the only pre-built
+`BOOT/TOC.EXE`, `BOOT/TOCC.EXE`, `BOOT/TOCL.EXE`, `BOOT/TOLIB.EXE`, and
+`BOOT/TASM.EXE` are the only pre-built
 binaries in the repository; everything else is built from Oberon source by
 the bootstrap.  `BOOT/TASM.EXE` is a bootstrap binary (not rebuilt by `make
 all`) for a structural reason, not just caution: TASM itself needs a
@@ -32,16 +36,9 @@ sections below.
 ## Building on Linux / Mac
 
 ```bash
-make          # full build: stdlib → BIN/TOC.EXE → BIN/TOLIB.EXE → tools → OBERON.OM
-make test     # clean rebuild + run 281 manifest tests + TASM regression (host-side, fast)
+make          # full build: stdlib → BIN/{TOC,TOCC,TOCL}.EXE → tools → OBERON.OM
+make test     # clean rebuild + full suite (manifest + TASM + TLINK + self-host)
 make testall  # full DOS-side suite via xt: manifest + Section 17/18 (~9 min)
-
-make -C SRC/TOC toc286   # additive: also build BIN/TOC286.EXE (DPMI16/NE /CP
-                         # binary). NOT part of `all`/`test`/`testall` — `xt`
-                         # cannot run NE binaries, so TOC286.EXE can only be
-                         # tested on a real DPMI16 host (e.g. HX-DOS, a real
-                         # DPMI server under DOSBox-X). make test/testall
-                         # keep using TOC.EXE exclusively.
 ```
 
 ### Build sequence
@@ -310,7 +307,9 @@ which exports GLOBAL `start` at offset 0 (linker entry point).  This stub is mer
 ```
 oberonc/
   BOOT/               Bootstrap DOS binaries (immutable — updated manually)
-    TOC.EXE              All-in-one compiler/linker/dep-scan (MS-DOS MZ)
+    TOC.EXE              Driver: execs TOCC/TOCL (MS-DOS MZ)
+    TOCC.EXE             Compile half: dep-scan + compile (MS-DOS MZ)
+    TOCL.EXE             Link half: reads .LNK, emits .EXE (MS-DOS MZ)
     TOLIB.EXE            Archive manager (MS-DOS MZ)
     TASM.EXE             NASM-subset assembler; tool of record for SYSTEM.ASM/
                           EMS.ASM -> .RDF (MS-DOS MZ, see DOCS/PORTING.MD §1.6)
@@ -354,10 +353,29 @@ toc.exe /ENTRY=Run Hello.Mod    REM compile + link → Hello.exe
 
 On the host, run them with the `xt` emulator. See [XT.MD](XT.MD) for full reference.
 
-### Oberon toc.exe — command line (all-in-one)
+### Oberon toc.exe — command line
 
 `BIN/TOC.EXE` is the primary build tool.  It handles dependency scanning,
 incremental compilation, and linking in a single invocation.
+
+Internally it is a **three-binary toolchain**: `TOC.EXE` itself is only a
+driver — it execs `TOCC.EXE` to compile, then (with `/ENTRY=`) execs
+`TOCL.EXE` to link.  The split exists to cut DOS conventional-memory
+pressure: no single process ever holds both the compiler and the linker.
+The three binaries must be staged **side by side in the same directory**,
+because the driver locates its children next to itself.  Without `/ENTRY=`
+there is nothing to link, so only `TOCC.EXE` runs.
+
+The two halves communicate through a `<stem>.LNK` control file that `TOCC`
+writes next to the source and `TOCL` reads:
+
+```
+EXE <output.exe>     output path
+CD | CP              target: MZ real-mode, or NE/DPMI16
+LIB <path>           stdlib archive (OBERON.OM / TRUBO.OM), when set
+DBG                  present when /G was given
+OM <path>            one line per object, in topological order
+```
 
 ```
 toc.exe [/ENTRY=Proc] [/SYSTEM] [/M] [/G] [/LOG=level] <Root.Mod>

@@ -25,6 +25,24 @@ MODULE LinkOvr;
   codeLen field widened WORD->LONGINT (12 bytes now, was 10) -- see that
   field's own entry below.
 
+  OVR-BUG.MD epilogue-counter fix (deliberately NOT a format change):
+  an earlier version of this fix widened the per-module header to 16
+  bytes (dataParaRel/counterOfs). That was reverted -- BOOT/TOC.EXE (the
+  sole bootstrap, CLAUDE.md "never modified by make") has this writer's
+  OLD 12-byte form already compiled in, and cannot be updated by an
+  agent; a build using BOOT/TOC.EXE to link a fresh, 16-byte-header-
+  reading OVERLAY.MOD produces a self-inconsistent binary (new reader +
+  old writer) that crashes on its own first real overlay dispatch --
+  confirmed via `make test`'s own single-pass build. The counter's
+  runtime address is instead derived entirely without new header data:
+  see SRC/LIB/OVERLAY.MOD's ReadCounter (reads the DS segment straight
+  out of the module's own already-resident, already-patched CgPrologue
+  bytes) and SRC/TOC/PARSER.MOD's counter-slot allocation (reuses the
+  pre-existing, unconditional 2-byte DATA placeholder at offset 0 --
+  Cgen.EmitDataZero(2) -- instead of allocating a new slot, so the
+  counter's own DATA offset is always the compile-time constant 0, never
+  transmitted at all).
+
     Offset 0:  "DW" + 6 reserved bytes (OvrHeaderSize=8, matches
                OVERLAY.MOD's DetectFormat 'DW' branch)
     Offset 8:  entryIdCount: WORD -- one past the highest GLOBAL entry id
@@ -39,15 +57,34 @@ MODULE LinkOvr;
                extra module-lookup indirection.  Multiple consecutive slots
                legitimately repeat the same fileOfs when they belong to
                the same module (all of module M's entries share one header).
-    Offset 10: directory: entryIdCount * (fileOfs: LONGINT) -- byte offset
-               (from file start) of the OWNING module's header, one slot per
-               GLOBAL entry id
+    Offset 10: directory: entryIdCount * (fileOfs: LONGINT; entryOfs: WORD)
+               -- fileOfs: byte offset (from file start) of the OWNING
+               module's header, one slot per GLOBAL entry id.  entryOfs:
+               the in-module code offset that entry id's own exported
+               procedure starts at (widened into the directory 2026-08-26,
+               DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c) -- previously
+               baked into every CALL-SITE trampoline's own bytes instead,
+               which only worked because it fit alongside a 1-byte id in
+               the same 5-byte slot a plain CALL FAR already reserved;
+               moving it here instead of widening the call-site format
+               keeps every swappable trampoline slot's REQUIRED width at
+               `CD 3F id:WORD` = 4 bytes, comfortably under the 5-byte
+               ceiling the resident JMP-FAR rewrite form still needs,
+               with NO dependency on whether the calling code happens to
+               have reserved extra padding -- see that section for the
+               full story of why the call-site-embedded design broke).
+               entryOfs is per-id, not per-call-site: every site
+               targeting the same entry id already had to agree on this
+               same value even under the old embedded scheme (Link.OnReloc
+               resolves it once per relocation, from the target symbol's
+               own SymOffset, identically every time), so this is a
+               format relocation, not a semantic change.
     Then, back-to-back, one per module (each written once, pointed at by
     every one of its own entry ids' directory slots):
       module header (12 bytes -- the ON-DISK subset of DOCS/OVR.MD §6; the
-                   three runtime-only WORDs at +0x12/+0x14/+0x16 are never
-                   stored, since they have no meaning until a real load
-                   happens):
+                   runtime-only WORDs at +0x12/+0x14/+0x16 -- residentSeg/
+                   inUse/next -- are never stored, since they have no
+                   meaning until a real load happens):
         +0x00 WORD    fixupLen   (byte length of the self-CODE fixup table)
         +0x02 WORD    xfixupLen  (byte length of the cross-module fixup
                                   table below -- Link.Module.ovrXFixups,
@@ -176,6 +213,14 @@ END WriteResumes;
    mirrors the ordinary entry-id loop in WriteOvrFile below, but walks
    m^.ovrResumes' own chunked list instead of a contiguous index range
    (see WriteOvrFile's own call site comment for why). *)
+(* Directory slot stride 6 (widened from 4, DOCS/OVR-ID-WIDEN-PLAN.MD
+   step 2 option (c), 2026-08-26).  entryOfs is written as 0 for every
+   resume slot -- a resume global id is never dispatched as an ordinary
+   entry (OvrDispatch's own isResume branch resolves the real jump
+   target from the resume record's own on-disk "ofs" field instead, per
+   ResumeCallee's comment elsewhere), so its directory entryOfs column
+   is simply unused; 0 is an explicit, well-defined placeholder rather
+   than leftover garbage. *)
 PROCEDURE DirectResumeDirSlots(VAR f: Files.File; dirBase: LONGINT; m: Link.Module; hdrPos: LONGINT);
   VAR node: Link.OvrResumeNode; k: INTEGER;
 BEGIN
@@ -183,8 +228,9 @@ BEGIN
   WHILE node # NIL DO
     k := 0;
     WHILE k < node^.count DO
-      Files.Seek(f, dirBase + LONGINT(INTEGER(node^.globalId[k])) * LONGINT(4));
+      Files.Seek(f, dirBase + LONGINT(INTEGER(node^.globalId[k])) * LONGINT(6));
       Files.WriteDWord(f, hdrPos);
+      Files.WriteWord(f, 0);
       INC(k)
     END;
     node := node^.next
@@ -215,6 +261,8 @@ PROCEDURE WriteOvrFile*(ls: Link.State; ovrPath: ARRAY OF CHAR);
       entryIdCount: WORD;
       dirBase, hdrPos, endPos: LONGINT;
       j: INTEGER;
+      entryName: ARRAY 33 OF CHAR;
+      entrySym: Link.Symbol;
 BEGIN
   IF ~Files.ReWrite(f, ovrPath) THEN
     LogErr.Error2("overlay: cannot create ", ovrPath); RETURN
@@ -225,14 +273,19 @@ BEGIN
   Files.Write(f, "DW"); Files.WriteWord(f, 0); Files.WriteDWord(f, LONGINT(0));  (* 8-byte header *)
   Files.WriteWord(f, INTEGER(entryIdCount));
 
-  (* directory: entryIdCount placeholder LONGINTs, one slot per GLOBAL
-     entry id, patched below once each module's real header offset is known
-     (written in one forward pass, so the placeholder-then-seek-back
-     pattern mirrors WriteExe's own header patching elsewhere in this
-     codebase). *)
+  (* directory: entryIdCount placeholder (fileOfs: LONGINT; entryOfs: WORD)
+     pairs -- 6 bytes/slot (widened from a 4-byte fileOfs-only slot,
+     DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26) -- one slot
+     per GLOBAL entry id, patched below once each module's real header
+     offset (and, for ordinary entries, each entry's own in-module code
+     offset) is known (written in one forward pass, so the placeholder-
+     then-seek-back pattern mirrors WriteExe's own header patching
+     elsewhere in this codebase). *)
   dirBase := Files.Position(f);
   j := 0;
-  WHILE j < INTEGER(entryIdCount) DO Files.WriteDWord(f, LONGINT(0)); INC(j) END;
+  WHILE j < INTEGER(entryIdCount) DO
+    Files.WriteDWord(f, LONGINT(0)); Files.WriteWord(f, 0); INC(j)
+  END;
 
   m := ls^.modHead;
   WHILE m # NIL DO
@@ -255,13 +308,43 @@ BEGIN
       (* BlockCopy leaves f positioned right after the copied bytes. *)
       endPos := Files.Position(f);
 
-      (* Point every one of this module's own directory slots at hdrPos --
-         one write per entry id it owns (m^.ovrNEntries of them, starting
-         at m^.ovrEntryIdBase). *)
+      (* Point every one of this module's own directory slots at
+         (hdrPos, entryOfs) -- one write per entry id it owns
+         (m^.ovrNEntries of them, starting at m^.ovrEntryIdBase).
+         entryOfs is resolved the SAME way Link.OnReloc always has --
+         via the entry's own exported symbol's SymOffset -- just moved
+         here from the call-site patch (DOCS/OVR-ID-WIDEN-PLAN.MD step 2
+         option (c), 2026-08-26): Link.OvrEntryNameAt gives the entry's
+         name at this declaration-order index (the SAME order
+         Link.OvrEntryId itself walks, so index<->id stays consistent
+         with every other consumer of m^.ovrEntryIdBase), FindSymbol
+         resolves that name within the WHOLE link state (an exported
+         $O+ entry's own symbol, added like any other global), and
+         SymOffset gives its in-module code offset -- identical to what
+         Link.OnReloc's own `fixup := WORD(SymOffset(lnkLs, sym))`
+         already computed for every overlay call site under the old,
+         call-site-embedded scheme.  A name that fails to resolve here
+         should not happen (every OvrEntryNode name is only ever added,
+         PARSER.MOD's AddOvrEntry, for a genuinely exported $O+
+         procedure -- see OvrEntryId's own identical assumption) -- 0 is
+         written as an intentionally-inert fallback offset rather than
+         aborting the whole link over what would be a pre-existing bug
+         elsewhere, consistent with this writer's own style of not
+         re-validating invariants other passes already guarantee. *)
       j := 0;
       WHILE j < m^.ovrNEntries DO
-        Files.Seek(f, dirBase + LONGINT(INTEGER(m^.ovrEntryIdBase) + j) * LONGINT(4));
+        Files.Seek(f, dirBase + LONGINT(INTEGER(m^.ovrEntryIdBase) + j) * LONGINT(6));
         Files.WriteDWord(f, hdrPos);
+        IF Link.OvrEntryNameAt(m, j, entryName) THEN
+          entrySym := Link.FindSymbol(ls, entryName);
+          IF entrySym # Link.NoSym THEN
+            Files.WriteWord(f, INTEGER(WORD(Link.SymOffset(ls, entrySym))))
+          ELSE
+            Files.WriteWord(f, 0)
+          END
+        ELSE
+          Files.WriteWord(f, 0)
+        END;
         INC(j)
       END;
 

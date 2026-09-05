@@ -307,13 +307,6 @@ TYPE
                                    Written then rewound + read; content is
                                    destroyed on close, so it is never reopened
                                    by name. *)
-    codeBuf:      Rdoff.SegBuf;  (* one reusable per-module code buffer,
-                                    reserved up front so the fixed 65000-byte
-                                    block is grabbed while the arena is still
-                                    contiguous — one module's own .rdf code is
-                                    always <= 64KB (RDOFF2's own segment
-                                    limit), so this one buffer serves every
-                                    module in turn *)
     spillFile*:   Files.File;   (* code spill: written then rewound + read; kept
                                    open the whole time (its content is destroyed
                                    on close, so it is never reopened by name) *)
@@ -333,12 +326,14 @@ TYPE
     stackSize*:   LONGINT;
     ovrSpillFile*: Files.File;  (* DOCS/OVR.MD §11.1: every overlay module's own
                                    relocated code, appended sequentially during
-                                   PerformLinking (reuses ls^.codeBuf the same
-                                   way the main spillFile does) -- each module's
-                                   own byte offset within this file is recorded
-                                   in Module.ovrCodeOfs.  Rewound + kept open for
-                                   LinkOvr.WriteOvrFile to read from afterward,
-                                   same lifetime discipline as spillFile. *)
+                                   PerformLinking (streamed straight in via
+                                   Rdoff.ReadCodeToFile, no resident RAM
+                                   staging buffer -- 2026-09-03) -- each
+                                   module's own byte offset within this file
+                                   is recorded in Module.ovrCodeOfs.  Rewound
+                                   + kept open for LinkOvr.WriteOvrFile to
+                                   read from afterward, same lifetime
+                                   discipline as spillFile. *)
     anyOverlay*:   BOOLEAN;    (* TRUE iff at least one used module has
                                    isOverlay=TRUE -- lets TOC.MOD skip the whole
                                    LinkOvr pass (and .OVR file creation) for the
@@ -369,23 +364,6 @@ TYPE
 
 (* ---- string helpers ---- *)
 
-PROCEDURE PathJoin(VAR dst: ARRAY OF CHAR; dir, file: ARRAY OF CHAR);
-  VAR i, j: INTEGER;
-BEGIN
-  i := 0;
-  WHILE (i < LEN(dst) - 1) & (dir[i] # 0X) DO
-    dst[i] := dir[i]; INC(i)
-  END;
-  IF (i > 0) & (dst[i-1] # "\") & (dst[i-1] # "/") & (i < LEN(dst) - 1) THEN
-    dst[i] := "\"; INC(i)
-  END;
-  j := 0;
-  WHILE (i < LEN(dst) - 1) & (file[j] # 0X) DO
-    dst[i] := file[j]; INC(i); INC(j)
-  END;
-  dst[i] := 0X
-END PathJoin;
-
 PROCEDURE FileExists(path: ARRAY OF CHAR): BOOLEAN;
   VAR f: Files.File; ok: BOOLEAN;
 BEGIN
@@ -411,7 +389,7 @@ BEGIN
     IF exePath[0] # 0X THEN
       Dos.FSplit(exePath, exeDir, n1, n2);
       IF exeDir[0] # 0X THEN
-        PathJoin(tmp, exeDir, name);
+        Dos.PathJoin(tmp, exeDir, name);
         IF FileExists(tmp) THEN Strings.Copy(tmp, result); found := TRUE END
       END
     END
@@ -461,7 +439,7 @@ BEGIN RETURN ls^.symDir[SYSTEM.LSR(i, SymShift)]^.s[SYSTEM.AND(i, SymMask)].segI
 PROCEDURE SymOffset*(ls: State; i: Symbol): LONGINT;
 BEGIN RETURN ls^.symDir[SYSTEM.LSR(i, SymShift)]^.s[SYSTEM.AND(i, SymMask)].offset END SymOffset;
 
-PROCEDURE SymNameId*(ls: State; i: Symbol): StrTab.TStrTabId;
+PROCEDURE SymNameId(ls: State; i: Symbol): StrTab.TStrTabId;
 BEGIN RETURN ls^.symDir[SYSTEM.LSR(i, SymShift)]^.s[SYSTEM.AND(i, SymMask)].nameId END SymNameId;
 
 PROCEDURE AddSymbol(ls: State; name: ARRAY OF CHAR; owner: Module;
@@ -548,7 +526,6 @@ BEGIN
   ls^.symNodes   := NIL; ls^.symCount := 0;
   i := 0; WHILE i < MaxSymChunk DO ls^.symDir[i] := NIL; INC(i) END;
   i := 0; WHILE i < SymHash DO ls^.symHash[i] := NoSym; INC(i) END;
-  ls^.codeBuf    := NIL;
   ls^.totalCodeLen := LONGINT(0);
   ls^.totalDataLen := LONGINT(0);
   ls^.totalBssLen  := LONGINT(0);
@@ -561,21 +538,20 @@ BEGIN
   ls^.ovrNextEntryId := 0
 END InitState;
 
-(* Reserve the one remaining large link buffer (the reusable per-group code
-   buffer) BEFORE any module is scanned.  SegBuf is a fixed 65000-byte block;
-   the symbol/module scan (each .rdf opened through an 8 KB Files buffer)
-   fragments the arena so that no 65000-byte hole survives by link time.
-   Grabbing it here — while the arena is still one contiguous block —
-   guarantees the fixed buffer exists; the later small allocations fill the
-   remaining space and never need a large contiguous run.  The combined data
-   segment no longer needs an equivalent RAM reservation — it is file-backed
-   (ls^.dataFile, opened on first use in PerformLinking) — see LINKBUF-
-   REPORT.MD §4.1.  Returns FALSE (latching LogErr.HaveErr()) if the
-   allocation fails. *)
-PROCEDURE ReserveBuffers*(ls: State): BOOLEAN;
+(* Used to reserve the one large link buffer (a fixed 65000-byte reusable
+   per-module code buffer) BEFORE any module was scanned, so the module/
+   symbol scan's own Files buffering couldn't fragment the arena out from
+   under it.  Removed 2026-09-03: CODE is now streamed straight into the
+   spill file the same way DATA already was (Rdoff.ReadCodeToFile,
+   PatchBuf/PatchOverlayCallSite/ReadSiteWord/WriteSiteWord all patch the
+   spill file in place via lnkCodeFile/lnkCodeBase) -- no RAM buffer, so
+   nothing to reserve early, and no upper bound on a single module's code
+   size tied to this procedure at all (Rdoff.SegLimit's own 65000-byte
+   ceiling still applies, enforced elsewhere, e.g. PARSER.MOD).  Kept as a
+   no-op (not deleted) so TOCMAIN.MOD's existing call site + error-path
+   handling need no changes. *)
+PROCEDURE ReserveBuffers*(): BOOLEAN;
 BEGIN
-  NEW(ls^.codeBuf, Rdoff.SegLimit);
-  IF ls^.codeBuf = NIL THEN LogErr.Error("Out of memory (code buffer)"); RETURN FALSE END;
   RETURN TRUE
 END ReserveBuffers;
 
@@ -659,6 +635,44 @@ BEGIN
   END;
   IF found THEN RETURN idx + INTEGER(m^.ovrEntryIdBase) ELSE RETURN -1 END
 END OvrEntryId;
+
+(* OvrEntryNameAt: the inverse of OvrEntryId -- given a 0-based
+   declaration-order index (NOT a global id; caller subtracts
+   m^.ovrEntryIdBase first) into m's own entry list, returns that entry's
+   name into nameOut.  Mirrors OvrEntryId's own oldest-to-newest chunk
+   walk exactly (same chunk-collection-then-reverse-walk shape), just
+   indexing forward to a position instead of searching for a name.
+   Added for LinkOvr.WriteOvrFile's own entryOfs directory column
+   (DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26): resolving
+   an entry's in-module code offset needs its symbol, which needs its
+   name, which used to be baked into the call-site trampoline bytes
+   directly (an id is looked up already knowing the target's name at
+   compile/link time via OnReloc) -- but the directory-writing pass
+   walks entries by INDEX, not by name, so this index->name direction is
+   newly needed here specifically. FALSE (nameOut untouched) if idx is
+   out of range. *)
+PROCEDURE OvrEntryNameAt*(m: Module; idx: INTEGER; VAR nameOut: ARRAY OF CHAR): BOOLEAN;
+  VAR node: OvrEntryNode; k, cur: INTEGER;
+      chunkStarts: ARRAY 64 OF OvrEntryNode; nChunks, i: INTEGER;
+BEGIN
+  IF (idx < 0) OR (idx >= m^.ovrNEntries) THEN RETURN FALSE END;
+  nChunks := 0; node := m^.ovrEntries;
+  WHILE (node # NIL) & (nChunks < 64) DO
+    chunkStarts[nChunks] := node; INC(nChunks); node := node^.next
+  END;
+  cur := 0;
+  i := nChunks - 1;
+  WHILE i >= 0 DO
+    node := chunkStarts[i];
+    k := 0;
+    WHILE k < node^.count DO
+      IF cur = idx THEN Strings.Copy(node^.name[k], nameOut); RETURN TRUE END;
+      INC(cur); INC(k)
+    END;
+    DEC(i)
+  END;
+  RETURN FALSE
+END OvrEntryNameAt;
 
 (* Read m's own MODNAME.OVR member (if any), set m^.isOverlay, and collect
    its entry-point name list (DOCS/OVR.MD §11.2) -- real
@@ -761,6 +775,232 @@ BEGIN
     LogErr.Error2("Unknown file format (must be .om): ", path)
   END
 END ProcessFile;
+
+(* ---- lazy OBERON.OM loading (DOCS/LINK-MEM-PLAN.MD, Option B) ----
+
+   OBERON.OM bundles every stdlib module (SYSTEM, Out, Strings, EMS,
+   Graph, Random, ... two dozen+) into one archive; the plain ProcessFile
+   path above (used for the program's own small .om files) scans EVERY
+   member unconditionally, interning and chunk-allocating a symbol-table
+   node for each exported global -- paid even for modules the program
+   never imports.  ProcessOberonOm below confines a fix to ONLY this one
+   archive's load path: MarkModule/FindSymbol/ProcessFile (the general
+   path, still used for the program's own .om files and any OBERON_LIB
+   directory members) are untouched.
+
+   Three passes, all read-only header scans except the last:
+     1. NeededChunk collects every symbol name imported by an ALREADY-
+        LOADED module (the program's own .om files, loaded by the normal
+        ProcessFile calls that run before this).
+     2. A no-AddSymbol pre-pass over OBERON.OM's own members: for each
+        member, header-scan its own globals (matching each against the
+        needed set so far) AND its own imports (adding any new names to
+        the needed set) in ONE pass -- repeated to a fixpoint, since a
+        needed member (e.g. Files) can itself import a not-yet-needed
+        one (e.g. EMS).  Bounded by MaxFixpointPasses so a cycle in the
+        (acyclic, in practice) stdlib import graph can never hang.
+     3. The real pass: ScanRdf's normal AddSymbol-driving OnGlobal path,
+        but skipping (via OnMemberLazy checking each member's own name
+        against a "confirmed needed" flag recorded during pass 2)
+        any member that never matched. *)
+
+CONST
+  NeedChunk = 64;   (* interned needed-name ids per chunk node (small-record rule) *)
+  MaxFixpointPasses = 8;   (* generous bound on the stdlib's own import-graph
+                               depth (observed: Files -> EMS/Strings, 2 deep) --
+                               a pass that adds nothing stops early anyway *)
+
+TYPE
+  NeedNode = POINTER TO NeedNodeRec;
+  NeedNodeRec = RECORD
+    id:    ARRAY NeedChunk OF StrTab.TStrTabId;
+    count: INTEGER;
+    next:  NeedNode
+  END;
+
+VAR
+  needHead: NeedNode;
+  needAny:  BOOLEAN;   (* TRUE if the most recent AddNeeded call added a NEW id
+                           (i.e. it wasn't already present) -- read by the
+                           fixpoint loop to know when to stop *)
+
+PROCEDURE IsNeeded(id: StrTab.TStrTabId): BOOLEAN;
+  VAR n: NeedNode; i: INTEGER;
+BEGIN
+  n := needHead;
+  WHILE n # NIL DO
+    i := 0;
+    WHILE i < n^.count DO
+      IF n^.id[i] = id THEN RETURN TRUE END;
+      INC(i)
+    END;
+    n := n^.next
+  END;
+  RETURN FALSE
+END IsNeeded;
+
+(* Add name's interned id to the needed set if not already present.
+   Sets needAny := TRUE iff this call actually added a new id (the
+   fixpoint driver's own stop condition). *)
+PROCEDURE AddNeeded(name: ARRAY OF CHAR);
+  VAR id: StrTab.TStrTabId; n: NeedNode;
+BEGIN
+  id := StrTab.Intern(name);
+  IF IsNeeded(id) THEN RETURN END;
+  IF (needHead = NIL) OR (needHead^.count >= NeedChunk) THEN
+    NEW(n);
+    IF n = NIL THEN LogErr.Error("out of memory (lazy-load needed-name set)"); RETURN END;
+    n^.count := 0; n^.next := needHead; needHead := n
+  END;
+  needHead^.id[needHead^.count] := id; INC(needHead^.count);
+  needAny := TRUE
+END AddNeeded;
+
+PROCEDURE FreeNeedList(VAR head: NeedNode);
+  VAR n, nn: NeedNode;
+BEGIN
+  n := head;
+  WHILE n # NIL DO nn := n^.next; DISPOSE(n); n := nn END;
+  head := NIL
+END FreeNeedList;
+
+(* ---- pass 1: collect names already-loaded modules import ---- *)
+
+(* flag/segId unused but fixed by Rdoff.ImportProc's own signature. *)
+PROCEDURE OnImportForNeed(flag: INTEGER; segId: INTEGER; name: ARRAY OF CHAR); FAR;
+BEGIN AddNeeded(name) END OnImportForNeed;
+
+(* CollectLoadedImports: walk ls's already-loaded module list (the program's
+   own .om files, loaded by ProcessFile before ProcessOberonOm runs) and
+   record every name each one imports.  A pure header re-scan (onGlobal =
+   NIL, so no AddSymbol cost) -- these modules' own symbols are already in
+   the table from their earlier real load; this pass only wants their
+   RecImport names. *)
+PROCEDURE CollectLoadedImports(ls: State);
+  VAR m: Module; rawSize, hdrSize, codeSize, dataSize, bssSize: LONGINT;
+BEGIN
+  m := ls^.modHead;
+  WHILE m # NIL DO
+    Rdoff.ScanHeader(m^.path, m^.libOfs, rawSize, hdrSize, codeSize, dataSize,
+                      bssSize, NIL, OnImportForNeed);
+    m := m^.next
+  END
+END CollectLoadedImports;
+
+(* ---- pass 2: fixpoint pre-scan of OBERON.OM's own members ---- *)
+
+VAR
+  fpConfirmed: NeedNode;   (* member-name ids confirmed needed so far this
+                               fixpoint run (reuses NeedNode's own shape) *)
+
+PROCEDURE AddConfirmed(name: ARRAY OF CHAR);
+  VAR id: StrTab.TStrTabId; n: NeedNode; found: BOOLEAN; i: INTEGER;
+BEGIN
+  id := StrTab.Intern(name);
+  found := FALSE;
+  n := fpConfirmed;
+  WHILE (n # NIL) & ~found DO
+    i := 0;
+    WHILE (i < n^.count) & ~found DO
+      IF n^.id[i] = id THEN found := TRUE END;
+      INC(i)
+    END;
+    n := n^.next
+  END;
+  IF found THEN RETURN END;
+  IF (fpConfirmed = NIL) OR (fpConfirmed^.count >= NeedChunk) THEN
+    NEW(n);
+    IF n = NIL THEN LogErr.Error("out of memory (lazy-load confirmed-member set)"); RETURN END;
+    n^.count := 0; n^.next := fpConfirmed; fpConfirmed := n
+  END;
+  fpConfirmed^.id[fpConfirmed^.count] := id; INC(fpConfirmed^.count)
+END AddConfirmed;
+
+PROCEDURE IsConfirmed(name: ARRAY OF CHAR): BOOLEAN;
+  VAR id: StrTab.TStrTabId; n: NeedNode; i: INTEGER;
+BEGIN
+  id := StrTab.Find(name);
+  IF id = 0 THEN RETURN FALSE END;
+  n := fpConfirmed;
+  WHILE n # NIL DO
+    i := 0;
+    WHILE i < n^.count DO
+      IF n^.id[i] = id THEN RETURN TRUE END;
+      INC(i)
+    END;
+    n := n^.next
+  END;
+  RETURN FALSE
+END IsConfirmed;
+
+VAR
+  fpMemberMatched: BOOLEAN;   (* this member's own OnGlobal-for-need hit the
+                                  needed set at least once *)
+
+PROCEDURE OnGlobalForNeed(name: ARRAY OF CHAR; seg: INTEGER; ofs: LONGINT); FAR;
+BEGIN
+  IF IsNeeded(StrTab.Find(name)) THEN fpMemberMatched := TRUE END
+END OnGlobalForNeed;
+
+VAR
+  fpCurMemberName: ARRAY 128 OF CHAR;
+
+PROCEDURE OnFixpointMember(name: ARRAY OF CHAR; libOfs, rawSize: LONGINT); FAR;
+  VAR rawSz, hdrSize, codeSize, dataSize, bssSize: LONGINT;
+BEGIN
+  IF IsConfirmed(name) THEN RETURN END;   (* already settled this run *)
+  Strings.Copy(name, fpCurMemberName);
+  fpMemberMatched := FALSE;
+  Rdoff.ScanHeader(scanPath, libOfs, rawSz, hdrSize, codeSize, dataSize,
+                    bssSize, OnGlobalForNeed, OnImportForNeed);
+  IF fpMemberMatched THEN AddConfirmed(fpCurMemberName) END
+END OnFixpointMember;
+
+(* ---- pass 3: the real load, skipping unconfirmed members ---- *)
+
+PROCEDURE OnLazyMember(name: ARRAY OF CHAR; libOfs, rawSize: LONGINT); FAR;
+BEGIN
+  IF IsConfirmed(name) THEN ScanRdf(scanLs, scanPath, libOfs, name) END
+END OnLazyMember;
+
+(* ProcessOberonOm: OBERON.OM-specific replacement for ProcessFile's plain
+   ScanTar+OnMember call.  Only the program's own already-loaded modules
+   (ls^.modHead, populated by the ordinary ProcessFile calls that must run
+   BEFORE this one) and OBERON.OM's own internal import graph are ever
+   consulted -- MarkModule/FindSymbol/ProcessFile themselves are untouched,
+   so this cannot affect the program's own .om files or any OBERON_LIB
+   directory member (DOCS/LINK-MEM-PLAN.MD's own "Option B" scope). *)
+PROCEDURE ProcessOberonOm*(ls: State; rawName: ARRAY OF CHAR);
+  VAR path: ARRAY MaxPath OF CHAR;
+      dummy: LONGINT;
+      pass: INTEGER;
+BEGIN
+  FindFile(rawName, path);
+  IF ~Tar.IsOmFile(path) THEN
+    LogErr.Error2("Unknown file format (must be .om): ", path); RETURN
+  END;
+  scanLs := ls;
+  Strings.Copy(path, scanPath);
+  dummy := LONGINT(0);
+
+  needHead := NIL; fpConfirmed := NIL;
+  CollectLoadedImports(ls);
+  IF LogErr.HaveErr() THEN FreeNeedList(needHead); RETURN END;
+
+  pass := 0;
+  REPEAT
+    needAny := FALSE;
+    Tar.ScanTar(scanPath, OnFixpointMember, dummy, FALSE);
+    INC(pass)
+  UNTIL ~needAny OR (pass >= MaxFixpointPasses) OR LogErr.HaveErr();
+
+  IF ~LogErr.HaveErr() THEN
+    Tar.ScanTar(scanPath, OnLazyMember, dummy, FALSE)
+  END;
+
+  FreeNeedList(needHead);
+  FreeNeedList(fpConfirmed)
+END ProcessOberonOm;
 
 (* ---- smart linking ---- *)
 
@@ -933,16 +1173,24 @@ BEGIN
          lookup, which it is: both read the same m^.ovrEntryIdBase). *)
       (* Ceiling check moved HERE, at allocation time, from the two former
          use-site-only checks (PatchOverlayCallSite/AddOvrReturnTrampoline)
-         -- those only ever fire if the over-255th id is actually PATCHED
+         -- those only ever fire if the over-limit id is actually PATCHED
          at a call site; an entry point that exists but is never called
          from anywhere previously slipped past both checks, letting
-         CalculateLayout silently hand out ids the 1-byte trampoline id
-         (PatchOverlayCallSite's own BYTE(entryId) truncation) can never
-         correctly represent, and LinkOvr.WriteOvrFile would then emit a
-         directory sized past what any trampoline could ever index into.
-         Code review, found 2026-08-08. *)
-      IF LONGINT(ls^.ovrNextEntryId) + LONGINT(m^.ovrNEntries) > LONGINT(256) THEN
-        LogErr.Error("overlay: more than 256 overlay entry points in one program (trampoline id is 1 byte)")
+         CalculateLayout silently hand out ids the trampoline id field
+         can never correctly represent, and LinkOvr.WriteOvrFile would
+         then emit a directory sized past what any trampoline could ever
+         index into.  Code review, found 2026-08-08.
+         Widened from a 256-entry (1-byte id) ceiling to WORD's own
+         65535-entry range (DOCS/OVR-ID-WIDEN-PLAN.MD step 2, 2026-08-26,
+         trampoline id field widened BYTE->WORD) -- ovrNextEntryId itself
+         is WORD, so this is the natural remaining ceiling: the sum
+         overflowing WORD range is the only way this check can still
+         fire.  The PRACTICAL ceiling in most programs will be
+         Overlay.Init's own resumeTrapTable SYSTEM.Alloc, which fails
+         gracefully (ovrNoMemory) long before 65535 entries, rather than
+         this hard link-time error. *)
+      IF LONGINT(ls^.ovrNextEntryId) + LONGINT(m^.ovrNEntries) > LONGINT(65535) THEN
+        LogErr.Error("overlay: more than 65535 overlay entry points in one program (trampoline id is a WORD)")
       END;
       m^.ovrEntryIdBase := ls^.ovrNextEntryId;
       ls^.ovrNextEntryId := ls^.ovrNextEntryId + WORD(m^.ovrNEntries)
@@ -999,7 +1247,18 @@ VAR
   lnkLs:      State;
   lnkMod:     Module;
   lnkImports: ImportNode;
-  lnkCodeBuf: Rdoff.SegBuf;
+  lnkCodeFile: Files.File;   (* the spill file (ls^.spillFile or
+    ls^.ovrSpillFile) currently being patched -- CODE relocs go through
+    this + lnkCodeBase, file-backed, the same way DATA relocs already go
+    through ls^.dataFile; see PatchBuf's own comment (2026-09-03: dropped
+    the resident 65000-byte ls^.codeBuf entirely -- ReadCodeToFile
+    streams each module's code straight into the spill file, and every
+    reloc site is patched there via seek/read/write). *)
+  lnkCodeBase: LONGINT;      (* current module's own code start offset
+    within lnkCodeFile -- PatchBuf/PatchOverlayCallSite/ReadSiteWord/
+    WriteSiteWord's own bufOfs/opAddr/rofs arguments are module-LOCAL
+    (0-based per module, matching the old lnkCodeBuf's own indexing), so
+    every access adds this base to get the real file offset. *)
   lnkSegRelocProc: LocalRelocProc; (* the REAL target's segRelocProc
     (LinkMZ.OnSegReloc for /CD -- overlays are /CD-only, DOCS/OVR.MD §2),
     set for ProcessOverlayModule's duration -- see OnSegRelocOverlay's own
@@ -1056,7 +1315,7 @@ END IsInitTarget;
    the trampoline's own entryOfs bytes at [opAddr+3..+4] with the target
    module's -- or whichever module TargetSegPara resolved -- codePara,
    corrupting the resident-jump offset silently past link time). *)
-PROCEDURE IsOverlayImport*(ls: State; rrefSeg: INTEGER): BOOLEAN;
+PROCEDURE IsOverlayImport(ls: State; rrefSeg: INTEGER): BOOLEAN;
   VAR sym: Symbol; so: Module;
 BEGIN
   sym := FindImport(rrefSeg);
@@ -1082,35 +1341,40 @@ BEGIN
 END IsOverlayCallSiteSegReloc;
 
 (* Overwrite a 5-byte CALL FAR call site's OPCODE, not just its operand,
-   rewriting it from `9A imm16 imm16` to `CD 3F id 00 00` (the overlay
-   trampoline's swappable form, DOCS/OVR.MD §5).  opAddr is the reloc's
-   own patchAddr MINUS 1 (the byte before the operand, i.e. the opcode
-   byte) -- see OnReloc's call site below for why -1 is always correct
-   here.  This is the one piece of the overlay plan with no existing
-   precedent in this linker (every other patch here only ever touches
-   operand bytes, never an opcode) -- see LINK.MOD's own comment at
-   PatchBuf for why that's normally true.  entryId is the target's own
-   0-based index into its module's .OVR entry list (OvrEntryId, DOCS/OVR.MD
-   §11.1) -- the id byte the runtime trap handler reads to know which module/
-   entry-point was requested (DOCS/OVR.MD §5). *)
-PROCEDURE PatchOverlayCallSite(opAddr: LONGINT; entryId: INTEGER; entryOfs: WORD);
-  VAR o: WORD;
+   rewriting it from `9A imm16 imm16` to `CD 3F id:WORD` (the overlay
+   trampoline's swappable form, DOCS/OVR.MD §5) -- only 4 bytes; the
+   trailing 2 bytes of the original 5-byte CALL FAR span are left
+   UNTOUCHED (still whatever CgCallFar's own operand bytes were, later
+   overwritten by the paired SEGRELOC — suppressed here via
+   IsOverlayCallSiteSegReloc, unaffected by this change).  entryOfs no
+   longer lives in the call site at all (DOCS/OVR-ID-WIDEN-PLAN.MD step 2
+   option (c), 2026-08-26): it moved into the .OVR file's own per-entry
+   directory (LinkOvr.WriteOvrFile, OVERLAY.MOD's DirEntryOfs), since it
+   is purely a function of entryId, never call-site-specific -- this
+   keeps the trampoline's REQUIRED width at 4 bytes even with a WORD id
+   (comfortably under the 5-byte ceiling the resident JMP-FAR rewrite
+   form still needs), with no dependency on whether the calling code
+   happened to reserve extra padding.  (An earlier attempt widened the
+   trampoline to 6 bytes instead, keeping entryOfs embedded — reverted
+   after a real crash proved a plain, non-`$O+`-caller CgCallFar site
+   has zero spare bytes to grow into; see CgCallFarOvr's own comment in
+   CGEN.MOD for the full story.)  opAddr is the reloc's own patchAddr
+   MINUS 1 (the byte before the operand, i.e. the opcode byte) -- see
+   OnReloc's call site below for why -1 is always correct here.  This is
+   the one piece of the overlay plan with no existing precedent in this
+   linker (every other patch here only ever touches operand bytes, never
+   an opcode) -- see LINK.MOD's own comment at PatchBuf for why that's
+   normally true.  entryId is the target's own 0-based index into its
+   module's .OVR entry list (OvrEntryId, DOCS/OVR.MD §11.1) -- the id
+   WORD the runtime trap handler reads to know which module/entry-point
+   was requested (DOCS/OVR.MD §5). *)
+PROCEDURE PatchOverlayCallSite(opAddr: LONGINT; entryId: INTEGER);
 BEGIN
-  o := WORD(opAddr);
-  lnkCodeBuf^[o]   := 0CDH;   (* INT opcode *)
-  lnkCodeBuf^[o+1] := 03FH;   (* interrupt number 3Fh, DOCS/OVR.MD §5 *)
-  lnkCodeBuf^[o+2] := BYTE(entryId);
-  (* bytes o+3,o+4: DOCS/OVR.MD §5: a module's
-     code blob is written as ONE contiguous region, and different exported
-     entry points do NOT all start at offset 0 within it (only __init does,
-     by construction) -- LoadModule needs each entry's own in-module code
-     offset to jump to the right place.  These two bytes carry exactly
-     that (entryOfs, little-endian WORD) instead of being left as
-     CgCallFar's leftover operand bytes.  Overlay_PatchTrampoline reads
-     them back (via the ASM's own [es:bx+3] access) before overwriting the
-     whole 5-byte slot with the resident JMP FAR form. *)
-  lnkCodeBuf^[o+3] := BYTE(SYSTEM.AND(entryOfs, 0FFH));
-  lnkCodeBuf^[o+4] := BYTE(SYSTEM.LSR(entryOfs, 8))
+  Files.Seek(lnkCodeFile, lnkCodeBase + opAddr);
+  Files.WriteByte(lnkCodeFile, 0CDH);   (* INT opcode *)
+  Files.WriteByte(lnkCodeFile, 03FH);   (* interrupt number 3Fh, DOCS/OVR.MD §5 *)
+  Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.AND(WORD(entryId), 0FFH)));
+  Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.LSR(WORD(entryId), 8)))
 END PatchOverlayCallSite;
 
 (* Append one call-site patch-table entry to target module so^ (DOCS/OVR.MD
@@ -1195,13 +1459,35 @@ END AddOvrSite;
    a physical patch site; Cgen.CgCallFarOvr's 5-byte padding reservation
    is consequently now unused dead space (kept for now -- removing it
    would be a separate codegen change; 5 bytes/cross-overlay-call-site is
-   not worth the churn to reclaim immediately). *)
+   not worth the churn to reclaim immediately).  UPDATE
+   (DOCS/OVR-ID-WIDEN-PLAN.MD step 2, 2026-08-26): a first attempt at
+   widening the trampoline's own id field from BYTE to WORD grew this
+   padding to 6 bytes, planning to have the call-site trampoline borrow
+   its first byte -- REVERTED after a real crash: a call site compiled
+   via plain Cgen.CgCallFar (not CgCallFarOvr) has NO such padding at
+   all, since only overlayMode-gated callers reserve it, yet
+   Link.OnReloc's own isOverlayCall decision fires for ANY call site
+   targeting an overlay module regardless of caller -- the 6-byte
+   trampoline silently overwrote adjacent code at such a site.  Fixed
+   instead by moving entryOfs out of the trampoline format entirely,
+   into the .OVR directory (LinkOvr.WriteOvrFile, OVERLAY.MOD's
+   DirEntryOfs) -- the swappable trampoline is now `CD 3F id:WORD`, just
+   4 bytes, comfortably inside the plain 5-byte CALL FAR it replaces
+   with room to spare, so this padding's own 5-byte width never needed
+   to change at all and stays genuinely dead space, exactly as this
+   comment originally described. *)
 PROCEDURE AddOvrReturnTrampoline(caller: Module; retOfs: LONGINT; calleeEntryId: INTEGER);
   VAR node: OvrResumeNode; k: INTEGER; globalId: WORD;
 BEGIN
   globalId := lnkLs^.ovrNextEntryId;
-  IF LONGINT(globalId) > LONGINT(255) THEN
-    LogErr.Error("overlay: more than 256 overlay entry points in one program (trampoline id is 1 byte)");
+  (* Ceiling widened from 256 (1-byte id) to WORD's own 65535 range,
+     DOCS/OVR-ID-WIDEN-PLAN.MD step 2, 2026-08-26 -- see CalculateLayout's
+     own identically-updated check for the full rationale; this one is
+     genuinely unreachable in practice (CalculateLayout's own check fires
+     first, at module-load time, before any individual call site is ever
+     patched) but kept as defense in depth, same as before. *)
+  IF LONGINT(globalId) > LONGINT(65535) THEN
+    LogErr.Error("overlay: more than 65535 overlay entry points in one program (trampoline id is a WORD)");
     RETURN
   END;
   INC(lnkLs^.ovrNextEntryId);
@@ -1223,20 +1509,24 @@ END AddOvrReturnTrampoline;
    REPORT.MD §4.1 for why the two diverged: code stays a RAM scratch
    buffer per module, data is file-backed.) *)
 PROCEDURE PatchBuf*(bufOfs: LONGINT; addend: WORD; width: INTEGER);
-  VAR o: WORD; cur: WORD;
+  VAR lo, hi: BYTE; cur: WORD;
 BEGIN
-  (* WORD, not INTEGER: buffer offsets are 0..64999 and an offset >= 32768
-     carried as a negative INTEGER indexed correctly only via 16-bit
-     wraparound — exactly the trap this module's own comments warn about. *)
-  o := WORD(bufOfs);
+  (* File-backed since 2026-09-03 (dropped the resident ls^.codeBuf) --
+     same seek+read+seek+write shape as PatchDataFile below, just against
+     lnkCodeFile/lnkCodeBase instead of ls^.dataFile/DataFileBase. *)
+  Files.Seek(lnkCodeFile, lnkCodeBase + bufOfs);
+  Files.ReadByte(lnkCodeFile, lo);
   IF width = 2 THEN
-    cur := WORD(INTEGER(lnkCodeBuf^[o]) + SYSTEM.LSL(INTEGER(lnkCodeBuf^[o+1]), 8));
+    Files.ReadByte(lnkCodeFile, hi);
+    cur := WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8));
     cur := cur + addend;   (* 16-bit WORD arithmetic wraps mod 65536 *)
-    lnkCodeBuf^[o]   := BYTE(SYSTEM.AND(cur, 0FFH));
-    lnkCodeBuf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH))
+    Files.Seek(lnkCodeFile, lnkCodeBase + bufOfs);
+    Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.AND(cur, 0FFH)));
+    Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.AND(SYSTEM.LSR(cur, 8), 0FFH)))
   ELSE
-    cur := WORD(SYSTEM.AND(INTEGER(lnkCodeBuf^[o]) + INTEGER(addend), 0FFH));
-    lnkCodeBuf^[o] := BYTE(cur)
+    cur := WORD(SYSTEM.AND(INTEGER(lo) + INTEGER(addend), 0FFH));
+    Files.Seek(lnkCodeFile, lnkCodeBase + bufOfs);
+    Files.WriteByte(lnkCodeFile, BYTE(cur))
   END
 END PatchBuf;
 
@@ -1312,11 +1602,12 @@ BEGIN RETURN DataFileBase(ls, m) + rofs END DataFileOffsetOf;
    operand; LinkNE reads it (for the NE reloc's target-offset) before stamping
    the FFFF placeholder over it (see LINKNE / NE-BP.MD §1.4). *)
 PROCEDURE ReadSiteWord*(rseg: INTEGER; rofs: LONGINT): WORD;
-  VAR o: WORD; lo, hi: BYTE; addr: LONGINT;
+  VAR lo, hi: BYTE; addr: LONGINT;
 BEGIN
   IF rseg = Rdoff.SegCode THEN
-    o := WORD(rofs);
-    RETURN WORD(INTEGER(lnkCodeBuf^[o]) + SYSTEM.LSL(INTEGER(lnkCodeBuf^[o+1]), 8))
+    Files.Seek(lnkCodeFile, lnkCodeBase + rofs);
+    Files.ReadByte(lnkCodeFile, lo); Files.ReadByte(lnkCodeFile, hi);
+    RETURN WORD(INTEGER(lo) + SYSTEM.LSL(INTEGER(hi), 8))
   ELSE
     addr := DataFileOffsetOf(lnkLs, lnkMod, rofs);
     Files.Seek(lnkLs^.dataFile, addr);
@@ -1329,12 +1620,12 @@ END ReadSiteWord;
    LinkNE stamps the BPC-reference FFFF / 0000 reloc placeholder for /CP so the
    loader writes the real value at load time (NE-BP.MD §1.4). *)
 PROCEDURE WriteSiteWord*(rseg: INTEGER; rofs: LONGINT; val: WORD);
-  VAR o: WORD; addr: LONGINT;
+  VAR addr: LONGINT;
 BEGIN
   IF rseg = Rdoff.SegCode THEN
-    o := WORD(rofs);
-    lnkCodeBuf^[o]   := BYTE(SYSTEM.AND(val, 0FFH));
-    lnkCodeBuf^[o+1] := BYTE(SYSTEM.AND(SYSTEM.LSR(val, 8), 0FFH))
+    Files.Seek(lnkCodeFile, lnkCodeBase + rofs);
+    Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.AND(val, 0FFH)));
+    Files.WriteByte(lnkCodeFile, BYTE(SYSTEM.AND(SYSTEM.LSR(val, 8), 0FFH)))
   ELSE
     addr := DataFileOffsetOf(lnkLs, lnkMod, rofs);
     Files.Seek(lnkLs^.dataFile, addr);
@@ -1445,21 +1736,30 @@ BEGIN
     IF entryId < 0 THEN
       LogErr.Error2("overlay: target has no .OVR entry id: ", symName); RETURN
     END;
-    (* DOCS/OVR.MD §11.1: the trampoline id is ONE byte -- a hard 256-entry-point
+    (* DOCS/OVR.MD §11.1: the trampoline id is a WORD (widened from 1 byte,
+       DOCS/OVR-ID-WIDEN-PLAN.MD step 2, 2026-08-26) -- a 65535-entry-point
        ceiling across the WHOLE program (global ids, see ovrEntryIdBase),
-       a direct consequence of this project's own 5-byte INT-3Fh trampoline
-       encoding (1 opcode + 1 interrupt number + 1 id byte + 2 offset
-       bytes). *)
-    IF entryId > 255 THEN
-      LogErr.Error("overlay: more than 256 overlay entry points in one program (trampoline id is 1 byte)");
+       a direct consequence of this project's own 4-byte INT-3Fh
+       swappable-trampoline encoding (1 opcode + 1 interrupt number + 2
+       id bytes -- entryOfs moved out of the call site entirely into the
+       .OVR directory, PatchOverlayCallSite's own comment).  Genuinely
+       unreachable in practice, same as AddOvrReturnTrampoline's own
+       identical check -- kept as defense in depth; CalculateLayout's
+       own check fires first. *)
+    IF entryId > 65535 THEN
+      LogErr.Error("overlay: more than 65535 overlay entry points in one program (trampoline id is a WORD)");
       RETURN
     END;
-    PatchOverlayCallSite(patchAddr - 1, entryId, fixup);
+    PatchOverlayCallSite(patchAddr - 1, entryId);
     AddOvrSite(overlayTarget, lnkMod, patchAddr - 1, entryId);
 
     (* Cross-overlay calls (DOCS/OVR.MD §9): if the
        CALLING code is itself inside an overlay module, the return address
-       (patchAddr - 1 + 5, one past this 5-byte trampoline) needs its OWN
+       (patchAddr - 1 + 5, one past the call site's own 5-byte reserved
+       footprint -- unaffected by the swappable trampoline's own byte
+       count, DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26
+       settled on a 4-byte trampoline; a brief, reverted intermediate
+       attempt used +6) needs its OWN
        trampoline too: when the callee returns, if the
        CALLER's own module was evicted in the meantime (to make room for a
        nested call), the return address is no longer valid resident
@@ -1514,21 +1814,19 @@ BEGIN
   END
 END WriteZeros;
 
-(* Process one module's own CODE segment: load its code into the reusable
-   scratch buffer, apply its relocations (RELOC + SEGRELOC, via the
-   target-specific segRelocProc callback), spill the relocated bytes to the
-   code temp file at the module's own image offset, then move on.  Only one
-   module's code buffer is ever resident, so peak code heap is <= one
-   module's own .rdf code size (<= 64KB, RDOFF2's own per-segment limit)
-   regardless of total program size. *)
+(* Process one module's own CODE segment: stream its code straight into
+   ftmp at its own final position (Rdoff.ReadCodeToFile, no resident RAM
+   staging buffer -- 2026-09-03), apply its relocations (RELOC + SEGRELOC,
+   via the target-specific segRelocProc callback) in place against ftmp
+   itself, then move on. *)
 (* ftmp is written strictly sequentially; pos is the next byte offset.  Pads
    the gap from pos up to the module's own codePara*16 with zeros (inter-
    module 16-byte alignment) before writing it, so we never rely on
    seek-past-EOF zero-filling (which xt's DOS does not do).  pos is advanced
    past the module afterward. *)
-PROCEDURE ProcessModule(ls: State; m: Module; VAR ftmp: Files.File;
+PROCEDURE ProcessModule(m: Module; VAR ftmp: Files.File;
                         VAR pos: LONGINT; onRelocProc, segRelocProc: Rdoff.RelocProc);
-  VAR sz, k: WORD; codeStart: LONGINT;
+  VAR sz: WORD; codeStart: LONGINT;
       padBuf: ARRAY 16 OF BYTE; padLen: WORD;
 BEGIN
   codeStart := LONGINT(m^.codePara) * LONGINT(16);
@@ -1544,16 +1842,19 @@ BEGIN
     END;
     pos := codeStart
   END;
-  (* explicit indexed loop, NOT SYSTEM.FILL: a far-heap SegBuf zeroed via
-     SYSTEM.FILL previously mis-addressed (see implementation-rules.md
-     §"Reusing one shared code buffer") — reverted, do not retry. *)
-  k := 0; WHILE k < sz DO ls^.codeBuf^[k] := BYTE(0); INC(k) END;
 
-  Rdoff.ReadCode(m^.path, m^.libOfs, m^.hdrSize, ls^.codeBuf, 0, sz);
+  (* Stream this module's code straight into ftmp at its own final
+     position -- no resident RAM staging buffer (2026-09-03, dropped
+     ls^.codeBuf entirely; see Rdoff.ReadCodeToFile's own header comment
+     and PatchBuf's, which now patches THIS SAME spill file in place
+     rather than a RAM copy). *)
+  Rdoff.ReadCodeToFile(m^.path, m^.libOfs, m^.hdrSize, ftmp, pos, sz);
 
-  (* apply this module's relocations (data-segment relocs go through
-     ls^.dataFile inside PatchDataFile, not a RAM alias) *)
-  lnkCodeBuf := ls^.codeBuf;
+  (* apply this module's relocations directly against ftmp, via
+     lnkCodeFile/lnkCodeBase (data-segment relocs go through
+     ls^.dataFile inside PatchDataFile, the same file-backed shape) *)
+  lnkCodeFile := ftmp;
+  lnkCodeBase := pos;
   lnkMod := m;
   FreeImports;
   (* Pass 1: collect IMPORT records first (RELOCs may precede them). *)
@@ -1564,10 +1865,12 @@ BEGIN
   Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, NIL, onRelocProc, segRelocProc);
   FreeImports;   (* release this module's IMPORT chain *)
 
-  (* spill the relocated module sequentially *)
-  IF Files.BlockWrite(ftmp, ls^.codeBuf^[0], sz) # sz THEN
-    LogErr.Error("Write error (code spill)")
-  END;
+  (* ReadCodeToFile already advanced ftmp's own position to pos+sz, but
+     every PatchBuf/PatchOverlayCallSite/ReadSiteWord/WriteSiteWord call
+     above did its own Seek — re-seek to the end explicitly rather than
+     rely on whichever reloc happened to run last leaving the position
+     where the next caller (padding for the NEXT module) expects it. *)
+  Files.Seek(ftmp, pos + LONGINT(sz));
   pos := pos + LONGINT(sz)
 END ProcessModule;
 
@@ -1612,7 +1915,7 @@ END AddOvrXFixup;
    shape; OnSegRelocOverlay (below) is NOT a pure pass-through (it needs
    the SEGRELOC-suppression guard), which is the only reason this sibling
    procedure exists at all rather than passing Link.OnReloc directly. *)
-PROCEDURE OnRelocOverlay*(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
+PROCEDURE OnRelocOverlay(rseg: INTEGER; rofs: LONGINT; rwidth: INTEGER;
                          rrefSeg: INTEGER; rrel: INTEGER); FAR;
 BEGIN
   OnReloc(rseg, rofs, rwidth, rrefSeg, rrel)
@@ -1775,15 +2078,20 @@ END OnSegRelocOverlay;
    the next free byte in ovrSpillFile, mirroring ProcessModule's pos. *)
 PROCEDURE ProcessOverlayModule(ls: State; m: Module; VAR ovrPos: LONGINT;
                                segRelocProc: Rdoff.RelocProc);
-  VAR sz, k: WORD;
+  VAR sz: WORD;
 BEGIN
   sz := WORD(m^.codeSize);
   m^.ovrCodeOfs := ovrPos;
-  IF sz < 1 THEN RETURN END;
-  k := 0; WHILE k < sz DO ls^.codeBuf^[k] := BYTE(0); INC(k) END;
-  Rdoff.ReadCode(m^.path, m^.libOfs, m^.hdrSize, ls^.codeBuf, 0, sz);
+  IF sz < 1 THEN
+    RETURN
+  END;
 
-  lnkCodeBuf := ls^.codeBuf;
+  (* Stream straight into ovrSpillFile, same shape as ProcessModule's own
+     main-image streaming (2026-09-03, dropped ls^.codeBuf entirely). *)
+  Rdoff.ReadCodeToFile(m^.path, m^.libOfs, m^.hdrSize, ls^.ovrSpillFile, ovrPos, sz);
+
+  lnkCodeFile := ls^.ovrSpillFile;
+  lnkCodeBase := ovrPos;
   lnkMod := m;
   lnkSegRelocProc := segRelocProc;
   FreeImports;
@@ -1791,9 +2099,7 @@ BEGIN
   Rdoff.ScanRelocs(m^.path, m^.libOfs, m^.hdrSize, NIL, OnRelocOverlay, OnSegRelocOverlay);
   FreeImports;
 
-  IF Files.BlockWrite(ls^.ovrSpillFile, ls^.codeBuf^[0], sz) # sz THEN
-    LogErr.Error("Write error (overlay code spill)")
-  END;
+  Files.Seek(ls^.ovrSpillFile, ovrPos + LONGINT(sz));
   ovrPos := ovrPos + LONGINT(sz)
 END ProcessOverlayModule;
 
@@ -1836,7 +2142,7 @@ BEGIN
        with the real module living at paragraph 0) -- their own code+reloc
        processing happens separately, via LinkOvr, after this returns
        (DOCS/OVR.MD §11.1). *)
-    IF m^.used & ~m^.isOverlay THEN ProcessModule(ls, m, ls^.spillFile, pos, onRelocProc, segRelocProc) END;
+    IF m^.used & ~m^.isOverlay THEN ProcessModule(m, ls^.spillFile, pos, onRelocProc, segRelocProc) END;
     m := m^.next
   END;
   (* Pad the spill up to totalCodeLen: the last module's code ends at `pos`
@@ -1851,11 +2157,11 @@ BEGIN
      content (delete-on-close) before CopyCodeImage can read it. *)
   Files.Seek(ls^.spillFile, LONGINT(0));
 
-  (* Overlay modules: same reusable ls^.codeBuf, a separate spill file, no
-     alignment/padding needed (LinkOvr.WriteOvrFile streams each module's
-     own bytes by its own recorded length, never by fixed image offsets --
-     unlike the main image, nothing here needs 16-byte segment alignment
-     between modules). Must run BEFORE ls^.codeBuf is disposed below. *)
+  (* Overlay modules: same streaming shape as the main image above, a
+     separate spill file, no alignment/padding needed (LinkOvr.WriteOvrFile
+     streams each module's own bytes by its own recorded length, never by
+     fixed image offsets -- unlike the main image, nothing here needs
+     16-byte segment alignment between modules). *)
   IF ls^.anyOverlay & ~LogErr.HaveErr() THEN
     IF ~Files.ReWriteTemp(ls^.ovrSpillFile) THEN
       LogErr.Error("Cannot create overlay code temp"); RETURN
@@ -1868,13 +2174,6 @@ BEGIN
     END;
     Files.Seek(ls^.ovrSpillFile, LONGINT(0))
   END;
-
-  (* The 65000-byte per-module code buffer is finished the moment the streaming
-     loop above ends — WriteExe/CopyCodeImage read only the spill file, never
-     codeBuf.  Release it NOW (not in LinkFree) so its 65 KB is free during the
-     .exe write, which is the link's tightest memory point (LinkFree's NIL
-     guard makes the later dispose a no-op). *)
-  IF ls^.codeBuf # NIL THEN DISPOSE(ls^.codeBuf); ls^.codeBuf := NIL END;
 
   (* Resolve entry point: "start" lives at offset SymOffset within its own
      module's own CODE segment (codePara), no group-relative math needed. *)
@@ -1941,9 +2240,7 @@ BEGIN
     DISPOSE(m);
     m := mNext
   END;
-  ls^.modHead := NIL; ls^.modTail := NIL;
-
-  IF ls^.codeBuf # NIL THEN DISPOSE(ls^.codeBuf); ls^.codeBuf := NIL END
+  ls^.modHead := NIL; ls^.modTail := NIL
 END LinkFree;
 
 END Link.

@@ -66,7 +66,7 @@ Only `.om` archives are read — standalone `.def` files are ignored.
 The linker is now built into `toc.exe`.  Pass `/ENTRY=ProcName` to trigger linking:
 
 ```
-TOC286.EXE /ENTRY=Run MyProg.Mod   → MyProg.exe (auto-named from the module name)
+TOC.EXE /ENTRY=Run MyProg.Mod   → MyProg.exe (auto-named from the module name)
 ```
 
 `OBERON.OM` (the merged standard library) is loaded automatically — no need to list
@@ -82,7 +82,7 @@ build-script generator.
 
 ```
 REM Single command: dep-scan + compile + link
-BIN\TOC286.EXE /ENTRY=Run MyProg.Mod
+BIN\TOC.EXE /ENTRY=Run MyProg.Mod
 ```
 
 `toc.exe` automatically recompiles only stale modules (pass `/M` to recompile
@@ -689,13 +689,13 @@ target used. It is **not** a 32-bit or flat-memory target: everything in
 - `/CP` output can only be tested on a real DPMI16 host or DPMI16-capable
   extender. See `DOCS/NE-BP.MD` for the full NE format writeup, including
   every real-hardware bug found bringing this target up.
-- **The compiler itself ships as two binaries, exactly the same source, just
-  linked for different targets:** `BIN/TOC.EXE` (`/CD`, "clean DOS") and
-  `BIN/TOC286.EXE` (`/CP`, DPMI16). Reach for `TOC286.EXE` when plain DOS
-  conventional memory (the 640 KB ceiling) isn't enough to run `TOC.EXE`
-  itself — a DPMI host gives the compiler access to memory beyond that
-  limit. There is no behavioral difference between the two beyond that;
-  neither is a "reduced" or "alternate" compiler.
+- **`/CP` selects the output format only.** The compiler itself is always the
+  same real-mode toolchain (`TOC.EXE` + `TOCC.EXE` + `TOCL.EXE`); `/CD` and
+  `/CP` differ solely in what the link step emits. A `BIN/TOC.EXE` — the
+  compiler itself linked `/CP`, so it could run under a DPMI host and escape
+  the 640 KB ceiling — existed historically and was retired 2026-09-05, once
+  the compile/link process split removed the memory pressure that motivated
+  it.
 
 ---
 
@@ -930,7 +930,7 @@ One command handles compile and link — no individual `.om` files needed:
 
 ```
 REM Real MS-DOS (with OBERON.OM in CWD or alongside toc.exe):
-TOC286.EXE /ENTRY=Run MyProg.Mod
+TOC.EXE /ENTRY=Run MyProg.Mod
 ```
 
 Individual `.om` files can be placed in `OBERON_LIB` to override specific modules —
@@ -1438,7 +1438,7 @@ END RunAllTests;
 END MyTest.
 ```
 
-Build with the all-in-one `TOC286.EXE /ENTRY=RunAllTests MyTest.Mod`; `OBERON.OM`
+Build with `TOC.EXE /ENTRY=RunAllTests MyTest.Mod`; `OBERON.OM`
 provides `Test`, `Out87`, `Math`, `Out`, `SYSTEM`, and all other stdlib modules
 automatically — no individual `.om` files need to be listed.
 
@@ -1725,7 +1725,7 @@ END Lines.
 Build and run — one command does everything:
 ```
 REM All-in-one: dep-scan + compile + link in a single toc.exe invocation
-REM OBERON.OM is found automatically in CWD or alongside BIN\TOC286.EXE
-BIN\TOC286.EXE /ENTRY=Run Lines.Mod
+REM OBERON.OM is found automatically in CWD or alongside BIN\TOC.EXE
+BIN\TOC.EXE /ENTRY=Run Lines.Mod
 LINES.EXE
 ```

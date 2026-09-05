@@ -177,6 +177,19 @@ BEGIN
   RETURN Rdoff.CodeLen(CgObj)
 END CgPc;
 
+(* §2.11 (DOCS/CODEGEN-SIZE.MD): roll the code buffer back to a position
+   captured earlier via CgPc() -- used ONLY to discard a just-emitted,
+   turned-out-unneeded JMP (skip-nested-decl-block) when nothing was
+   emitted after it, so there is nothing else (no reloc, no debug symbol,
+   no other backpatch) anchored to the bytes being discarded.  Caller's
+   responsibility: only call this when `to` really is the code length at
+   an earlier point with ZERO intervening emission of anything besides
+   the bytes being rolled back. *)
+PROCEDURE CgTruncateCode*(to: LONGINT);
+BEGIN
+  Rdoff.TruncateCode(CgObj, to)
+END CgTruncateCode;
+
 PROCEDURE CgDpc*(): LONGINT;
 BEGIN
   RETURN Rdoff.DataLen(CgObj)
@@ -434,12 +447,33 @@ END CgCallFar;
    would be PERMANENTLY dead in that binary -- found via LINKNE.MOD
    becoming $O+ (DOCS/OVR.MD's own /CD-hot-path memory-pressure fix) and
    baking pointless padding into every one of its own far calls when
-   compiled for TOC286.EXE (/CP) too, since compile-time overlayMode has
+   compiled for a /CP target too, since compile-time overlayMode has
    no visibility into the link target on its own. *)
 PROCEDURE CgCallFarOvr*(importId: INTEGER);
 BEGIN
   CgCallFar(importId);
-  EmitCodeStr("90,90,90,90,90")            (* 5x NOP -- resume-trampoline slot *)
+  (* 5x NOP -- resume-trampoline BOOKKEEPING slot, genuinely dead space
+     at the machine-code level (see Link.AddOvrReturnTrampoline's own
+     comment: resume trampolines live in the resident
+     Overlay.ResumeTrapTable, never physically patched here).  Widening
+     this to 6x (DOCS/OVR-ID-WIDEN-PLAN.MD step 2, first attempt,
+     2026-08-26) turned out to be the WRONG fix for the trampoline id's
+     BYTE->WORD widening and was reverted: it only grows this padding,
+     but Link.OnReloc's isOverlayCall decision fires for ANY call site
+     targeting an overlay module regardless of whether the CALLER
+     reserved this padding at all (only overlayMode-gated CgCallFarOvr
+     callers do) -- a plain CgCallFar call site that turns out to target
+     an overlay module has ZERO padding, so a 6-byte trampoline
+     silently overwrote one byte of whatever code followed it (found via
+     a real crash compiling SRC/TASM/TASM.MOD with a widened build).
+     Fixed instead by moving entryOfs out of the call-site trampoline
+     format entirely, into the .OVR directory (LinkOvr.WriteOvrFile,
+     OVERLAY.MOD's DirEntryOfs) -- the swappable form is now
+     `CD 3F id:WORD` = 4 bytes, fitting comfortably inside the plain
+     5-byte CALL FAR it replaces with room to spare, exactly like the
+     original 1-byte-id design did, so this padding's own width never
+     needed to change at all. *)
+  EmitCodeStr("90,90,90,90,90")
 END CgCallFarOvr;
 
 (* Load the FAR address of an imported procedure into DX:AX.
@@ -704,6 +738,27 @@ BEGIN
   EmitCodeStr("FC,F3,A4");      (* CLD / REP MOVSB ; DS:SI -> ES:DI *)
   Emit1(01FH)                        (* POP DS            ; restore DS *)
 END CgPushAggrValue;
+
+(* ---- one-instruction emitters for idioms the PARSERS used to hand-encode ----
+   PEXPR/PEXPR2/PSTMT between them emitted ~118 raw opcode bytes via
+   Cgen.Emit1/Emit2(0xxH, ...), and the SAME dozen instructions kept
+   recurring: XOR DX,DX eight times, SHL AX,1 and ADD BX,AX five each,
+   MOV SI,BX four, and so on.  That put instruction encoding — CGEN's whole
+   job — in three other modules at once, where a mis-typed byte silently
+   emits wrong machine code.  Named here so each encoding has exactly one
+   definition; the single-byte cases already had Op* constants (OpPopBx,
+   OpPushEs, ...) that the parsers simply were not using (code review,
+   2026-09-04). *)
+PROCEDURE CgZeroDx*();  BEGIN Emit2(033H, 0D2H) END CgZeroDx;   (* XOR DX,DX *)
+PROCEDURE CgZeroAx*();  BEGIN Emit2(033H, 0C0H) END CgZeroAx;   (* XOR AX,AX *)
+PROCEDURE CgShlAx1*();  BEGIN Emit2(0D1H, 0E0H) END CgShlAx1;   (* SHL AX,1 *)
+PROCEDURE CgAddBxAx*(); BEGIN Emit2(003H, 0D8H) END CgAddBxAx;  (* ADD BX,AX *)
+PROCEDURE CgMovBxAx*(); BEGIN Emit2(08BH, 0D8H) END CgMovBxAx;  (* MOV BX,AX *)
+PROCEDURE CgMovSiBx*(); BEGIN Emit2(08BH, 0F3H) END CgMovSiBx;  (* MOV SI,BX *)
+PROCEDURE CgMovSiAx*(); BEGIN Emit2(08BH, 0F0H) END CgMovSiAx;  (* MOV SI,AX *)
+PROCEDURE CgMovDiAx*(); BEGIN Emit2(08BH, 0F8H) END CgMovDiAx;  (* MOV DI,AX *)
+PROCEDURE CgCwd*();     BEGIN Emit1(099H)       END CgCwd;      (* CWD: sign-extend AX into DX:AX *)
+PROCEDURE CgPopDs*();   BEGIN Emit1(01FH)       END CgPopDs;    (* POP DS: restore data segment *)
 
 (* CgEsFromMode — emit `MOV DX, SS/DS; MOV ES, DX` (4 bytes).
    Sets ES to the segment matching an MLocal (SS) or MGlobal (DS) item. *)
@@ -1582,16 +1637,17 @@ PROCEDURE CgFstpLongrealEsbx(); BEGIN Emit3(026H, 0DDH, 01FH) END CgFstpLongreal
 (* §4.1 near mirrors: same FPU op, no ES: override. *)
 (* isLocal: SS: override needed -- see CgDerefNear's own comment; a bare
    [BX] always defaults to DS, never SS, regardless of ambient SS. *)
-PROCEDURE CgFldRealNearBx*(isLocal: BOOLEAN);
+
+PROCEDURE CgFldRealNearBx(isLocal: BOOLEAN);
 BEGIN IF isLocal THEN EmitCodeStr("36,D9,07") ELSE Emit2(0D9H, 007H) END
 END CgFldRealNearBx;
-PROCEDURE CgFstpRealNearBx*(isLocal: BOOLEAN);
+PROCEDURE CgFstpRealNearBx(isLocal: BOOLEAN);
 BEGIN IF isLocal THEN EmitCodeStr("36,D9,1F") ELSE Emit2(0D9H, 01FH) END
 END CgFstpRealNearBx;
-PROCEDURE CgFldLongrealNearBx*(isLocal: BOOLEAN);
+PROCEDURE CgFldLongrealNearBx(isLocal: BOOLEAN);
 BEGIN IF isLocal THEN EmitCodeStr("36,DD,07") ELSE Emit2(0DDH, 007H) END
 END CgFldLongrealNearBx;
-PROCEDURE CgFstpLongrealNearBx*(isLocal: BOOLEAN);
+PROCEDURE CgFstpLongrealNearBx(isLocal: BOOLEAN);
 BEGIN IF isLocal THEN EmitCodeStr("36,DD,1F") ELSE Emit2(0DDH, 01FH) END
 END CgFstpLongrealNearBx;
 

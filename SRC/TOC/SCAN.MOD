@@ -1,4 +1,4 @@
-(*$D-*)
+(*$D-,O-*)
 MODULE Scan;
 (*
   Oberon compiler scanner.

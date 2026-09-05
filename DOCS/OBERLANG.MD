@@ -1117,6 +1117,42 @@ Examples: `Hello_WriteStr`, `Kernel_heap`, `Hello__init`
    Always FAR (`item->is_far` set from `.def` type, default 1); params start at `[BP+6]`.  
    EXTERNAL NEAR procs are the one exception: `item->is_far=0` → `E8 rel16` NEAR call.
 
+### EXTERNAL procedures
+
+`PROCEDURE name(...); EXTERNAL;` declares a procedure with no body: the
+implementation is provided by a separately-assembled/compiled `.rdf` file,
+linked in at link time as an ordinary RDOFF import. The compiler emits an
+`IMPORT` record for the mangled symbol `<thisModule>_<name>` (e.g.
+`EMS.MOD`'s `PROCEDURE Present*(): BOOLEAN; EXTERNAL;` imports
+`EMS_Present`, matched against a hand-written `EMS.ASM` label) — this is
+how every `SRC/LIB/SYSTEM.ASM`/`EMS.ASM`-backed procedure reaches its real
+implementation.
+
+**`EXTERNAL "name"` (optional string literal, added 2026-08-24):** names
+the RDOFF import symbol *verbatim* instead of using the usual
+`<thisModule>_<name>` mangling — e.g. `PROCEDURE ParseFactorExt*(VAR item:
+Cgen.Item); EXTERNAL "PExpr2_ParseFactor";` in `SRC/TOC/PEXPR.MOD` imports
+`PEXPR2.MOD`'s own real export `PExpr2_ParseFactor` directly. This is a
+first-class, permanent part of the dialect (not a one-off workaround):
+every plain `EXTERNAL;` declaration (all the `SYSTEM.ASM`/`EMS.ASM`-backed
+ones) is unaffected and keeps mangling exactly as before — the string
+form is purely additive. Its main use is reaching a **specific export of
+a specific other Oberon module** by name, without a real `IMPORT` — which
+matters whenever Oberon's no-circular-imports rule stands in the way (the
+motivating case: `PEXPR.MOD` needs to call `PEXPR2.MOD`'s `ParseFactor`,
+but `PEXPR2.MOD` already `IMPORT`s `PEXPR.MOD`, so a real `IMPORT PExpr2`
+from `PEXPR.MOD` would be circular). Because the compiler treats an
+`EXTERNAL` procedure exactly like a real imported one for designator
+resolution (`Cgen.MImport`), every call site compiles to an ordinary,
+linker-checked `CALL FAR`/`CALL NEAR` — including, notably, correctly
+participating in the `$O+` overlay-call trampoline rewrite
+(`Link.OnReloc`'s `isOverlayCall` check, DOCS/OVR.MD §5) when the target
+module is overlay-eligible, since that rewrite keys purely on the target
+symbol's owning module, not on how the caller obtained the reference. See
+OVR-BUG.MD "Bug 5" for the motivating fix (replacing a cached
+`PROCEDURE`-variable hook, which is NOT overlay-safe, with this).
+See DOCS/OBERON07.EBN's own `EXTERNAL` entry for the full grammar.
+
 ### Procedural variables
 
 **Procedure-typed values are ALWAYS FAR (maintainer rule, 2026-07-10/11:

@@ -85,7 +85,13 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$ROOT/TMP"
+# TOC.EXE is only a driver now; it execs its TOCC/TOCL siblings from its own
+# directory.  ChildPath derives their names from the driver's own basename by
+# stripping a trailing "TOC" -- "TOC_BOOT" has no such suffix, so it falls
+# back to the bare names.  Stage all three accordingly.
 cp "$BOOTOC" "$WORK/TOC_BOOT.EXE"
+cp "$ROOT/BOOT/TOCC.EXE" "$WORK/TOCC.EXE"
+cp "$ROOT/BOOT/TOCL.EXE" "$WORK/TOCL.EXE"
 cp "$BINOM" "$WORK/OBERON.OM"
 cp "$BINTRUBOOM" "$WORK/TRUBO.OM"
 cp "$TASMDIR"/*.MOD "$WORK/"

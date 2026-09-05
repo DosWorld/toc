@@ -14,7 +14,12 @@ SHELL    := /bin/bash
 ROOT     := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 MANIFEST := $(ROOT)/TESTS/MANIFEST.TSV
 FIXDIR   := $(ROOT)/TESTS/FIX
+# The toolchain is three binaries: TOC.EXE is only a driver and execs
+# TOCC.EXE/TOCL.EXE from its OWN directory, so every scratch workdir needs
+# all three, not just the driver.
 OC       := $(ROOT)/BIN/TOC.EXE
+OCC      := $(ROOT)/BIN/TOCC.EXE
+OCL      := $(ROOT)/BIN/TOCL.EXE
 RDFGREP  := $(ROOT)/BIN/RDFGREP.EXE
 XT       := $(shell command -v xt 2>/dev/null)
 # Per-test scratch dirs live under the project TMP/ (not the system tmpfs).
@@ -57,6 +62,8 @@ T.$(subst /,.,$(1)):
 	fixture=$$$$main_fix; \
 	cp $(RDFGREP) $$$$wd/RDFGREP.EXE; \
 	cp $(OC) $$$$wd/TOC.EXE; \
+	cp $(OCC) $$$$wd/TOCC.EXE; \
+	cp $(OCL) $$$$wd/TOCL.EXE; \
 	cp $(ROOT)/BIN/OBERON.OM $$$$wd/OBERON.OM; \
 	compile_status=0; \
 	oc_flags=""; \

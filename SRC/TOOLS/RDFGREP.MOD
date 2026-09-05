@@ -87,6 +87,7 @@ BEGIN
   Out.String("  code-count        FILE.RDF HH MIN     count of byte HH in code >= MIN"); Out.Ln;
   Out.String("  code-byte-at      FILE.RDF OFS HH     code[OFS] == HH"); Out.Ln;
   Out.String("  init-imports      FILE.RDF            print imports ending '__init'"); Out.Ln;
+  Out.String("  node-count        FILE.RDF            print IMPORT/GLOBAL node + heap cost"); Out.Ln;
   Out.String("  init-imports-empty FILE.RDF           zero imports end with '__init'"); Out.Ln;
   Out.String("  has-segreloc      FILE.RDF            at least one SEGRELOC record"); Out.Ln;
   Out.String("  no-segreloc       FILE.RDF            zero SEGRELOC records"); Out.Ln;
@@ -292,6 +293,33 @@ BEGIN
     imp := imp^.next
   END
 END printInitImports;
+
+(* Print the IMPORT/GLOBAL record counts and the heap cost of holding them,
+   for the memory-reduction work: ImportNodeDesc/GlobalNodeDesc each carry a
+   fixed MaxName-byte inline name plus a per-node heap-block header, so the
+   node count is what decides whether chunking/StrTab-interning them is
+   worth doing. *)
+PROCEDURE printNodeCount(obj: Rdoff.ObjFile);
+  VAR imp: Rdoff.ImportNode; g: Rdoff.GlobalNode; r: Rdoff.RelocNode;
+      ni, ng, nr, nrn: LONGINT;
+BEGIN
+  ni := 0; imp := obj^.importHead;
+  WHILE imp # NIL DO INC(ni); imp := imp^.next END;
+  ng := 0; g := obj^.globalHead;
+  WHILE g # NIL DO INC(ng); g := g^.next END;
+  (* relocs are chunked (RelocChunk per node), so both the relocation count
+     and the NODE count matter: the nodes are what the heap actually holds. *)
+  nr := 0; nrn := 0; r := obj^.relocHead;
+  WHILE r # NIL DO INC(nrn); nr := nr + LONGINT(r^.count); r := r^.next END;
+  Out.String("imports="); Out.Int(ni, 0);
+  Out.String(" globals="); Out.Int(ng, 0);
+  Out.String(" nodes="); Out.Int(ni + ng, 0);
+  Out.String(" nameBytes="); Out.Int((ni + ng) * LONGINT(Rdoff.MaxName), 0);
+  Out.String(" hdrBytes="); Out.Int((ni + ng) * LONGINT(16), 0);
+  Out.String(" relocs="); Out.Int(nr, 0);
+  Out.String(" relocNodes="); Out.Int(nrn, 0);
+  Out.Ln
+END printNodeCount;
 
 (* TRUE iff any IMPORT entry name ends with "__init". *)
 PROCEDURE anyInitImport(obj: Rdoff.ObjFile): BOOLEAN;
@@ -774,6 +802,11 @@ BEGIN
   ELSIF Strings.Equal(cmd, "init-imports") THEN
     loadRdf(obj, file);
     printInitImports(obj);
+    Halt(ExitMatch)
+
+  ELSIF Strings.Equal(cmd, "node-count") THEN
+    loadRdf(obj, file);
+    printNodeCount(obj);
     Halt(ExitMatch)
 
   ELSIF Strings.Equal(cmd, "has-segreloc") THEN

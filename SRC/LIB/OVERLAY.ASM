@@ -49,25 +49,31 @@ savedOfs:       dw      0        ; previous vector's offset (chain target)
 savedSeg:       dw      0        ; previous vector's segment
 
 ; Resident (NEVER swapped -- this whole module is part of the main image,
-; not an $O+ module) return-address redirect table (bug fix, 2026-08-08,
-; Solution 2 "inUse and eviction-pressure testing" regression -- see
-; Link.AddOvrReturnTrampoline's own comment for the full story).  One
-; 5-byte INT 3Fh slot per possible resume-trampoline global id (0..255,
-; matching the trampoline id's own 1-byte range, DOCS/OVR.MD §5):
-; slot i holds `CD 3F i 00 00`.  A cross-overlay call's synthesized
-; return address (Ovr_TrapEntry below) points HERE instead of into the
-; caller's own overlay code, so it can never go stale no matter how many
-; times the caller itself is evicted and reloaded to a different segment
-; before the callee actually returns -- this table's own segment is
-; fixed for the life of the program.  Overlay_InitResumeTrapTable
-; (OVERLAY.MOD) fills every slot at Init time; the two trailing zero
-; bytes of each slot are never read (Overlay_ReadTrampolineEntryOfs is
-; never called against a resident-table site -- OvrDispatch's resume
-; branch resolves the real jump target from the resume table's own "ofs"
-; field on disk, not from these bytes) but are written anyway so each
-; slot is a well-formed 5-byte trampoline record, matching the on-disk
-; shape exactly (simpler to reason about than a deliberately-short slot).
-resumeTrapTable: times (256*5) db 0
+; not an $O+ module) return-address redirect table -- bug fix, 2026-08-08,
+; Solution 2 "inUse and eviction-pressure testing" regression, see
+; Link.AddOvrReturnTrampoline's own comment for the full story.  One
+; 4-byte INT 3Fh slot per possible resume-trampoline global id, slot i
+; holding `CD 3F i:WORD`.  A cross-overlay call's synthesized return
+; address (Ovr_TrapEntry below) points HERE instead of into the caller's
+; own overlay code, so it can never go stale no matter how many times the
+; caller itself is evicted and reloaded to a different segment before the
+; callee actually returns.
+;
+; NO LONGER A FIXED-SIZE STATIC ARRAY (2026-08-26, DOCS/OVR-ID-WIDEN-PLAN.MD
+; step 1): a fixed 256-slot table sized the resident cost to the id
+; field's own worst-case range, not to what a given program actually
+; uses -- OVERLAY.MOD now SYSTEM.Alloc's a heap block sized to the real
+; program's own entryIdCount (read from the .OVR file's directory header
+; at Init time, mirroring ovrDirectory's own existing alloc-to-fit
+; pattern) and passes that block's seg:ofs into
+; Overlay_InitResumeTrapTable below to fill, instead of this label
+; existing at all.  OVERLAY.MOD keeps the block's own seg:ofs in
+; ovrResumeTrapTableSeg/Ofs directly (SYSTEM.Alloc's own returned far
+; pointer, same extraction idiom as AllocHeapBlock -- LONGINT(blk) DIV
+; 65536 for the segment, never SEG(blk), which returns SS for a local
+; and caused a real, documented bug in AllocHeapBlock 2026-08-12) --
+; no ASM round-trip is needed to ask this file "what is your own
+; address" now that there is no fixed label to ask about.
 
 section .text
 
@@ -81,8 +87,6 @@ section .text
 
 global  Overlay_InstallHandler, Overlay_RemoveHandler
 global  Overlay_PatchTrampoline, Overlay_ReadTrampolineId
-global  Overlay_ReadTrampolineEntryOfs
-global  Overlay_ResumeTrapTableSeg, Overlay_ResumeTrapTableOfs
 global  Overlay_InitResumeTrapTable
 
 ; -----------------------------------------------------------------------------
@@ -174,20 +178,27 @@ Overlay_RemoveHandler:
 ; -----------------------------------------------------------------------------
 ; Overlay_PatchTrampoline(siteSeg, siteOfs: WORD; toResident: BOOLEAN;
 ;                         targetSeg, targetOfs: WORD)
-; Rewrites a 5-byte call-site trampoline slot in place -- see DOCS/OVR.MD
-; §5 for the two byte forms.  toResident=TRUE writes the resident
-; (direct JMP FAR) form using targetSeg:targetOfs.  toResident=FALSE
-; rewrites back to the swappable (INT 3Fh) form -- targetSeg/targetOfs
-; are then read as (entryId, entryOfs) instead (same two stack slots,
-; repurposed by the caller -- OVERLAY.MOD's PatchSitesForModule), and
-; WRITTEN into bytes +2/+3..+4: the resident-form write above just did
-; (bytes +1..+4 = offset:segment, unconditionally, every time), so bytes
-; +2..+4 can no longer be assumed to still hold the entry id/entryOfs the
-; ORIGINAL link-time INT 3Fh form had -- restoring the full 5-byte
-; swappable form explicitly here, rather than only bytes 0/1 and trusting
-; +2..+4 to have survived, is required from the very first evict cycle
-; onward (bug found 2026-08-09 via OVRMAINX.MOD's OvrClearBuf-mid-run
-; regression: a second load after one evict cycle read garbage entryOfs
+; Rewrites a call-site trampoline slot in place -- see DOCS/OVR.MD §5 for
+; the two byte forms.  toResident=TRUE writes the resident (direct JMP
+; FAR) form using targetSeg:targetOfs -- exactly 5 bytes (`EA imm16
+; imm16`, x86's own fixed JMP FAR encoding).  toResident=FALSE rewrites
+; back to the swappable (INT 3Fh) form -- targetSeg is then read as
+; entryId instead (same stack slot, repurposed by the caller --
+; OVERLAY.MOD's PatchSitesForModule; targetOfs is IGNORED in this
+; branch), and WRITTEN into bytes +2..+3 -- only 4 bytes total (id
+; widened BYTE->WORD, entryOfs moved OUT of the trampoline entirely into
+; the .OVR directory, DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c),
+; 2026-08-26 -- an earlier, reverted attempt at this same step kept
+; entryOfs embedded and grew the slot to 6 bytes instead, which broke a
+; plain, non-padded CgCallFar call site; see LINK.MOD's
+; PatchOverlayCallSite for the full story): the resident-form write
+; above just did (bytes +1..+4 = offset:segment, unconditionally, every
+; time), so bytes +2..+3 can no longer be assumed to still hold the
+; entry id the ORIGINAL link-time INT 3Fh form had -- restoring the id
+; bytes explicitly here, rather than only bytes 0/1 and trusting +2..+3
+; to have survived, is required from the very first evict cycle onward
+; (bug found 2026-08-09 via OVRMAINX.MOD's OvrClearBuf-mid-run
+; regression: a second load after one evict cycle read garbage entryId
 ; and crashed on a bogus jump target -- entryId is the caller's own
 ; concern too, cached the same way, see EntryOfsNodeRec's own comment in
 ; OVERLAY.MOD).
@@ -238,14 +249,18 @@ Overlay_PatchTrampoline:
 .swappable:
         mov     byte [es:bx], 0CDh             ; INT imm8
         mov     byte [es:bx+1], OverlayIntNo
-        ; bytes +2 (entry id, low byte of pt_targetSeg here) and +3..+4
-        ; (entryOfs, pt_targetOfs here) are WRITTEN explicitly -- see this
-        ; procedure's own header comment for why they can no longer be
-        ; assumed to still hold their original link-time values.
-        mov     ax, word [ss:pt_targetSeg]     ; entryId (only AL used --
-        mov     [es:bx+2], al                  ; id is a 1-byte field)
-        mov     ax, word [ss:pt_targetOfs]     ; entryOfs
-        mov     [es:bx+3], ax
+        ; bytes +2..+3 (entry id, pt_targetSeg here) are WRITTEN
+        ; explicitly -- see this procedure's own header comment for why
+        ; they can no longer be assumed to still hold their original
+        ; link-time value.  pt_targetOfs is IGNORED in this branch
+        ; (DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26):
+        ; entryOfs no longer lives in the trampoline at all -- it moved
+        ; into the .OVR directory (OVERLAY.MOD's DirEntryOfs) -- so the
+        ; swappable form is only 4 bytes total (2-byte id at +2..+3),
+        ; one byte short of even the ORIGINAL 5-byte 1-byte-id design,
+        ; not 6 as an earlier, reverted attempt at this step made it.
+        mov     ax, word [ss:pt_targetSeg]     ; entryId (full WORD now)
+        mov     [es:bx+2], ax
 
 .done:
         pop     es
@@ -260,13 +275,21 @@ Overlay_PatchTrampoline:
         RETMACRO        10
 
 ; -----------------------------------------------------------------------------
-; Overlay_ReadTrampolineId(siteSeg, siteOfs: WORD): BYTE
-; Reads back the 1-byte module/entry-point id stored at siteOfs+2 of a
+; Overlay_ReadTrampolineId(siteSeg, siteOfs: WORD): WORD
+; Reads back the 2-byte module/entry-point id stored at siteOfs+2 of a
 ; trampoline slot (see DOCS/OVR.MD §5) -- used by OVERLAY.MOD to
 ; identify which module a given call site targets when building/inspecting
 ; the call-site table, without needing its own far-pointer byte read.
+; Widened from a 1-byte (AL) result to a 2-byte (AX) result, DOCS/OVR-ID-
+; WIDEN-PLAN.MD step 2, 2026-08-26 -- id field grew BYTE->WORD, removing
+; the 256-overlay-entry-point ceiling.  Reads byte-at-a-time into CL/CH,
+; matching Overlay_ReadTrampolineEntryOfs's own established style right
+; below (that procedure's own header comment notes this avoids whatever
+; affected a word-sized read in this same caller context) rather than a
+; single word read, to stay consistent with that same defensive
+; precedent rather than assume it doesn't apply here too.
 ; Call Type: FAR.
-; Result: BYTE (in AL).
+; Result: WORD (in AX).
 ; -----------------------------------------------------------------------------
 %define ri_siteSeg bp+RSIZE+4
 %define ri_siteOfs bp+RSIZE+2
@@ -275,13 +298,17 @@ Overlay_ReadTrampolineId:
         push    bp
         mov     bp, sp
         push    bx
+        push    cx
         push    es
 
         mov     es, word [ss:ri_siteSeg]
         mov     bx, word [ss:ri_siteOfs]
-        mov     al, [es:bx+2]
+        mov     cl, [es:bx+2]           ; low byte
+        mov     ch, [es:bx+3]           ; high byte
+        mov     ax, cx
 
         pop     es
+        pop     cx
         pop     bx
         pop     bp
 %undef ri_siteSeg
@@ -289,115 +316,107 @@ Overlay_ReadTrampolineId:
         RETMACRO        4
 
 ; -----------------------------------------------------------------------------
-; Overlay_ReadTrampolineEntryOfs(siteSeg, siteOfs: WORD): WORD
-; Reads back the 2-byte in-module code offset stored at siteOfs+3 of a
-; trampoline slot -- THIS PROJECT'S OWN use of those bytes (SRC/TOC/LINK.MOD's
-; PatchOverlayCallSite; the target module's own code blob is one contiguous
-; region and different exported entry points do NOT all start at offset 0
-; within it -- DOCS/OVR.MD §11.1 documents the real contract). See
-; this file's own header comment and DOCS/OVR.MD §5 for the full
-; trampoline layout.
+; Overlay_ReadTrampolineEntryOfs -- REMOVED (DOCS/OVR-ID-WIDEN-PLAN.MD
+; step 2 option (c), 2026-08-26).  entryOfs is no longer stored at the
+; call-site trampoline at all -- it moved into the .OVR file's own
+; per-entry directory (OVERLAY.MOD's DirEntryOfs), since it is purely a
+; function of the entry id, never call-site-specific; this let the
+; swappable trampoline shrink back to `CD 3F id:WORD` = 4 bytes instead
+; of needing a 6th byte that only fit inside the (caller-`overlayMode`-
+; gated) NOP padding some call sites happened to reserve -- see
+; LINK.MOD's own PatchOverlayCallSite header comment for the bug this
+; fixes.
+; -----------------------------------------------------------------------------
+
+; -----------------------------------------------------------------------------
+; Overlay_InitResumeTrapTable(tableSeg, tableOfs, count: WORD)
+; Fills `count` 4-byte slots starting at tableSeg:tableOfs with a
+; well-formed swappable trampoline `CD 3F <slot index>:WORD` -- called
+; once by OVERLAY.MOD's Init, AFTER it has SYSTEM.Alloc'd a block sized
+; to the real program's own entryIdCount (DOCS/OVR-ID-WIDEN-PLAN.MD
+; step 1, 2026-08-26 -- this used to fill a fixed 256-slot static array
+; in this file's own .data; the caller now owns and sizes the block
+; instead, so this table's own resident memory cost tracks what a given
+; program actually uses instead of a fixed worst-case constant).  Slot
+; width is 4 bytes (step 2 option (c), same date -- was briefly 6 bytes
+; in an earlier, reverted attempt at step 2; a resume-table slot never
+; converts to the resident JMP-FAR form, so it only ever needs the
+; `CD 3F id:WORD` bytes a call-site trap also needs to dispatch it
+; through the exact same Overlay_ReadTrampolineId 2-byte read -- see
+; CGEN.MOD's CgCallFarOvr and LINK.MOD's PatchOverlayCallSite for the
+; full story of why entryOfs no longer lives in any trampoline slot at
+; all, call-site OR resume-table).  Unconditional for all `count` slots
+; regardless of which ids
+; actually turn out to be resume points (cheaper than a directory
+; pre-scan to find out; a slot for an id that's actually an ORDINARY
+; entry point is simply never used as a jump target by anything, since
+; only resume ids are ever baked as return addresses).
+;
+; count is a genuine WORD-counted loop (NOT the old 256-slot version's
+; `inc dl; jnz .loop` 8-bit-wraparound trick, which relied on the fixed
+; 256 count to terminate correctly and would infinite-loop for any other
+; count, including 0) -- see DOCS/OVR-ID-WIDEN-PLAN.MD's own warning
+; against copy-pasting that trick into a variable-count version.  count=0
+; falls through immediately (no slots to fill) rather than looping.
+;
 ; Call Type: FAR.
-; Result: WORD (in AX).
-; -----------------------------------------------------------------------------
-
-Overlay_ReadTrampolineEntryOfs:
-%define re_siteSeg bp+RSIZE+4
-%define re_siteOfs bp+RSIZE+2
-        push    bp
-        mov     bp, sp
-        push    bx
-        push    cx
-        push    es
-
-        mov     es, word [ss:re_siteSeg]
-        mov     bx, word [ss:re_siteOfs]
-        mov     cl, [es:bx+3]           ; low byte, single-byte read (matches
-                                          ; Overlay_ReadTrampolineId's own
-                                          ; proven-reliable byte-at-a-time
-                                          ; style, avoiding whatever affects
-                                          ; the word-sized form in this
-                                          ; caller context)
-        mov     ch, [es:bx+4]           ; high byte
-        mov     ax, cx
-
-        pop     es
-        pop     cx
-        pop     bx
-        pop     bp
-%undef re_siteSeg
-%undef re_siteOfs
-        RETMACRO        4
-
-; -----------------------------------------------------------------------------
-; Overlay_ResumeTrapTableSeg(): WORD
-; Returns resumeTrapTable's own segment -- fixed for the life of the
-; program (this whole module is resident, never an $O+ module).  OVERLAY.MOD
-; needs this to bake a cross-overlay call's synthesized return address as
-; resumeTrapTableSeg:slot(globalId) instead of the caller's own (possibly
-; soon-stale) resident segment -- see Link.AddOvrReturnTrampoline's own
-; comment for the full bug story (2026-08-08).
-; Call Type: FAR.  Result: WORD (in AX).
-; -----------------------------------------------------------------------------
-Overlay_ResumeTrapTableSeg:
-        mov     ax, seg resumeTrapTable
-        RETMACRO
-
-; -----------------------------------------------------------------------------
-; Overlay_ResumeTrapTableOfs(): WORD
-; Returns resumeTrapTable's own IN-SEGMENT offset -- NOT assumed to be 0
-; (bug found 2026-08-08: `seg resumeTrapTable` alone is not enough,
-; resumeTrapTable is not the first item in this module's own merged data
-; segment -- installed/savedOfs/savedSeg precede it, 5 bytes, and this
-; whole .data section is itself $L-merged into OVERLAY.MOD's own Oberon-
-; compiled data, whose own layout is not under this file's control
-; either -- landed 5 bytes into the table's own first slot instead of at
-; slot 0, executing garbage as code the first time a resume actually
-; fired).  OVERLAY.MOD must add this to slot(globalId)'s own byte offset
-; (globalId*5), never assume slot 0 sits at the segment's own offset 0.
-; Call Type: FAR.  Result: WORD (in AX).
-; -----------------------------------------------------------------------------
-Overlay_ResumeTrapTableOfs:
-        mov     ax, resumeTrapTable
-        RETMACRO
-
-; -----------------------------------------------------------------------------
-; Overlay_InitResumeTrapTable()
-; Fills every one of the 256 5-byte slots in resumeTrapTable with a
-; well-formed swappable trampoline `CD 3F <slot index> 00 00` -- called
-; once by OVERLAY.MOD's Init.  Unconditional for all 256 slots regardless
-; of which ids actually turn out to be resume points (cheaper than a
-; directory pre-scan to find out; a slot for an id that's actually an
-; ORDINARY entry point is simply never used as a jump target by anything,
-; since only resume ids are ever baked as return addresses).
-; Call Type: FAR.  Result: none.
+; Stack (deepest first): [tableSeg][tableOfs][count]
+; Result: none.
 ; -----------------------------------------------------------------------------
 Overlay_InitResumeTrapTable:
+%define it_tableSeg bp+RSIZE+6
+%define it_tableOfs bp+RSIZE+4
+%define it_count    bp+RSIZE+2
+        push    bp
+        mov     bp, sp
+        push    ax
         push    bx
         push    cx
         push    dx
         push    es
 
-        mov     ax, ds
-        mov     es, ax
-        mov     bx, resumeTrapTable
-        xor     dx, dx                  ; dx = slot index, 0..255
+        mov     es, word [ss:it_tableSeg]
+        mov     bx, word [ss:it_tableOfs]
+        mov     cx, word [ss:it_count]
+        xor     dx, dx                  ; dx = slot index, 0..count-1
+        jcxz    .done                   ; count=0: nothing to fill
 .loop:
         mov     byte [es:bx], 0CDh             ; INT imm8
         mov     byte [es:bx+1], OverlayIntNo
-        mov     al, dl
-        mov     byte [es:bx+2], al             ; this slot's own id
-        mov     byte [es:bx+3], 0
-        mov     byte [es:bx+4], 0
-        add     bx, 5
-        inc     dl
-        jnz     .loop                   ; wraps 255->0 after all 256 slots
-
+        mov     word [es:bx+2], dx             ; this slot's own id -- 2-byte WORD
+                                                ; write (DOCS/OVR-ID-WIDEN-PLAN.MD
+                                                ; step 2, 2026-08-26: id widened
+                                                ; BYTE->WORD, matching the
+                                                ; call-site trampoline format
+                                                ; exactly -- a resume-table slot
+                                                ; is dispatched through the SAME
+                                                ; Overlay_ReadTrampolineId read
+                                                ; a call-site trap is, so its
+                                                ; own slot layout must match).
+                                                ; 4-byte slot total (option (c),
+                                                ; same date: entryOfs moved out
+                                                ; of the trampoline format
+                                                ; entirely, into the .OVR
+                                                ; directory -- a resume-table
+                                                ; slot never converts to the
+                                                ; resident JMP-FAR form either,
+                                                ; so it never needed those 2
+                                                ; bytes in the first place)
+        add     bx, 4
+        inc     dx
+        dec     cx
+        jnz     .loop
+.done:
         pop     es
         pop     dx
         pop     cx
         pop     bx
-        RETMACRO
+        pop     ax
+        pop     bp
+%undef it_tableSeg
+%undef it_tableOfs
+%undef it_count
+        RETMACRO        6
 
 ; -----------------------------------------------------------------------------
 ; Ovr_TrapEntry -- the actual INT 3Fh handler.
@@ -461,7 +480,10 @@ Overlay_InitResumeTrapTable:
 ; The fix: synthesize a genuine CALL-FAR-shaped stack for the target
 ; instead of an INT-shaped one.  [bp+10]/[bp+12] (the interrupt frame's
 ; saved IP/CS slots) are overwritten with the REAL return address --
-; site segment : opcode offset+5 (one past the 5-byte trampoline, i.e.
+; site segment : opcode offset+5 (one past the call site's own 5-byte
+; reserved footprint -- unaffected by the swappable trampoline's own
+; byte count, DOCS/OVR-ID-WIDEN-PLAN.MD step 2 option (c), 2026-08-26
+; settled on a 4-byte trampoline, i.e.
 ; exactly the caller's own next instruction after its now-rewritten CALL
 ; FAR) -- turning those two slots from "the trap's own return point" into
 ; "the ordinary return address a CALL FAR at the site would have pushed".
@@ -572,10 +594,14 @@ Ovr_TrapEntry:
         ; Link.AddOvrReturnTrampoline's own comment for the full story),
         ; so the segment half must come from Overlay_OvrDispatch now,
         ; which redirects through a never-moving resident table for that
-        ; specific case (site_seg:site_ofs+5 unchanged for the ordinary,
-        ; still-safe resident-caller case -- Overlay_OvrDispatch's own
-        ; default is exactly that value, so this is a strict superset of
-        ; the old behavior, not a divergent path).
+        ; specific case (site_seg:site_ofs+5 -- the call site's own
+        ; reserved footprint stays 5 bytes regardless of the swappable
+        ; trampoline's own byte count, DOCS/OVR-ID-WIDEN-PLAN.MD step 2
+        ; option (c), 2026-08-26 settled on a 4-byte trampoline --
+        ; unchanged for the ordinary, still-safe resident-caller case --
+        ; Overlay_OvrDispatch's own default is exactly that value, so
+        ; this is a strict superset of the old behavior, not a divergent
+        ; path).
         ;
         ; (2026-08-13: a bug #4 investigation briefly replaced this
         ; bp-relative write with a BX:CX-relayed, purely SP-relative

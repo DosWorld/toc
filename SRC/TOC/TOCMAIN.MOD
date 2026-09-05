@@ -21,7 +21,7 @@ MODULE TocMain;
   docs/implementation-rules.md §".DBG file format").
 *)
 IMPORT Dos, Files, Strings, Scan, Syms, Cgen, Rdoff, Tar,
-       Import, Parser, PExpr, Link, LinkMZ, LinkNE, LinkOvr, LogErr, Time, Out, StrTab;
+       Import, Parser, PExpr, LogErr, Time, Out, StrTab;
 
 CONST
   NameLen  = 33;
@@ -698,16 +698,26 @@ END RepackOm;
 
 PROCEDURE DbgMemSize(umsg : ARRAY OF CHAR);
 VAR msg : ARRAY 512 OF CHAR;
-    am  : WORD;
+    am, mx  : WORD;
 BEGIN
   IF ~LogErr.IsDebug() THEN RETURN END;
   am := SYSTEM.MemAvail();
+  (* MemMaxAvail (largest CONTIGUOUS free block) alongside MemAvail (TOTAL
+     free): the two diverge only under fragmentation, so logging both makes
+     an allocation failure self-explanatory -- a failing NEW with maxblk
+     still large is NOT a fragmentation problem, and this pair is what
+     distinguishes the two cases without a rebuild. *)
+  mx := SYSTEM.MemMaxAvail();
   Strings.Copy(umsg, msg);
   Strings.Append(" Free memory ", msg);
   Strings.AppendInt(LONGINT(am), msg);
   Strings.Append(" paragraphs / ", msg);
   Strings.AppendInt(LONGINT(am)*16 DIV 1024, msg);
-  Strings.Append("kb", msg);
+  Strings.Append("kb  maxblk ", msg);
+  Strings.AppendInt(LONGINT(mx)*16 DIV 1024, msg);
+  Strings.Append("kb  frag ", msg);
+  Strings.AppendInt(LONGINT(am) - LONGINT(mx), msg);
+  Strings.Append(" para", msg);
   LogErr.Debug(msg)
 END DbgMemSize;
 
@@ -818,11 +828,15 @@ BEGIN
   Scan.Open(sc, srcPath);
   Parser.ParseModule(sc);
   DbgMemSize("Module compiled.");
-  (* Closing through OUR copy of the Scanner is safe even though ParseModule
-     advanced its own copy (PExpr.sc): the scanner is read-only, so there is
-     nothing to flush, and both copies share the one heap buffer/handle —
-     see the aliasing-invariant note at the top of Parser.ParseModule. *)
-  Scan.Close(sc);
+  (* NO Scan.Close(sc) here: ParseModule now closes the shared scanner itself,
+     as soon as the last token is consumed and before it opens any of the
+     .rdf/.def/.dbg/.om temps — freeing the scanner's 8 KB Files buffer at the
+     compile's peak instead of holding it to the very end (DOS-memory
+     reduction, 2026-09-04).  Closing again through OUR copy would be a
+     genuine double free: `sc` is a separate record COPY sharing the same DOS
+     handle and heap buffer, so its own fileOpen/handle/buf fields still look
+     open and every per-copy guard would pass.  See the ownership note at
+     Parser.ParseModule's Scan.Close call site. *)
   Cgen.CgFree();
   LeakGuard(memBefore, srcPath, " in Cgen.CgFree()");
   IF LogErr.HaveErr() THEN RETURN END;
@@ -848,134 +862,61 @@ BEGIN
   END
 END CompileModule;
 
-(* ---- link phase ---- *)
-
-PROCEDURE LinkAll(outExe: ARRAY OF CHAR; genDebug, targetCP: BOOLEAN);
-  VAR ls: Link.State; ms: LinkMZ.State; ns: LinkNE.State; m: ModEntry; mr: ModRec;
-      pos, dlen: INTEGER;
+(* ---- PROTOTYPE: emit the link control file instead of linking here ----
+   The compile/link split moves linking into a separate process (TOCL.EXE),
+   so this half's job ends by writing down what the linker needs: the output
+   name, the target, and the .om inputs in topological order.  That is the
+   entire compile->link interface -- everything LinkAll below reads out of
+   the module graph -- which is why the split is viable at all: the two
+   phases share no in-memory state, only this handful of lines.
+   Emitting it costs one small file; linking in-process costs keeping the
+   whole linker resident in the compiler's image. *)
+PROCEDURE WriteLinkFile(outExe: ARRAY OF CHAR; genDebug, targetCP: BOOLEAN);
+  VAR f: Files.File; m: ModEntry; mr: ModRec;
+      lnk: ARRAY MaxPath OF CHAR;
       omPath: ARRAY MaxPath OF CHAR;
-      p: ARRAY 512 OF CHAR;
+      stem, ext: ARRAY NameLen OF CHAR;
       dir: ARRAY MaxPath OF CHAR;
-      omExe: ARRAY MaxPath OF CHAR;
-      ovrPath: ARRAY MaxPath OF CHAR;
-      memBefore: WORD;
+      libEnv: ARRAY 512 OF CHAR;
 BEGIN
-  (* The module graph lives entirely in gModFile (never in the heap), so the
-     arena is contiguous here.  Reserve the two fixed 65000-byte link buffers
-     NOW — before the module scan opens each .rdf through an 8 KB Files buffer and
-     fragments the arena so no 65000-byte hole survives. *)
-  DbgMemSize("Linker, before init state.");
-  NEW(ls);
-  IF targetCP THEN NEW(ns); ms := NIL ELSE NEW(ms); ns := NIL END;
-  DbgMemSize("Linker, after init state.");
-  IF ls = NIL THEN LogErr.Error("out of memory (link state)"); RETURN END;
-  IF targetCP THEN
-    IF ns = NIL THEN LogErr.Error("out of memory (NE link state)"); RETURN END
-  ELSE
-    IF ms = NIL THEN LogErr.Error("out of memory (MZ link state)"); RETURN END
-  END;
-  Link.InitState(ls);
-  ls^.targetCP := targetCP;   (* DOCS/OVR.MD §2: overlays are /CD-only *)
-  IF targetCP THEN
-    LinkNE.InitState(ns);
-    LinkNE.SetModName(ns, outExe);
-    ns^.genDebug := genDebug   (* /G: emit the TDS debug block into the .exe *)
-  ELSE
-    LinkMZ.InitState(ms);
-    ms^.genDebug := genDebug   (* /G: emit the TDS debug block into the .exe *)
-  END;
-  IF ~Link.ReserveBuffers(ls) THEN
-    Link.LinkFree(ls); DISPOSE(ls); RETURN   (* LogErr latched by ReserveBuffers *)
-  END;
+  (* <stem>.LNK beside the output image -- TOCD derives the same name. *)
+  Dos.FSplit(outExe, dir, stem, ext);
+  Dos.PathJoin(lnk, dir, stem);
+  Strings.Append(".LNK", lnk);
 
-  (* Load source modules in topo order (deepest deps first), walking the in-file
-     sortNext chain.  A latched read/parse error stops the load. *)
+  IF ~Files.ReWrite(f, lnk) THEN
+    LogErr.Error2("oc: cannot create link file ", lnk); RETURN
+  END;
+  Files.Write(f, "EXE "); Files.Write(f, outExe); Files.WriteLn(f);
+  IF targetCP THEN Files.Write(f, "CP") ELSE Files.Write(f, "CD") END;
+  Files.WriteLn(f);
+  (* Forward OBERON_LIB to the linker.  It cannot read the variable itself:
+     a Dos.Exec'd child does not reliably inherit the DOS environment block
+     (xt does not propagate it at all), and TRUBO.OM -- holding LogErr and
+     StrTab -- is reachable only through OBERON_LIB.  Without this line every
+     link of a real program fails with "Unresolved external: LogErr_Error".
+     We already have the value cached, so passing it costs one line. *)
+  Import.GetCachedOberonLib(libEnv);
+  IF libEnv[0] # 0X THEN
+    Files.Write(f, "LIB "); Files.Write(f, libEnv); Files.WriteLn(f)
+  END;
+  IF genDebug THEN Files.Write(f, "DBG"); Files.WriteLn(f) END;
+
+  (* Same topological walk LinkAll uses (gSortHead / sortNext), same
+     FlagHasSrc filter -- only the action differs. *)
   m := gSortHead;
-  WHILE (m # NoMod) & ~LogErr.HaveErr() DO
-     DbgMemSize("Linker load module.");
-     ModRead(m, mr);
+  WHILE m # NoMod DO
+    ModRead(m, mr);
     IF HasFlag(mr, FlagHasSrc) THEN
       MakeOmName(mr.name, omPath);
-      Link.ProcessFile(ls, omPath)
+      Files.Write(f, "OM "); Files.Write(f, omPath); Files.WriteLn(f)
     END;
     m := mr.sortNext
   END;
+  Files.Close(f);
+  IF ~Files.Ok(f) THEN LogErr.Error2("oc: write error on ", lnk) END
+END WriteLinkFile;
 
-  (* Cached copy, not a fresh Dos.GetEnv call -- see Import.CacheOberonLib's
-     comment and ENV-BUG.MD: by this point (link phase) SetupOvr's overlay
-     bring-up has already run its Files.Reset/Files.Close cycle, which
-     corrupts a fresh Dos.GetEnv("OBERON_LIB", ...) read. *)
-  Import.GetCachedOberonLib(p);
-  pos := 0;
-  WHILE p[pos] # 0X DO
-    dlen := 0;
-    WHILE (p[pos] # 0X) & (p[pos] # ";") & (dlen < MaxPath - 1) DO
-      dir[dlen] := p[pos]; INC(dlen); INC(pos)
-    END;
-    dir[dlen] := 0X;
-    IF p[pos] = ";" THEN INC(pos) END;
-    Import.NormalizeSlashes(dir);
-    IF (dlen > 0) & Files.FileExists(dir) & Tar.IsOmFile(dir) THEN
-      Link.ProcessFile(ls, dir)
-    END
-  END;
-
-  (* Load OBERON.OM: Link.FindFile already searches CWD then the running
-     exe's directory (same two locations the old hand-assembled fallback
-     covered), returning whichever path exists (or the bare name if neither
-     does, in which case IsOmFile below correctly rejects it). *)
-
-  Link.FindFile("OBERON.OM", omExe);
-  IF Files.FileExists(omExe) & Tar.IsOmFile(omExe) THEN
-    Link.ProcessFile(ls, omExe)
-  END;
-
-  DbgMemSize("Linker has been load all modules");
-
-  memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN Link.SmartLink(ls) END;
-  LeakGuard(memBefore, "link", " in SmartLink");
-  memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN Link.ReadStackSize(ls) END;
-  LeakGuard(memBefore, "link", " in ReadStackSize");
-  memBefore := SYSTEM.MemAvail();
-  IF ~LogErr.HaveErr() THEN Link.CalculateLayout(ls) END;
-  LeakGuard(memBefore, "link", " in CalculateLayout");
-  DbgMemSize("Linker, after calculate layouts.");
-  memBefore := SYSTEM.MemAvail();
-  IF targetCP THEN
-    IF ~LogErr.HaveErr() THEN LinkNE.BuildSegTable(ls, ns) END;
-    IF ~LogErr.HaveErr() THEN LinkNE.PerformLinking(ls, ns) END;
-    DbgMemSize("Linker, after linking, before write .exe");
-    memBefore := SYSTEM.MemAvail();
-    IF ~LogErr.HaveErr() THEN LinkNE.WriteExe(ls, ns, outExe) END;
-    LeakGuard(memBefore, "link", " in WriteExe");
-    LinkNE.LinkFree(ns)
-  ELSE
-    IF ~LogErr.HaveErr() THEN LinkMZ.PerformLinking(ls, ms) END;
-    DbgMemSize("Linker, after linking, before write .exe");
-    memBefore := SYSTEM.MemAvail();
-    IF ~LogErr.HaveErr() THEN LinkMZ.WriteExe(ls, ms, outExe) END;
-    LeakGuard(memBefore, "link", " in WriteExe");
-    LinkMZ.LinkFree(ms);
-    (* DOCS/OVR.MD §11.1: write the standalone .OVR file, /CD only.
-       ls^.anyOverlay is only ever TRUE here (ls^.targetCP is FALSE in this
-       branch by construction), but the guard is kept explicit rather than
-       relying on that invariant silently. *)
-    IF ls^.anyOverlay & ~ls^.targetCP & ~LogErr.HaveErr() THEN
-      Files.ReplaceExt(outExe, ".OVR", ovrPath); SYSTEM.UPSTR(ovrPath);
-      memBefore := SYSTEM.MemAvail();
-      LinkOvr.WriteOvrFile(ls, ovrPath);
-      LeakGuard(memBefore, "link", " in LinkOvr.WriteOvrFile")
-    END
-  END;
-  Link.LinkFree(ls);
-  DISPOSE(ls);
-  IF targetCP THEN DISPOSE(ns) ELSE DISPOSE(ms) END;
-  IF LogErr.HaveErr() THEN
-    Files.Delete(outExe)    (* never leave a half-written .exe behind *)
-  END
-END LinkAll;
 
 (* ---- main entry point ---- *)
 
@@ -1182,7 +1123,9 @@ BEGIN
      code-group buffer — no defrag round-trip is needed. *)
   IF hasEntry THEN
     memBefore := SYSTEM.MemAvail();
-    LinkAll(outExe, genDbg, targetCP);
+    (* PROTOTYPE: emit the control file; TOCL.EXE does the actual link in a
+       separate process (see WriteLinkFile). *)
+    WriteLinkFile(outExe, genDbg, targetCP);
     FreeMods;             (* close + delete the module-graph temp after linking *)
     (* LinkAll's own symbol table now interns names via StrTab (LINK.MOD's
        SymRec.nameId refactor) — those names are never referenced again once

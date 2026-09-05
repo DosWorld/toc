@@ -155,10 +155,14 @@ CallingConv = "FAR" | "NEAR" .
 
 (* "EXTERNAL" is also a context-sensitive identifier (not a keyword).
    It appears after CallingConv (or after the first ";") and must be the LAST modifier.
-   PROCEDURE name [ ";" CallingConv ] ";" "EXTERNAL" ";"
+   PROCEDURE name [ ";" CallingConv ] ";" "EXTERNAL" [ string ] ";"
    No body, no DeclSeq, no BEGIN/END.  The procedure's implementation must be provided
    by an external .rdf file at link time; the compiler emits an RDOFF IMPORT record for
-   the symbol "ModName_procname".
+   the symbol "ModName_procname" -- OR, if a string literal follows "EXTERNAL", for that
+   literal verbatim instead of the mangled name (added 2026-08-24, OVR-BUG.MD "Bug 5" fix:
+   reaches an export owned by a SPECIFIC other Oberon module by its real mangled global
+   name, e.g. EXTERNAL "PExpr2_ParseFactor";, without a real IMPORT -- needed when Oberon's
+   no-circular-imports rule forbids one).
    The call instruction emitted at call sites matches the calling convention:
      FAR  external → CALL FAR  (9A + RELOC + SEGRELOC)
      NEAR external → CALL NEAR (E8 + RELOC, no SEGRELOC)
@@ -182,7 +186,7 @@ TypeDecl    = ident [ "*" ] "=" type ";" .
 VarDecl     = ident { "," ident } [ "*" ] ":" type ";" .
 
 ProcDecl    = "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
-              ";" [ CallingConv ";" ] [ "EXTERNAL" ";" ]
+              ";" [ CallingConv ";" ] [ "EXTERNAL" [ string ] ";" ]
             | "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
               ";" "INLINE" "(" InlineEntry { "," InlineEntry } ")" ";"
             | "PROCEDURE" ident [ "*" ] [ FormalParams ] [ ":" type ]
@@ -248,7 +252,11 @@ InlineEntry = integer | ident .
    Procedure name must be repeated after END.
    "EXTERNAL" (context-sensitive ident, must be LAST modifier): no body; implementation
    is provided by an external .rdf file linked at link time. The compiler emits an RDOFF
-   IMPORT for "ModName_procname". EXTERNAL can be combined with FAR or NEAR.
+   IMPORT for "ModName_procname", or for an explicit string literal following EXTERNAL
+   if one is given (EXTERNAL "OtherMod_procname";) -- lets one module reach a SPECIFIC
+   other Oberon module's real export by name without a real IMPORT, for the rare case
+   Oberon's no-circular-imports rule forbids one (see PExpr.MOD's ParseFactor* EXTERNAL
+   declarations, OVR-BUG.MD "Bug 5"). EXTERNAL can be combined with FAR or NEAR.
    Exported EXTERNAL procs appear in .def so other modules can call them.
    "FORWARD" (context-sensitive ident): declares the procedure signature only; the body
    must appear later in the same DeclSeq. The implementation line repeats only the

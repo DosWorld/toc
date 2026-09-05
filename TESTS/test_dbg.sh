@@ -35,7 +35,10 @@ WD="$(mktemp -d "$ROOT/TMP/dbg.XXXXXX")"
 trap 'rm -rf "$WD"' EXIT
 
 cp "$ROOT/TESTS/FIX/DBGINFO.MOD" "$ROOT/TESTS/FIX/DBGOFF.MOD" "$WD/"
+# TOC.EXE is only a driver now; it execs TOCC/TOCL from its own directory.
 cp "$ROOT/BIN/TOC.EXE"     "$WD/TOC.EXE"
+cp "$ROOT/BIN/TOCC.EXE"    "$WD/TOCC.EXE"
+cp "$ROOT/BIN/TOCL.EXE"    "$WD/TOCL.EXE"
 cp "$ROOT/BIN/TOLIB.EXE"   "$WD/TOLIB.EXE"
 cp "$ROOT/BIN/TDINFO.EXE" "$WD/TDINFO.EXE"
 cp "$ROOT/BIN/OBERON.OM"  "$WD/OBERON.OM"

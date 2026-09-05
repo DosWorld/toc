@@ -18,8 +18,20 @@ MODULE StrTab;
 IMPORT Strings, LogErr;
 
 CONST
-  TextSize = 8*1024; (* chars per text chunk *)
-  MaxText  = 8;      (* up to 192 KB of distinct name text *)
+  TextSize = 2*1024; (* chars per text chunk -- kept small (DOCS memory-
+                        pressure investigation, 2026-08-20): most builds
+                        intern well under one 8 KB chunk's worth of names,
+                        so an 8 KB chunk left most of its own space as
+                        per-chunk tail waste at the linker's peak-pressure
+                        point (scanning a module's globals + OBERON.OM).
+                        2 KB cuts that tail waste ~4x at the cost of more
+                        NEW calls (more MaxText chunks for the same total
+                        text); each NEW's ~16 B heap header is trivial
+                        next to the KBs of tail waste it replaces. *)
+  MaxText  = 48;     (* up to 96 KB of distinct name text -- plenty for a
+                        26-module self-host program plus OBERON.OM (see
+                        DbgSymCount trace: 745 names totalled well under
+                        16 KB of text) *)
   EntBits  = 8;
   EntPer   = 256;     (* entries per entry chunk (2 KB/chunk) *)
   MaxEnt   = 32;      (* up to 8192 distinct names *)
@@ -59,6 +71,16 @@ END Count;
 
 (* Heap bytes currently allocated by the table (text chunks + entry chunks);
    for Syms.StatsDump reporting. *)
+(* Text bytes actually USED, as opposed to MemBytes' allocated capacity:
+   every full text chunk plus the partial fill of the current one.  The gap
+   between the two is per-chunk tail waste -- the thing TextSize's own
+   2 KB sizing (see its comment) exists to bound. *)
+PROCEDURE TextUsed*(): LONGINT;
+BEGIN
+  IF nText = 0 THEN RETURN 0 END;
+  RETURN LONGINT(nText - 1) * LONGINT(TextSize) + LONGINT(textUsed)
+END TextUsed;
+
 PROCEDURE MemBytes*(): LONGINT;
   VAR nEnt: INTEGER;
 BEGIN

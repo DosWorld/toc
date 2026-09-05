@@ -49,12 +49,18 @@ test:
 	make -f TESTS/Makefile.man test
 	bash TESTS/test_tasm.sh
 	bash TESTS/test_tlink.sh
+	bash TESTS/test_selfhost.sh
 
+# The toolchain is three binaries now: TOC.EXE only drives, and execs
+# TOCC.EXE/TOCL.EXE from its OWN directory -- so all three must be present
+# here together, not just the driver.
 testall: tools
 	cp BIN/TOC.EXE TOC.EXE
+	cp BIN/TOCC.EXE TOCC.EXE
+	cp BIN/TOCL.EXE TOCL.EXE
 	cp BIN/TESTALL.EXE TESTALL.EXE
 	$(XT) run TESTALL.EXE .
-	rm -f TOC.EXE TESTALL.EXE
+	rm -f TOC.EXE TOCC.EXE TOCL.EXE TESTALL.EXE
 
 # ── Clean ────────────────────────────────────────────────────────────────
 clean:

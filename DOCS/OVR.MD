@@ -34,8 +34,8 @@ flag, `Link.State.targetCP`, makes `Link.CalculateLayout` clear every
 module's `isOverlay` to `FALSE` unconditionally when linking `/CP`, so
 every overlay-aware branch in `LINK.MOD` (the core shared by both
 targets) is dead code on that path regardless of any `$O+` in the source
-— confirmed by rebuilding `TOC286.EXE` (self-hosted, `/CP`) clean with no
-overlay-related effect. `LinkNE.MOD` itself is untouched; only
+— confirmed at the time by rebuilding the compiler itself linked `/CP`
+(the since-retired `TOC286.EXE`) clean with no overlay-related effect. `LinkNE.MOD` itself is untouched; only
 `LinkMZ.MOD`/`LINKOVR.MOD` ever act on `isOverlay=TRUE`.
 
 Extending to DPMI16 would need its own vector-hooking mechanism (a
@@ -346,6 +346,63 @@ mirroring the identical `isImp & isFr & overlayMode` gate in
 Verified end-to-end against `EXAMPLES/OVRDEMO/OVRMAIN.EXE`: `Ovrmain` →
 `Ovrdemo.Run` → `Ovrdemo2.Run` → resume back into `Ovrdemo`, correct
 output, exit 0.
+
+### Multi-site-same-callee resume disambiguation fix (2026-08-21, OVR-BUG.MD "Bug 2")
+
+**Bug.** `AddOvrReturnTrampoline` (`LINK.MOD`) allocates one resume
+record PER CALL SITE — a caller module with several distinct call sites
+into the same callee entry point gets several distinct resume records,
+each with its own `globalId` and its own `ofs` (the caller-relative
+offset to resume AT, right after THAT site's own 5-byte trampoline).
+`Overlay.FindResumeGlobalId`, which `OvrDispatch`'s ordinary-entry path
+calls to decide which resident-table slot to bake as a cross-overlay
+call's synthesized return address, matched a caller's resume records by
+`calleeGlobalId` ALONE — so whenever a caller had more than one call
+site into the same callee entry, the match was ambiguous: it silently
+returned whichever resume record happened to be first in the
+(most-recently-added-first) in-memory chunk chain, without regard to
+which call site actually trapped. The callee's eventual `RETF` would
+then resume the caller at the WRONG offset — silent memory/control-flow
+corruption, not a clean crash, making it look like unrelated parser
+state corruption (`"undefined identifier"` errors on programs with no
+such identifier) when first found via `PEXPR.MOD` (the first module in
+this project's history with real multi-site-same-callee traffic from an
+overlay caller).
+
+**Fix.** `FindSiteOwner` (used by `OvrDispatch`'s ordinary-entry path to
+find the trapped call site's owning module) already computes, during its
+matching scan, the MATCHED site record's own `siteFileOfs` — the
+caller-module-relative opcode offset of the exact call site that
+trapped; it just never returned that value before. It now does (a new
+`VAR ownerSiteFileOfs` out-param). `FindResumeGlobalId` takes that value
+as a new parameter and disambiguates by matching BOTH
+`calleeGlobalId = calleeId` AND `ofs = siteFileOfs + 5` (the resume
+record's own on-disk `ofs` field is always the matching call site's
+`siteFileOfs + 5`, per `AddOvrReturnTrampoline`'s own `retOfs`
+computation) — uniquely identifying the one resume record that belongs
+to the site that actually trapped. No `.OVR` format change (both fields
+were already on disk, in the resume table `LoadResumeCache` already
+reads into `u^.resumeCache`).
+
+**Regression fixture:** `EXAMPLES/OVRDEMO/OVRB6.MOD`/`OVRA6.MOD`/
+`OVRMAIN6.MOD` (§18, `make run-multisite`) — `Ovra6` calls `Ovrb6.Run`
+from two distinct call sites; confirmed to crash reliably before this
+fix and produce correct, distinctly-marked-per-site output after it.
+
+**Verification:** full `make test` (313/313 manifest, 116/116
+`test_tasm.sh`, 14/14 `test_tlink.sh`, `test_selfhost.sh`'s gen2==gen3
+fixpoint byte-identical, `toc2.exe==toc3.exe` included — `toc1≠toc2` is
+the expected one-generation lag against the still-old `BOOT/TOC.EXE`
+whenever `SRC/LIB/OVERLAY.MOD` changes, per that script's own header
+comment), plus all pre-existing `EXAMPLES/OVRDEMO` fixtures (`run`,
+`run-manysites`, `run-clearbuf`) reconfirmed passing.
+
+`PEXPR.MOD` remains at `(*$D-,O-*)` pending a dedicated follow-up
+session to re-attempt enabling it as `$O+` now that both Bug 1 and Bug 2
+are fixed — not re-attempted as part of this fix (out of scope: this fix
+addresses the runtime correctness bug OVR-BUG.MD's "Bug 2" section
+handed off, not the separate decision of which additional modules to
+mark `$O+`).
 
 ## 10. `inUse` and eviction-pressure — real per-call nesting
 
@@ -672,12 +729,32 @@ the first success. Read the file's own header (§11), store the DOS
 handle. `OvrReadBuf` (a pluggable function pointer) is left pointing at
 the plain-disk reader.
 
-### 13.2 `OvrSetBuf(Size)`
+### 13.2 `OvrSetBuf(Size)` / `OvrSetBuf2(Size0, Size1)`
 Carves out `Size` bytes (clamped to at least some minimum) for the
 overlay buffer. This toolchain's Oberon runtime has no "shrink the heap
 ceiling" primitive a library module can call, so the overlay buffer is a
 plain `SYSTEM.Alloc` block tracked independently (§14). Can only be
 called before any overlay has actually been loaded.
+
+**Two blocks, not one (2026-08-21, OVR-BUG.MD follow-up).** `SYSTEM.Alloc`
+hands out one contiguous DOS block at a time, hard-capped near 64KB (the
+allocation size itself must fit a WORD). A single such block cannot hold
+every module that can be legitimately resident AT ONCE — the module
+currently executing (pinned via `inUse`/its own epilogue counter, e.g.
+the linker mid-`/CP`-link) PLUS whatever it calls into — once the overlay
+module pool grew large enough (`PExpr2.MOD`, §15). This project's own
+port allocates `NumHeapBlocks` (2) independent blocks instead of one;
+`LoadModule` tries block 0 first (exactly the original single-block bump/
+evict logic, unchanged), falling over to block 1 only once block 0's own
+eviction loop is genuinely exhausted. `OvrSetBuf(size)` keeps its
+original single-argument meaning (sizes block 0 only, block 1 stays
+unallocated) for backward compatibility with every existing caller;
+`OvrSetBuf2(size0, size1)` sizes both blocks independently. `TOC.MOD`'s
+own `SetupOvr` uses `OvrSetBuf2(65500, 24000)` — block 0 unchanged from
+before, block 1 sized to cover a second SCAN/DEF/LINKNE-sized module
+colliding with a pinned one, deliberately smaller than doubling the whole
+buffer (tried first: exhausted DOS's 640KB conventional-memory ceiling
+outright compiling `SRC/TASM`, "`oc: cannot create .dbg temp`").
 
 ### 13.3 The interrupt-trap handler (`INT 3Fh`)
 1. Reads the return address off the interrupt stack frame to identify
@@ -1031,6 +1108,225 @@ non-overlaid programs untouched — a program with no `$O+` module makes
 every overlay-aware code path a complete no-op, so the existing manifest
 and self-hosting byte-stability checks remain the regression gate.
 
+### `inUse` epilogue-counter fix (2026-08-21) — see `OVR-BUG.MD`
+
+**Bug (found 2026-08-20, `OVR-BUG.MD`, RESOLVED):** §10's `inUse`
+bookkeeping only has a decrement path when the *caller* is itself an
+overlay module (a cross-overlay call or a resume). An ordinary call
+from RESIDENT code (e.g. `PARSER.MOD` calling into `PExpr`) traps once,
+gets its call site patched to `JMP FAR` per §5's own optimization, and
+every subsequent call through that site is now a plain machine-level
+far call — no trap, no `OvrDispatch`, no way to ever decrement the
+`inUse` that call #1's trap incremented. `inUse` only ever climbs for
+any module called from more than a handful of distinct resident sites,
+eventually exhausting eviction headroom (`TryEvictOne` permanently
+`FALSE`, `SYSTEM.Halt(209)`). Latent (not yet fatal, given ample buffer
+headroom and few call sites) in the three modules already shipped as
+`$O+` at the time (`SCAN.MOD`/`DEF.MOD`/`LINKNE.MOD`); fatal and
+immediately reproducible when `PEXPR.MOD` (dozens of call sites) was
+attempted as a fourth.
+
+**Fix: a real epilogue counter, independent of the trap mechanism.**
+Every exported, module-level (`sym.level=0`) `$O+` entry-point
+procedure — the same set `PARSER.MOD`'s `AddOvrEntry` already
+identifies via `exported & (sym.level = 0) & PExpr.overlayMode` — gets
+compiler-emitted `INC`/`DEC` of a per-module WORD counter, bracketing
+the procedure body: `INC` right after `CgPrologue`'s own DS reload to
+the module's own data segment, `DEC` right before `CgEpilogue`'s DS
+restore (a single site — `PSTMT.MOD`'s `retPatchList`/`BpPatchFree`
+already backpatches every `RETURN` to one shared epilogue tail, so one
+`DEC` covers every exit path). This tracks genuine in-body execution
+regardless of how many times a patched call site fires without
+re-trapping — exactly the signal §10's trap-paired `inUse` cannot
+provide in steady state. `TryEvictOne` now requires **both**
+`ReadCounter(u) = 0` (nobody is currently inside `u`'s own code) **and**
+`u^.inUse = 0` (no live cross-overlay caller relationship, §9/§10's
+original concern) before evicting — the counter and `inUse` protect two
+different, complementary hazards and neither alone is sufficient (see
+"combined-signal" note below).
+
+**Zero `.OVR`-format-change constraint.** An early version of this fix
+widened the per-module `.OVR` header 12→16 bytes to carry the counter's
+runtime address (`dataParaRel`/`counterOfs` fields). That broke
+`BOOT/TOC.EXE` compatibility: the bootstrap's own compiled-in `.OVR`
+writer (`LinkOvr`) only emits the old 12-byte shape, and `BOOT/TOC.EXE`
+cannot be modified by an agent (CLAUDE.md) — a single-pass `make test`
+build using `BOOT/TOC.EXE` to link a fresh, 16-byte-header-reading
+`OVERLAY.MOD` produces a self-inconsistent binary (new reader, old
+writer) that crashes on its own first real overlay dispatch. The
+shipped fix instead derives the counter's runtime address from data the
+`.OVR` file *already* carries, with **no header change at all**:
+
+1. The counter slot reuses `Cgen.EmitDataZero(2)` — a pre-existing,
+   unconditional 2-byte placeholder every module already emits at DATA
+   offset 0 (originally just to avoid a zero-length DATA segment). No
+   new slot is allocated; the counter's offset is always the constant
+   `0`, needing no transmission at all.
+2. To read it back, `OVERLAY.MOD`'s `ReadCounter` exploits
+   `ApplyXFixups`'s own existing runtime patch: the moment a module is
+   loaded, `ApplyXFixups` patches `CgPrologue`'s `MOV AX,imm16`
+   DS-reload operand (fixed byte offset +9 from the procedure's own
+   entry, per `CgPrologue`'s documented byte layout) with the module's
+   real, current DATA segment. `ReadCounter` reads any already-cached
+   entry offset (`entryOfsCache`, populated the first time the module
+   is really dispatched through), far-reads that already-patched
+   operand to recover the DATA segment, then reads offset 0 in that
+   segment — the counter — directly. `HasCounter(u)` gates this on
+   `u` being currently resident AND having at least one real cached
+   entry (`entryOfsCache^.count > 0`, not just non-`NIL` — the cache is
+   pre-allocated eagerly by `RegisterModule`/`WarmModuleCaches` with
+   `count=0`, so `#NIL` alone would read uninitialized garbage before
+   the module's first real dispatch).
+
+**Combined-signal requirement in `TryEvictOne`, found during
+verification:** an earlier version of the fix used the counter ALONE
+(`ReadCounter(u)=0`) whenever `HasCounter(u)` was true, dropping the
+`inUse` check entirely for counter-bearing modules. Testing with
+`PEXPR.MOD` (dozens of call sites, real cross-overlay traffic) exposed
+a real corruption: a module with `counter=0` (nobody currently
+executing inside its own code) but `inUse=1` (still a live
+cross-overlay CALLER — i.e., it made an outgoing call and hasn't
+resumed yet) was wrongly evicted, corrupting memory a pending resume's
+own return address still pointed into. Fixed by requiring both signals
+(`idle := (ReadCounter(u) = 0) & (u^.inUse = 0)`) and by no longer
+unconditionally `INC`-ing `inUse` on every dispatch into a
+counter-bearing module — only on resumes or when the module has no
+counter at all (`IF isResume OR ~HasCounter(u) THEN INC(u^.inUse) END`)
+— since the epilogue counter itself now covers the ordinary-entry case
+that increment used to (over-)track.
+
+**A second, deeper, unrelated bug found (and deliberately NOT fixed
+here) while testing with `PEXPR.MOD`:** once eviction decisions became
+correct, real eviction of a module mid cross-overlay call/resume chain
+started happening for the first time in this project's history (the
+original `inUse`-only bug had made it nearly impossible in practice —
+`inUse` stayed stuck nonzero, blocking eviction, for any module that
+ever participated in a cross-overlay call). This surfaced a separate
+resume/reload corruption bug, root cause not yet found — see
+`OVR-BUG.MD`'s "Bug 2" section for the full writeup. **`PEXPR.MOD` therefore
+stays at `(*$D-,O-*)`**, its original state; only `SCAN.MOD`/`DEF.MOD`/
+`LINKNE.MOD` (already shipped, simpler call patterns, not exercising
+the deeper bug) carry `$O+` today, and all three get the real benefit
+of this fix.
+
+**Verification:** full `make test` — 313/313 manifest, 116/116
+`test_tasm.sh`, 14/14 `test_tlink.sh` — and `test_selfhost.sh`'s
+gen2==gen3 fixpoint (the authoritative check whenever `toc1≠toc2` from
+a genuine codegen change against the still-old `BOOT/TOC.EXE`, per that
+script's own header comment) came back byte-identical across every
+module, `toc2.exe == toc3.exe` included. Zero heap-leak lines observed
+throughout. The `SRC/TASM` build step — which crashed reliably with
+`SYSTEM.Halt(209)` before this fix, per `OVR-BUG.MD`'s own repro — now
+succeeds cleanly.
+
+Files touched: `SRC/TOC/PARSER.MOD` (counter INC/DEC call sites, no new
+allocated slot), `SRC/TOC/CGEN.MOD` (no new procedure — reuses the
+pre-existing `CgIncDecMem*`), `SRC/LIB/OVERLAY.MOD` (`ReadCounter`/
+`HasCounter`, `TryEvictOne`/`OvrDispatch` eviction-authorization
+fixes). `SRC/TOC/LINK.MOD` and `SRC/TOC/LINKOVR.MOD` are **unchanged**
+from before this fix — the module-header format stays the documented
+12-byte shape in §11.1 below, no widen.
+
+### `PEXPR.MOD` split into `PExpr`/`PExpr2`, `$O+`, and the multi-block buffer (2026-08-21)
+
+With both Bug 1 and Bug 2 fixed (above), `PEXPR.MOD` was re-attempted as
+`$O+`. Two further, genuinely separate obstacles were found and fixed
+before it could ship, neither a logic bug in the overlay runtime itself:
+
+**1. `PEXPR.MOD`'s own compiled code (~76KB) exceeded the overlay
+buffer's hard architectural ceiling.** `SYSTEM.Alloc` hands out one
+contiguous DOS block at a time, capped near 64KB (the allocation size
+itself must fit a WORD — `OvrSetBuf`'s own `paras*ParaSize` overflow
+comment). No buffer size, however large, could ever hold a module bigger
+than one block. **Fix: split `PEXPR.MOD` into two modules.** `PExpr`
+(kept resident, `$O-`) holds the OUTER expression grammar
+(`ParseExpression`/`ParseSimpleExpression`/`ParseTerm`/`ParseCondExpr`
+and friends, const-folding, shared `Error`/`Expect`/`IsLex` infra, and
+every module-level VAR `PARSER.MOD`/`PSTMT.MOD` read directly). `PExpr2`
+(new, `$O+`) holds the INNER designator/actual-parameter/factor grammar
+(`ParseDesignator`, `ParseActualParameters`, `EmitInlineCall`,
+`ParseSystemIntrinsic`, `ParseFactor`) — the larger half by code size,
+and the piece that was actually too big to fit resident. The split
+boundary follows the grammar's own natural cut: `ParseFactor` calls
+`ParseDesignator`(for a bare designator) but `ParseDesignator` never
+calls back into `ParseFactor` — the only real cycle is `ParseTerm`/
+`ParseCondFactor` (outer) calling `ParseFactor` (inner), broken via a
+`PExpr.ParseFactorHook: PROCEDURE(VAR Cgen.Item)` variable (Oberon
+forbids circular module imports, so `PExpr` cannot `IMPORT PExpr2` to
+call `ParseFactor` directly). `PExpr2.WireHook` sets the hook explicitly
+— `$O+` forbids a module `BEGIN` block (§4), so it can't be wired via an
+ordinary module init; `TocMain.Run` calls it once, unconditionally,
+before any real parsing starts (works for both `TOC.MOD`'s `/CD` entry,
+after `SetupOvr` has installed the trap handler `PExpr2`'s own call
+needs, and any `/CP` entry that never calls `SetupOvr` at all — `$O+`
+has no effect under `/CP` regardless, §2, so it is a plain resident call
+there).
+
+**2. Adding `PExpr2` to the `$O+` pool raised overall memory pressure
+enough to expose a second, independent buffer-capacity problem**,
+confirmed via `TESTS/FIX/NECHECK.MOD`'s own `/CP` manifest row
+(`ne/cp-signature`): `SYSTEM.Halt(209)` linking a TRIVIAL fixture,
+nothing to do with `PExpr2` directly. Root cause: `TOC.EXE`'s own
+overlay-eligible modules (`SCAN.MOD`/`DEF.MOD`/`LINKNE.MOD`/`PExpr2.MOD`)
+are dispatched into while `TOC.EXE` compiles/links ANY program, including
+one with no `$O+` modules of its own — `LinkNE.MOD` (itself `$O+`) was
+pinned resident (`inUse=1`, genuinely mid-execution, correctly not
+evictable) while trying to load `Scan.MOD`, and the two together (~29KB
++ ~19KB) no longer fit in the single 65500-byte block once general pool
+pressure from the 4th module changed load/evict timing enough to
+actually trigger this real contention (confirmed via debug
+instrumentation: `TryEvictOne` walked every OTHER resident module to
+`residentSeg=0`, genuinely nothing left to evict, before giving up).
+This was always a latent one-block-cannot-hold-two-modules risk (§13.2's
+own `LoadModule`/`TryEvictOne` design never guaranteed the CURRENTLY
+EXECUTING module plus its own outgoing call's target both fit in one
+block) — never reached before because a 3-module pool's own timing never
+happened to trigger a real conflict.
+
+**Fix: a genuine multi-block overlay buffer** (§13.2's own updated
+description) — `NumHeapBlocks=2` independent `SYSTEM.Alloc` blocks,
+`LoadModule` tries block 0 first (verbatim original single-block bump/
+evict logic via the new `TryLoadIntoBlock` helper), falling over to
+block 1 only once block 0 is genuinely exhausted. `TryEvictOne`/
+`RegionFree` needed NO change (already block-agnostic — they operate on
+`residentSeg`/`codeLen`, never on which block a module lives in);
+`FindSiteOwner`'s own "is this address inside the overlay region" fast
+check became `InAnyHeap`, a small loop over both blocks. A first version
+doubled the buffer outright (`OvrSetBuf2(65500,65500)`) — this genuinely
+fixed the failure but exhausted DOS's already fully-committed 640KB
+conventional-memory ceiling elsewhere (`SRC/TASM`'s own build step:
+`oc: cannot create .dbg temp`, the same DOS-out-of-memory signature
+DOCS/OVR.MD §16's `$O+`-on-`DEF`/`LinkNE` history hit once before).
+Shipped instead with an asymmetric split — block 0 stays 65500
+(unchanged, holds any single module up to the original ceiling), block 1
+is a much smaller 24000 bytes (just enough to cover a second SCAN/DEF/
+LINKNE-sized module colliding with a pinned one) — closing the real gap
+with a far smaller memory delta. `OvrSetBuf(size)` keeps its original
+single-argument signature and behavior (sizes block 0 only) for every
+OTHER existing caller (every `EXAMPLES/OVRDEMO` fixture, several
+deliberately tiny to force eviction pressure as a test tool) — only
+`TOC.MOD`'s own `SetupOvr` uses the new `OvrSetBuf2`.
+
+**Verification:** full `make test` — 313/313 manifest (including the
+previously-failing `ne/cp-signature` row), 116/116 `test_tasm.sh`,
+14/14 `test_tlink.sh` — and `test_selfhost.sh`'s gen2==gen3 fixpoint
+(the authoritative check whenever `toc1≠toc2` from a genuine
+codegen-independent runtime/compiler-source change against the
+still-old `BOOT/TOC.EXE`) came back byte-identical, `toc2.exe==toc3.exe`
+included. Zero heap-leak lines throughout. All pre-existing
+`EXAMPLES/OVRDEMO` fixtures (`run`, `run-manysites`, `run-clearbuf`,
+`run-multisite`) reconfirmed passing. Manual `/CP` verification (`xt`
+cannot execute NE binaries) via `NECHECK.MOD` confirmed the exact
+previously-failing case now links cleanly.
+
+Files touched: `SRC/TOC/PEXPR.MOD` (trimmed, `$O-`), `SRC/TOC/PEXPR2.MOD`
+(new, `$O+`), `SRC/TOC/PSTMT.MOD`/`SRC/TOC/PARSER.MOD` (call sites
+redirected to `PExpr2`, new imports), `SRC/TOC/TOCMAIN.MOD`
+(`PExpr2.WireHook` call), `SRC/TOC/TOC.MOD` (`OvrSetBuf2` call),
+`SRC/LIB/OVERLAY.MOD` (`HeapBlockDesc`/`ovrHeaps` array,
+`AllocHeapBlock`/`TryLoadIntoBlock`/`InAnyHeap` helpers, `OvrSetBuf2`).
+No `.OVR` on-disk format change.
+
 ## 17. Deliberate simplifications
 
 - **No ring-buffer/probation/reprieve eviction algorithm** — this
@@ -1075,6 +1371,27 @@ and self-hosting byte-stability checks remain the regression gate.
   format (§12): forces evicting TWO simultaneously-idle callers (`Ovra4`
   AND `Ovrb4`) to make room for `Ovrd4`, one level deeper than the
   3-module fixture's single idle caller. `make run-deepchain`.
+- `OVRLEAF5.MOD`/`OVRPAD5.MOD`/`OVRMAIN5.MOD` — OVR-BUG.MD regression
+  (§16 "inUse epilogue-counter fix"): `Ovrleaf5.Run` is called from 24
+  DISTINCT resident call sites in `Ovrmain5.MOD`, interleaved with a
+  second `$O+` module (`Ovrpad5`), with `OvrSetBuf(8)` sized to hold
+  only one of the two modules resident at a time — every interleaved
+  pair forces a genuine evict/reload cycle. Before the fix this
+  reliably exhausted eviction headroom (`SYSTEM.Halt(209)`, since
+  `Ovrleaf5`'s `inUse` only climbed, never decremented, once its early
+  call sites patched to `JMP FAR`); after the fix, the epilogue counter
+  makes every eviction decision correct and the run completes cleanly.
+  `make run-manysites`.
+- `OVRB6.MOD`/`OVRA6.MOD`/`OVRMAIN6.MOD` — OVR-BUG.MD "Bug 2" regression
+  (cross-overlay resume/reload corruption, §9/§10): `Ovra6` (itself an
+  overlay module) calls `Ovrb6.Run` from TWO DISTINCT call sites. Before
+  the fix, `Overlay.FindResumeGlobalId` matched a caller's resume record
+  by `calleeGlobalId` alone, so a caller with more than one call site
+  into the same callee entry point could resolve either trap to the
+  WRONG resume record and resume at the wrong offset in its own code —
+  reproduced reliably by this fixture (crash) before the fix; each call
+  site's own distinct output marker (`<1>`/`<2>`) confirms correct
+  per-site resume after it. `make run-multisite`.
 
 See `DOCS/TESTS.MD` for how these fit into the wider test suite and for
 additional overlay-specific test scenarios.

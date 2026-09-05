@@ -1,7 +1,7 @@
 (*$D-,R-,A-,O-*)
 MODULE Files;
 
-IMPORT EMS, Time;
+IMPORT EMS, Time, Out;
 
 CONST
   BUFSIZE = 8192;
@@ -162,14 +162,24 @@ END ClampLen;
    number of bytes.
    Result: number of bytes actually read (less than len at end-of-file). *)
 PROCEDURE BlockRead*(VAR F: File; VAR x; len: WORD): WORD;
-  VAR total, delta, avail: WORD; dest: SYSTEM.ADDRESS;
+  VAR total, delta, avail: WORD; availL: LONGINT; dest: SYSTEM.ADDRESS;
 BEGIN
   len := ClampLen(F, len);
   IF len = 0 THEN RETURN 0 END;
   total := 0;
   dest := x;
   WHILE total < len DO
-    avail := F.bufSize - F.bufPos;
+    (* Bug 6 fix (2026-09-02, OVR-BUG.MD "ROOT CAUSE FOUND"): F.bufPos > F.bufSize
+       is not supposed to happen, but if it ever does (root cause of how it
+       does is still being tracked down), the plain WORD subtraction below
+       wraps to a huge positive value instead of signalling "buffer
+       exhausted" -- SYSTEM.MOVE then reads past the real 8 KB F.buf^
+       allocation into unrelated heap memory.  Compute via LONGINT and
+       clamp negative to 0 so that case forces the NextPage/re-fetch path
+       instead of silently scribbling wrong data into the caller's buffer. *)
+    availL := LONGINT(F.bufSize) - LONGINT(F.bufPos);
+    IF availL < 0 THEN availL := 0 END;
+    avail := WORD(availL);
     IF avail = 0 THEN
       NextPage(F);
       IF F.bufSize = 0 THEN SyncPos(F, FALSE); RETURN total END;
@@ -498,6 +508,16 @@ BEGIN
      SYSTEM.FCLOSE(F.handle);
      F.handle := -1;
      RETURN FALSE
+  END;
+  (* TEMPORARY canary #4 (OVR-BUG.MD Bug 6): minimal, no Strings/LogErr
+     (Files.MOD cannot import either without a circular dependency) --
+     raw byte-out via Out on a near-CS collision. Kept deliberately tiny
+     to avoid perturbing the bug the way a heavier probe did once before
+     in this investigation. Remove once the investigation concludes. *)
+  IF (INTEGER(SYSTEM.SEG(F.buf^)) - INTEGER(SYSTEM.GetCS()) > -256) &
+     (INTEGER(SYSTEM.SEG(F.buf^)) - INTEGER(SYSTEM.GetCS()) < 256) THEN
+    Out.String("CANARY4:Files.Reset.buf seg="); Out.Int(LONGINT(SYSTEM.SEG(F.buf^)), 0);
+    Out.String(" cs="); Out.Int(LONGINT(SYSTEM.GetCS()), 0); Out.Ln
   END;
   F.bufTag := -1;
   F.bufSize := 0;

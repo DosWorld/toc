@@ -1,4 +1,4 @@
-(*$D-,A-*)
+(*$D-,A-,O-*)
 MODULE Syms;
 (*
   Symbol table: types, symbols, scopes, predeclared universe.
@@ -126,6 +126,16 @@ CONST
      heap-block header over many entries instead of one) *)
   FwdChunk*    = 32;
   InlineChunk* = 32;
+
+  (* Structural-type dedup index (see typeHash in the VAR block).  Power of
+     two so the bucket is a mask, not a MOD.  1024 entries = 2 KB of BSS.
+     Only TFArray/TFPointer are indexed, and dedup collapses them hard: the
+     heaviest module measured (TOCMAIN, 20 imports) keeps just 70 arrays + 24
+     pointers after interning, so 1024 buckets is a load factor under 0.1 --
+     and an over-full table costs a missed dedup, never correctness. *)
+  TypeHashSize = 1024;
+  TypeHashMask = 1023;
+  TypeNoSlot   = -1;    (* empty bucket marker *)
 
 TYPE
   Symbol*   = POINTER TO SymbolRec;
@@ -264,6 +274,39 @@ VAR
   typeDir: ARRAY MaxTypeChunks OF TypeChunk;
   symCount:  WORD;    (* records allocated (also drives bump position) *)
   typeCount: WORD;
+
+  (* ---- structural type dedup (TFArray / TFPointer) ----
+     Every imported module's .def is parsed into freshly allocated TypeDescs
+     (DEF.MOD holds 18 of the ~30 TypeNew* call sites), so the same shape --
+     POINTER TO Foo, ARRAY 32 OF CHAR -- is rebuilt once per import path that
+     mentions it.  Type count therefore tracks IMPORT COUNT, not module
+     complexity: measured across a self-host, ~0.55 types per symbol in every
+     module, peaking at 1156 types (arr=378 ptr=193) for the 20-import
+     TOCMAIN.  Interning the two structurally-keyed forms collapses those
+     duplicates, the same way StrTab already interns names.
+
+     ONLY TFArray and TFPointer are interned, and only when fully determined
+     at construction:
+       - TFRecord  must NOT be: TypeNewRecord stamps a UNIQUE NextTagId
+         (the runtime type tag) and fields are appended afterwards by
+         TypeAddField, so two records with identical shape are still
+         distinct types.
+       - TFProc    must NOT be: TypeNewProc creates an empty signature that
+         TypeAddParam fills in later, so its identity is not known yet at
+         construction time.
+       - a TFPointer whose base is still unresolved must NOT be: the forward
+         reference patchers (PARSER.MOD's fwdRefs loop, DEF.MOD's derived-base
+         loop) mutate `.base` in place afterwards, and sharing such a node
+         would splice one module's resolution into another's type.
+         DedupPointer is therefore only consulted for an already-resolved
+         base (see TypeNewPointer).
+
+     Index: open-addressed hash over arena slot indices; TypeNoSlot = empty.
+     It holds indices rather than pointers so it survives nothing -- it is
+     reset with the arenas in FreeChunks/SymInit.  Sized a power of two for
+     a mask instead of a MOD, and generously (load factor < 0.5 at the
+     measured 1156-type peak). *)
+  typeHash: ARRAY TypeHashSize OF INTEGER;
   bodyI: INTEGER;     (* module-body init loop counter *)
 
   (* Fallback OOM targets for AllocSym/AllocType: "return the most recent
@@ -287,7 +330,7 @@ VAR
 
 (* Allocate + register a heap node so SymsFree frees it.  Callers use these
    instead of NEW for InlineNode / FwdNode. *)
-PROCEDURE NewInline*(): InlineNode;
+PROCEDURE NewInline(): InlineNode;
   VAR n: InlineNode;
 BEGIN
   NEW(n); n^.count := 0; n^.next := NIL;
@@ -311,7 +354,7 @@ BEGIN
   INC(tail^.count)
 END InlineAppend;
 
-PROCEDURE NewFwd*(): FwdNode;
+PROCEDURE NewFwd(): FwdNode;
   VAR n: FwdNode;
 BEGIN
   NEW(n); n^.count := 0; n^.next := NIL;
@@ -399,6 +442,77 @@ BEGIN
   RETURN TypeSlotPtr(typeCount - 1)
 END AllocType;
 
+(* ---- structural type dedup (see typeHash's comment in the VAR block) ---- *)
+
+(* TypeHashReset — empty every bucket.  Must run whenever the type arena is
+   emptied, since buckets hold arena slot indices. *)
+PROCEDURE TypeHashReset;
+  VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < TypeHashSize DO typeHash[i] := TypeNoSlot; INC(i) END
+END TypeHashReset;
+
+(* TypeKey — bucket for a structural type, from the operand's POINTER VALUE
+   (seg XOR ofs) rather than its arena index: identity is what we compare, and
+   a pointer needs no arena search, keeping both lookup and insert O(1).
+   An earlier draft keyed on the slot index and had to scan the arena to find
+   it -- that reintroduced the O(n^2) this index exists to avoid. *)
+PROCEDURE TypeKey(form: INTEGER; operand: TypeDesc; len: LONGINT): INTEGER;
+  VAR h: WORD;
+BEGIN
+  IF operand = NIL THEN h := 0
+  ELSE h := SYSTEM.XOR(SYSTEM.SEG(operand^), SYSTEM.OFS(operand^))
+  END;
+  h := SYSTEM.XOR(h * WORD(131), WORD(form) * WORD(31));
+  h := SYSTEM.XOR(h, WORD(len) * WORD(7));
+  RETURN INTEGER(SYSTEM.AND(h, WORD(TypeHashMask)))
+END TypeKey;
+
+(* TypeIntern — return an existing structurally identical TFArray/TFPointer,
+   or NIL if none is indexed yet.  Comparison is exact: same form, same len,
+   and the SAME operand node (pointer identity). *)
+PROCEDURE TypeIntern(form: INTEGER; operand: TypeDesc; len: LONGINT): TypeDesc;
+  VAR b, probes, slot: INTEGER; c: TypeDesc;
+BEGIN
+  b := TypeKey(form, operand, len);
+  probes := 0;
+  WHILE probes < TypeHashSize DO
+    slot := typeHash[b];
+    IF slot = TypeNoSlot THEN RETURN NIL END;
+    c := TypeSlotPtr(WORD(slot));
+    IF (c.form = form) & (c.len = len) THEN
+      IF form = TFArray THEN
+        IF c.elemOrRet = operand THEN RETURN c END
+      ELSE
+        IF c.base = operand THEN RETURN c END
+      END
+    END;
+    b := INTEGER(SYSTEM.AND(WORD(b + 1), WORD(TypeHashMask)));
+    INC(probes)
+  END;
+  RETURN NIL
+END TypeIntern;
+
+(* TypeIndexAdd — record a newly built structural type in the index.  `slot` is
+   the arena index the caller just allocated (typeCount-1).  Silently does
+   nothing when the table is full: dedup is an optimization, so a missed entry
+   costs a duplicate, never correctness. *)
+PROCEDURE TypeIndexAdd(form: INTEGER; operand: TypeDesc; len: LONGINT;
+                       slot: INTEGER);
+  VAR b, probes: INTEGER;
+BEGIN
+  b := TypeKey(form, operand, len);
+  probes := 0;
+  WHILE probes < TypeHashSize DO
+    IF typeHash[b] = TypeNoSlot THEN typeHash[b] := slot; RETURN END;
+    b := INTEGER(SYSTEM.AND(WORD(b + 1), WORD(TypeHashMask)));
+    INC(probes)
+  END
+END TypeIndexAdd;
+
+
+
 (* FreeChunks — DISPOSE every arena chunk (zero-leak rule) and empty both
    arenas.  All Symbol/TypeDesc pointers become invalid. *)
 PROCEDURE FreeChunks;
@@ -414,7 +528,9 @@ BEGIN
     IF typeDir[i] # NIL THEN DISPOSE(typeDir[i]); typeDir[i] := NIL END;
     INC(i)
   END;
-  symCount := 0; typeCount := 0
+  symCount := 0; typeCount := 0;
+  (* buckets hold arena slot indices — they die with the arena *)
+  TypeHashReset
 END FreeChunks;
 
 (* ---- private allocators (fully initialise before the pointer escapes) ---- *)
@@ -476,12 +592,18 @@ END TypeNew;
 PROCEDURE TypeNewArray*(elem: TypeDesc; len: LONGINT): TypeDesc;
   VAR t: TypeDesc;
 BEGIN
+  (* Interned: an ARRAY is fully determined by (element type, length) and is
+     never mutated afterwards, so every "ARRAY n OF Elem" can share one node
+     (see typeHash's comment). *)
+  t := TypeIntern(TFArray, elem, len);
+  IF t # NIL THEN RETURN t END;
   t := NewTypeDesc(TFArray, 0);
   t.elemOrRet := elem;
   t.len  := len;
   IF len >= 0 THEN t.size := len * elem.size
   ELSE t.size := SzPointer
   END;
+  TypeIndexAdd(TFArray, elem, len, INTEGER(typeCount) - 1);
   RETURN t
 END TypeNewArray;
 
@@ -518,8 +640,20 @@ END TypeAddField;
 PROCEDURE TypeNewPointer*(base: TypeDesc): TypeDesc;
   VAR t: TypeDesc;
 BEGIN
+  (* Interned ONLY for a resolved base.  A pointer created with an unresolved
+     base (NIL / NoType) is a forward reference whose `.base` is patched in
+     place later -- PARSER.MOD's fwdRefs loop and DEF.MOD's derived-base loop
+     both do exactly that -- and sharing such a node would splice one
+     module's resolution into another's type.  Those stay unique. *)
+  IF (base # NIL) & (base # NoType) THEN
+    t := TypeIntern(TFPointer, base, 0);
+    IF t # NIL THEN RETURN t END
+  END;
   t := NewTypeDesc(TFPointer, SzPointer);
   t.base := base;
+  IF (base # NIL) & (base # NoType) THEN
+    TypeIndexAdd(TFPointer, base, 0, INTEGER(typeCount) - 1)
+  END;
   RETURN t
 END TypeNewPointer;
 
@@ -591,6 +725,18 @@ BEGIN
     p := p.next
   END
 END TypeCalcArgSize;
+
+(* IsForm — NIL-safe "is t of this type form?".  The parsers asked this
+   question 59 times as the hand-written pair
+   `(x.type # Syms.NoType) & (x.type.form = Syms.TFxxx)`; writing it once
+   here removes that repetition and, more importantly, makes the NoType
+   guard impossible to forget — omitting it dereferences NIL and crashes
+   the compiler, rather than merely giving a wrong answer (code review,
+   2026-09-04). *)
+PROCEDURE IsForm*(t: TypeDesc; form: INTEGER): BOOLEAN;
+BEGIN
+  RETURN (t # NoType) & (t # NIL) & (t.form = form)
+END IsForm;
 
 PROCEDURE TypeIsExtension*(ext, base: TypeDesc): BOOLEAN;
 BEGIN
@@ -829,7 +975,7 @@ BEGIN
   RETURN SymFindLocalId(StrTab.Find(name))
 END SymFindLocal;
 
-PROCEDURE SymFindId*(id: StrTab.TStrTabId): Symbol;
+PROCEDURE SymFindId(id: StrTab.TStrTabId): Symbol;
   VAR sc: Scope; s: Symbol;
 BEGIN
   IF id = 0 THEN RETURN NIL END;
@@ -1050,6 +1196,9 @@ BEGIN
   Strings.Append(" strtab=", m); Strings.AppendInt(LONGINT(StrTab.Count()), m);
   Strings.Append(" strtabKB=", m);
   Strings.AppendInt((StrTab.MemBytes() + LONGINT(1023)) DIV LONGINT(1024), m);
+  (* allocated vs actually-used text: the difference is per-chunk tail waste *)
+  Strings.Append(" strtabTextUsed=", m);
+  Strings.AppendInt(StrTab.TextUsed(), m);
   LogErr.Debug(m)
 END StatsDump;
 
@@ -1071,13 +1220,28 @@ BEGIN
   StrTab.Reset   (* release the interning table (zero-leak) *)
 END SymsFree;
 
+(* RawInit: the module's own one-time init, moved out of a BEGIN block so
+   this module can be $O+ (DOCS/OVR.MD §4 forbids a BEGIN block on an
+   overlay-eligible module -- same move as PStmt.RawInit/Parser.RawInit).
+   NoSym/NoType/symDir/typeDir/symCount/typeCount are all genuinely
+   one-time: every real per-compile reset of the chunk directories and
+   counts already happens in FreeChunks (called from SymsFree, once per
+   compile), which zeroes exactly these same fields back to their BEGIN-
+   block starting state -- this call exists only to give them THAT
+   starting state before the very first SymInit/FreeChunks cycle ever
+   runs (the runtime does not zero module globals).  symOom/typeOom are
+   the one genuinely load-bearing one-time allocation (the OOM fallback
+   nodes AllocSym/AllocType hand out), same shape as PStmt's own
+   bpOomNode.  Called once from TocMain.Run, mirroring PStmt.RawInit's
+   own call site (before any real parsing starts). *)
 BEGIN
-  (* raw first-time init — the runtime does NOT zero module globals; the
-     directories must be NIL before the first FreeChunks/alloc. *)
   NoSym := NIL; NoType := NIL;
   symCount := 0; typeCount := 0;
   bodyI := 0; WHILE bodyI < MaxSymChunks  DO symDir[bodyI]  := NIL; INC(bodyI) END;
   bodyI := 0; WHILE bodyI < MaxTypeChunks DO typeDir[bodyI] := NIL; INC(bodyI) END;
+  (* the runtime does NOT zero globals — the dedup index must be emptied
+     explicitly before the first TypeNewArray/TypeNewPointer can probe it *)
+  TypeHashReset;
   NEW(symOom); NEW(typeOom);
   IF (symOom = NIL) OR (typeOom = NIL) THEN
     (* The OOM fallback nodes themselves failed to allocate at startup: latch
