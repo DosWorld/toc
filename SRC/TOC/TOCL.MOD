@@ -227,11 +227,11 @@ BEGIN
     IF ~LogErr.HaveErr() THEN LinkNE.BuildSegTable(ls, ns) END;
     IF ~LogErr.HaveErr() THEN LinkNE.PerformLinking(ls, ns) END;
     IF ~LogErr.HaveErr() THEN LinkNE.WriteExe(ls, ns, gOutExe) END;
-    LinkNE.LinkFree(ns)
+    LinkNE.LinkFree(ns); DISPOSE(ns); ns := NIL
   ELSE
     IF ~LogErr.HaveErr() THEN LinkMZ.PerformLinking(ls, ms) END;
     IF ~LogErr.HaveErr() THEN LinkMZ.WriteExe(ls, ms, gOutExe) END;
-    LinkMZ.LinkFree(ms)
+    LinkMZ.LinkFree(ms); DISPOSE(ms); ms := NIL
   END;
 
   (* Overlay payload, if the program being linked used $O+.  None of the
@@ -244,12 +244,39 @@ BEGIN
   END;
 
   Link.LinkFree(ls); DISPOSE(ls);
+  (* Release the interned link-symbol names.  Link's symbol table keys on
+     StrTab ids (LINK.MOD SymRec.nameId), and nothing references those names
+     once linking is done -- without this the whole table survives to process
+     exit (measured: 664 paragraphs on a trivial link, and it is fixed-size,
+     not per-module).  The old in-process TocMain.LinkAll did exactly this for
+     the same reason; the call did not come along when linking moved here. *)
+  StrTab.Reset;
   IF LogErr.HaveErr() THEN RETURN 1 END;
   RETURN 0
 END LinkFromFile;
 
+(* ZERO HEAP LEAKS is a KEY RULE (CLAUDE.md): every link must return the heap
+   exactly as it found it.  Same shape and same wording as TocMain.LeakGuard,
+   reported through LogErr.Error so a leak fails the run like any other fatal
+   error rather than printing a warning nobody acts on.  TOCL had no leak
+   check at all until 2026-09-05, which is why a 664-paragraph StrTab leak
+   (see LinkFromFile) went unnoticed through a full green `make test`. *)
+PROCEDURE LeakGuard(memBefore: WORD; part: ARRAY OF CHAR);
+  VAR memAfter: WORD; msg: ARRAY 256 OF CHAR;
+BEGIN
+  memAfter := SYSTEM.MemAvail();
+  IF memAfter < memBefore THEN
+    Strings.Copy("tocl: heap leak ", msg);
+    Strings.Append(part, msg);
+    Strings.Append(" (", msg);
+    Strings.AppendInt(LONGINT(memBefore - memAfter), msg);
+    Strings.Append(" paragraphs)", msg);
+    LogErr.Error(msg)
+  END
+END LeakGuard;
+
 PROCEDURE Run*;
-  VAR exitCode: INTEGER;
+  VAR exitCode: INTEGER; memBefore: WORD;
       ctl: ARRAY MaxPath OF CHAR;
 BEGIN
   LogErr.SetLevel(LogErr.LINFO);
@@ -272,7 +299,10 @@ BEGIN
     gLibArg[0] := 0X
   END;
   LogErr.Open;
+  memBefore := SYSTEM.MemAvail();
   exitCode := LinkFromFile(ctl);
+  LeakGuard(memBefore, "whole link");
+  IF LogErr.HaveErr() & (exitCode = 0) THEN exitCode := 1 END;
   LogErr.Close;
   SYSTEM.Halt(BYTE(exitCode))
 END Run;
