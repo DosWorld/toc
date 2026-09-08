@@ -1315,7 +1315,19 @@ BEGIN
           Cgen.CgSetcc(RelopJcc(op))
         END;
         item.type := Syms.TypeBoolean; item.mode := Cgen.MReg
+      (* The memory-operand form below emits CMP AX,[mem] (opcode 3B) --
+         a 16-BIT read.  For a 1-byte operand (BYTE/BOOLEAN) that reads the
+         variable's byte PLUS the adjacent byte, so the comparison is against
+         garbage: `b1 = b2` on two equal BYTEs answered NOT EQUAL or equal
+         purely according to what happened to sit next to them in memory, and
+         `p = q` / `p # q` on the same BOOLEAN pair could both report "differ"
+         (bug report 2026-09-08).  CHAR was unaffected only because it is not
+         in isFastCmpEligible at all.  The constant branch above is safe (AX
+         vs imm16, no memory read), so only this branch needs the size guard;
+         1-byte operands fall through to the general CgLoadItem path, which
+         loads each side as a byte. *)
       ELSIF isFastCmpEligible &
+         (item.type.size # 1) & (rhs.type # Syms.NoType) & (rhs.type.size # 1) &
          ((rhs.mode = Cgen.MGlobal) OR (rhs.mode = Cgen.MLocal)) & ~rhs.isRef &
          ~IsFpuType(rhs) THEN
         Cgen.Emit1(BYTE(Cgen.OpPopAx));
