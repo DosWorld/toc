@@ -294,19 +294,29 @@ global entry id, separate from the module's normal public entry points.
    since a return-address id must be independently loadable and resolve
    to "resume the caller's own module," not to any of the caller's own
    real public entry points.
-3. **Reserved padding, not clobbered caller code
-   (`Cgen.CgCallFarOvr`).** `PEXPR.MOD`/`PSTMT.MOD`'s far-call codegen
-   (both statement-level AND expression-level call sites, see the
-   `PSTMT.MOD` note below) reserves 5 bytes of `NOP` padding immediately
-   after any imported far call made from `$O+` code, via
-   `Cgen.CgCallFarOvr` (codegen can't know yet whether the call's target
-   will resolve to an overlay module — only the linker knows that, much
-   later — so the padding is reserved unconditionally and stays dead NOP
-   if the call turns out to target a resident procedure).
-   `AddOvrReturnTrampoline` installs its trampoline into that padding
-   and records the jump target as `retOfs+5` (one past the padding,
-   where the caller's real, untouched continuation code begins), not
-   `retOfs` itself.
+3. **No reserved padding; the resume trampoline is resident
+   (`Link.AddOvrReturnTrampoline`).** `AddOvrReturnTrampoline` writes
+   nothing into caller code: it only *records* `retOfs` into the caller's
+   `ovrResumes` table, which `LinkOvr.WriteOvrFile` emits into the `.OVR`
+   resume table (item 4). The physical `INT 3Fh` bytes for every resume
+   point live in the resident, never-swapped `Overlay.ResumeTrapTable`
+   (moved there 2026-08-08 — a trampoline baked into overlay code goes
+   stale the instant the caller is evicted and reloaded at a different
+   segment). The jump target is `patchAddr-1+5`, one past the **`CALL FAR`
+   instruction's own five bytes** (`9A` + ofs:2 + seg:2) — never a
+   function of any padding.
+
+   *History:* `Cgen.CgCallFarOvr` used to emit 5 `NOP` bytes after every
+   eligible imported far call in `$O+` code, reserving room for that
+   trampoline back when it *was* patched there. Once the trampoline moved
+   resident the bytes became dead space; `LINK.MOD` and §12 both recorded
+   them as "unused dead space … kept for now". **Removed 2026-09-05** —
+   overlay call sites now use plain `Cgen.CgCallFar`, reclaiming 5 bytes
+   per eligible call (48 bytes off `TOCC.EXE`), including calls that turn
+   out to target resident modules. Note the swappable call-site trampoline
+   is only 4 bytes (`CD 3F id:WORD`, §5), so it already fits inside the
+   5-byte `CALL FAR` it replaces with a byte to spare — the padding was
+   never load-bearing for *that* rewrite either.
 4. **`.OVR` format: resume table.** Each module's on-disk layout has a
    `resumeCount` header field and a resume-point table (6-byte records:
    `ofs, globalId, calleeGlobalId` — §11), alongside the existing
@@ -496,12 +506,14 @@ The `inUse` gap is closed: eviction-and-reload-to-a-different-segment
 works correctly for both the evicted module's own resume and any
 further-nested caller's resume.
 
-**Accepted trade-off, not reclaimed:** `Cgen.CgCallFarOvr`'s 5-byte
-padding reservation after each overlay call site is now dead space for
-its original purpose (the trampoline it used to reserve room for is no
-longer patched there) but was deliberately left in place rather than
-reverting that codegen change — reclaiming it would be a separate,
-unrelated codegen change.
+**Reclaimed 2026-09-05:** `Cgen.CgCallFarOvr`'s 5-byte padding
+reservation after each overlay call site became dead space for its
+original purpose the moment the trampoline moved resident (it was no
+longer patched there), and was left in place at the time as a separate
+codegen change. That change has now been made: `CgCallFarOvr` is gone and
+overlay call sites emit a plain `CALL FAR` (§9 item 3). Verified by
+self-host fixpoint (gen2 == gen3, all three binaries byte-identical) and
+the full `EXAMPLES/OVRDEMO` regression set.
 
 **A second real bug found while testing repeated evict/reload cycles
 (2026-08-09, via `EXAMPLES/OVRDEMO/OVRMAINX.MOD`, `make run-clearbuf`):**

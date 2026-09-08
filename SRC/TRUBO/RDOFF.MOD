@@ -1160,6 +1160,10 @@ PROCEDURE MergeRdf*(VAR srcRdf1, srcRdf2, dstRdf: Files.File): BOOLEAN;
 BEGIN
   NEW(obj1); NEW(obj2);
   IF (obj1 = NIL) OR (obj2 = NIL) THEN
+    (* Partial success leaks the other one: free whichever DID allocate.
+       DISPOSE on NIL is not safe here, so each is guarded separately. *)
+    IF obj1 # NIL THEN DISPOSE(obj1) END;
+    IF obj2 # NIL THEN DISPOSE(obj2) END;
     LogErr.Error("out of memory (MergeRdf scratch objects)"); RETURN FALSE
   END;
   RdfInit(obj1);

@@ -58,14 +58,29 @@ generation() {
     # self-compile would overwrite the running binary mid-link.
     cp "$FROM/TOCC.EXE" "$TO/SELFC.EXE"
     cp "$FROM/TOCL.EXE" "$TO/SELFL.EXE"
+    # Report a failing compile/link HERE, where the cause is still visible.
+    # These used to be plain `|| true` with output discarded, so a generation
+    # that errored was noticed only later, as an unexplained byte-identity
+    # "differs" -- which is exactly how a truncated gen2 TOCC.EXE presented
+    # itself (see TESTS/test_linkfail.sh for that bug).  The step still does
+    # not abort the run: gen1 legitimately may not reproduce the current
+    # sources, and only gen2 vs gen3 is asserted.
     ( cd "$TO"
       for m in TOCC TOCL TOC; do
           rm -f "$m.EXE" "$m.LNK"
-          "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c . \
-              SELFC.EXE /ENTRY=Run "$m.MOD" >/dev/null 2>&1 || true
+          if ! "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c . \
+                   SELFC.EXE /ENTRY=Run "$m.MOD" >"$m.clog" 2>&1; then
+              echo "[selfhost]   WARNING: compiling $m.MOD failed in $(basename "$TO"):"
+              grep -aiE "error|leak" "$m.clog" | head -3 | sed 's/^/[selfhost]     /'
+          fi
           if [ -s "$m.LNK" ]; then
-              "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c . \
-                  SELFL.EXE "$m.LNK" >/dev/null 2>&1 || true
+              if ! "$XT" run --max=$MAX --memkb=640 -e "OBERON_LIB=TRUBO.OM" -c . \
+                       SELFL.EXE "$m.LNK" >"$m.llog" 2>&1; then
+                  echo "[selfhost]   WARNING: linking $m failed in $(basename "$TO"):"
+                  grep -aiE "error|leak" "$m.llog" | head -3 | sed 's/^/[selfhost]     /'
+              fi
+          else
+              echo "[selfhost]   WARNING: $m.LNK not produced in $(basename "$TO")"
           fi
       done )
 }

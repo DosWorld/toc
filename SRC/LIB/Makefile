@@ -116,6 +116,6 @@ RANDOM.OM: RANDOM.MOD SYSTEM.OM $(TOC)
 	$(XTRUN) $(TOC) $(TOCFLAGS) RANDOM.MOD
 
 clean:
-	rm -f *.EXE *.OM
+	rm -f *.EXE *.OM *.LNK
 
 .PHONY: all install clean regen-asm

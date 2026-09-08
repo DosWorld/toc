@@ -91,12 +91,43 @@ BEGIN
   RETURN Dos.DosError = 0
 END Exists;
 
-(* <stem>.LNK next to the source: TOCC writes it, TOCL reads it. *)
+(* <stem>.LNK in the CURRENT directory: TOCC writes it, TOCL reads it.
+
+   NOT beside the source.  TOCC names the link file after its output image
+   (TocMain.WriteLinkFile splits `outExe`), and outExe defaults to the root
+   module's own name with no directory part -- so for `toc /ENTRY=Run
+   SUB/FOO.MOD` the compiler writes FOO.LNK, FOO.OM and FOO.EXE in the CWD,
+   not in SUB/.  Deriving the name with FSplit+PathJoin kept the "SUB/"
+   prefix, so the driver looked for SUB/FOO.LNK, never found it, and aborted
+   with "compiler produced no link file" before ever running the linker --
+   i.e. any source passed with a directory path failed to link (fixed
+   2026-09-05).  Strip the directory here the same way TocMain.BaseStem
+   does, so both halves agree on the name. *)
 PROCEDURE LnkName(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
-  VAR d, n, e: ARRAY MaxPath OF CHAR;
+  VAR i, start, dot, k: INTEGER;
 BEGIN
-  Dos.FSplit(src, d, n, e);
-  Dos.PathJoin(dst, d, n);
+  (* Own basename scan rather than Dos.FSplit: FSplit only treats "\" and
+     ":" as separators, so for a forward-slash path like SUB/FOO.MOD it
+     returns Name = "SUB/FOO" and the directory would survive.  TocMain's
+     BaseStem -- the code that actually decides the output name -- accepts
+     "/", "\" and ":" alike, and this must match it exactly. *)
+  (* Bound the scan by LEN(src), not just the NUL: src is a by-value open
+     array, and an unterminated copy ran the loop off the end and corrupted
+     the caller's stack frame.  The symptom was remote and baffling -- the
+     driver returned 0 for a compile that had already FAILED, losing rc from
+     step 1, even though LnkName is only reached in step 2 (2026-09-05). *)
+  start := 0; dot := -1; i := 0;
+  WHILE (i < LEN(src)) & (src[i] # 0X) DO
+    IF (src[i] = "/") OR (src[i] = "\") OR (src[i] = ":") THEN
+      start := i + 1; dot := -1
+    END;
+    IF src[i] = "." THEN dot := i END;
+    INC(i)
+  END;
+  IF dot < start THEN dot := i END;
+  i := start; k := 0;
+  WHILE (i < dot) & (k < LEN(dst) - 5) DO dst[k] := src[i]; INC(i); INC(k) END;
+  dst[k] := 0X;
   Strings.Append(".LNK", dst)
 END LnkName;
 

@@ -330,6 +330,14 @@ statement   = [ assignment
               ] .
 (* Empty statement is allowed (semicolon followed by END/ELSE/ELSIF/UNTIL). *)
 
+(* RETURN: a PROCEDURE with a result type must contain at least one RETURN
+   statement -- a function body with none falls off the end into the
+   epilogue and the caller reads whatever is in DX:AX, so it is a fatal
+   "function has no RETURN statement" error (2026-09-08).  This is the
+   zero-RETURN case only: the compiler is single-pass with no AST, so it
+   does not attempt "every path returns" analysis, and a function whose
+   RETURNs are all inside conditionals is accepted. *)
+
 InlineStat  = "INLINE" "(" integer { "," integer } ")" .
 (* Emits the listed bytes verbatim at the call site (constants only — no Pn refs).
    Used to inject inline assembly (CLI/STI, IN/OUT, OS-level fixups) inside a
@@ -374,7 +382,12 @@ LabelList   = CaseLabel { "," CaseLabel } .
 CaseLabel   = constExpr [ ".." constExpr ] .
 (* Single value or inclusive range. constExpr must reduce to an INTEGER or
    CHAR constant.  A single-character string literal "X" is treated as a
-   CHAR constant (Oberon-07: string of length 1 is compatible with CHAR). *)
+   CHAR constant (Oberon-07: string of length 1 is compatible with CHAR).
+   Labels must be DISTINCT across the whole CASE: a value covered by an
+   earlier arm -- whether as a single label or inside a range -- is a fatal
+   "duplicate CASE label" error (2026-09-08).  Both dispatch paths enforce
+   it: the linear-scan path via a running label-range list, the jump-table
+   path via its claimed-slot map. *)
 
 WhileStat   = "WHILE" expr "DO" StatSeq
               { "ELSIF" expr "DO" StatSeq }

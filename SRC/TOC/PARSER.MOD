@@ -915,6 +915,20 @@ BEGIN
     Scan.Next(PExpr.sc)
   END;
 
+  (* A function must return a value.  retPatchList is set to NIL at this
+     procedure's entry and gains one node per RETURN statement parsed in its
+     body, so an empty list means the body contains NO RETURN at all and
+     execution falls off the end into CgEpilogue -- the caller then reads
+     whatever happens to be in DX:AX.  This is deliberately the
+     zero-RETURN case only, not full "every path returns" flow analysis:
+     single-pass with no AST, there is nothing here to analyse, and this
+     catches the real bug (a function that can never return a value) with
+     no false positives on code whose paths all do return. *)
+  IF (PStmt.retPatchList = NIL) &
+     (pt.elemOrRet # Syms.NoType) & (pt.elemOrRet.form # Syms.TFNotype) THEN
+    PExpr.Error("function has no RETURN statement")
+  END;
+
   PStmt.BpPatchFree(PStmt.retPatchList);
   (* OVR-BUG.MD epilogue counter: DEC before CgEpilogue's own DS
      restore (POP DS) -- every RETURN backpatches to exactly this one

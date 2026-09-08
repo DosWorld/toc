@@ -40,6 +40,6 @@ install: TLINK.EXE
 	cp $(TLINK) $(BIN_DIR)/$(TLINK)
 
 clean:
-	rm -f *.OM *.EXE $(OVR)
+	rm -f *.OM *.EXE $(OVR) *.LNK
 
 .PHONY: all install clean

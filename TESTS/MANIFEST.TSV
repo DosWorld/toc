@@ -333,3 +333,8 @@ relop/ptr-ordered-rejected	PTRLESS.MOD	fails	compile-fails
 scan/ident-too-long-rejected	IDLONG.MOD	fails	compile-fails
 sysshift/ror-lsl-cl-runtime	RORCL.MOD	/ENTRY=Run	errorlevel	0
 typeless/inc-global-var-actual	TVARINC.MOD	/ENTRY=Run	errorlevel	0
+case/dup-label-rejected	CASEDUP.MOD	fails	compile-fails
+case/overlap-range-rejected	CASEOVL.MOD	fails	compile-fails
+case/distinct-labels-ok	CASEOK.MOD		has-global	Caseok__init
+return/missing-in-function-rejected	NORETFN.MOD	fails	compile-fails
+return/present-and-proc-ok	RETFNOK.MOD		has-global	Retfnok__init

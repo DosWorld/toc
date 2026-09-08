@@ -107,8 +107,12 @@ BEGIN
   i := 0;
   WHILE (pfx[i] # 0X) & (SYSTEM.UCASE(arg[i]) = SYSTEM.UCASE(pfx[i])) DO INC(i) END;
   IF pfx[i] # 0X THEN RETURN FALSE END;   (* prefix did not fully match *)
+  (* Bound by LEN(val): arg comes from Dos.ParamStr into a 128-char buffer
+     while val is only NameLen (33) -- `/ENTRY=<33+ chars>` wrote past the
+     end of the caller's local.  Truncate instead (the over-long name then
+     simply fails the later "procedure not found" lookup). *)
   j := 0;
-  WHILE arg[i] # 0X DO val[j] := arg[i]; INC(i); INC(j) END;
+  WHILE (arg[i] # 0X) & (j < LEN(val) - 1) DO val[j] := arg[i]; INC(i); INC(j) END;
   val[j] := 0X;
   RETURN TRUE
 END MatchSwitchVal;
@@ -1036,11 +1040,6 @@ BEGIN
      GenEntryStub/EmitFarCallTo) can use TP's FFFF far-call placeholder under
      /CP.  /CD is unchanged. *)
   gTargetCP := targetCP;
-  (* Mirror into PExpr.targetCP -- PEXPR.MOD/PSTMT.MOD's own far-call
-     codegen (CgCallFarOvr's padding decision) needs it too, and gTargetCP
-     itself is this module's own private VAR (see that field's own
-     comment for why the mirror exists). *)
-  PExpr.targetCP := targetCP;
 
   (* /SYSTEM: single-file compile only, no dep-scan or link *)
   IF hasSystem THEN

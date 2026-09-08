@@ -243,6 +243,24 @@ BEGIN
     LinkOvr.WriteOvrFile(ls, ovrPath)
   END;
 
+  (* A failed link must not leave a partial/stale image behind.  LinkMZ.WriteExe
+     detects a flush/disk-full error and latches it (see its Files.Ok check),
+     and every step above is guarded by ~LogErr.HaveErr() -- but nothing removed
+     the file, so a truncated .EXE (or, worse, the PREVIOUS run's .EXE, still
+     complete and now silently stale) survived a failed link.  Anything that
+     tests for the output by existence then treats the link as successful; this
+     is what produced a short gen2 TOCC.EXE in test_selfhost.sh, reported only
+     much later as an unexplained "TOCC.EXE differs".  The old in-process
+     TocMain.LinkAll deleted the output on HaveErr -- restored here (2026-09-05);
+     LINKMZ.MOD's own Files.Ok comment still refers to that deletion. *)
+  IF LogErr.HaveErr() THEN
+    Files.Delete(gOutExe);          (* result ignored: absent is the desired state *)
+    IF ls^.anyOverlay & ~gTargetCP THEN
+      Files.ReplaceExt(gOutExe, ".OVR", ovrPath); SYSTEM.UPSTR(ovrPath);
+      Files.Delete(ovrPath)
+    END
+  END;
+
   Link.LinkFree(ls); DISPOSE(ls);
   (* Release the interned link-symbol names.  Link's symbol table keys on
      StrTab ids (LINK.MOD SymRec.nameId), and nothing references those names

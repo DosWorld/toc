@@ -270,6 +270,7 @@ END ReloadCase;
 
 CONST
   ArmSlotChunk = 32;
+  LabRangeChunk = 16;   (* label ranges per chunk, duplicate-CASE-label check *)
   MaxPreScanTokens = 20000;  (* hard safety net: abort pre-scan, not hang *)
   MaxTableSlots = 1024;      (* cap on hi-lo+1; beyond this, fall back to chain *)
 
@@ -392,6 +393,20 @@ TYPE
     next:  ArmSlotNode
   END;
 
+  (* Every label range seen so far in the CASE being parsed, so a later arm
+     can be checked against all earlier ones.  Oberon-07 requires CASE labels
+     to be distinct; without this a duplicate was silently accepted and the
+     first matching arm simply won.  A range list rather than a bitmap: it
+     costs nothing for sparse labels and, unlike the jump-table path's
+     ClaimArr, is not capped at MaxTableSlots -- the chain path accepts any
+     INTEGER label.  Chunked per the small-record rule (CLAUDE.md). *)
+  LabRangeNode = POINTER TO LabRangeNodeDesc;
+  LabRangeNodeDesc = RECORD
+    lo, hi: ARRAY LabRangeChunk OF INTEGER;
+    count:  INTEGER;
+    next:   LabRangeNode
+  END;
+
   (* Claimed-slot map for the jump-table path.  Heap-allocated by ParseCase:
      a 1 KB local array + a ~2 KB Scanner mark per nested CASE level was a
      real SP-wrap hazard on 8086 (ParseCaseTable recurses through nested
@@ -410,6 +425,42 @@ BEGIN
   END;
   tail^.idx[tail^.count] := idx; INC(tail^.count)
 END ArmSlotPush;
+
+(* Record label range lo..hi, first reporting an overlap with any range an
+   earlier arm of the same CASE already claimed.  Ranges are small in
+   practice, so a linear scan is the right shape here. *)
+PROCEDURE LabRangeAdd(VAR head, tail: LabRangeNode; lo, hi: INTEGER);
+  VAR n: LabRangeNode; k: INTEGER; r: LabRangeNode;
+BEGIN
+  n := head;
+  WHILE n # NIL DO
+    k := 0;
+    WHILE k < n^.count DO
+      IF (lo <= n^.hi[k]) & (n^.lo[k] <= hi) THEN
+        PExpr.Error("duplicate CASE label"); RETURN
+      END;
+      INC(k)
+    END;
+    n := n^.next
+  END;
+  IF (tail = NIL) OR (tail^.count >= LabRangeChunk) THEN
+    NEW(r);
+    IF r = NIL THEN LogErr.Error("out of memory (case-label range list)"); RETURN END;
+    r^.count := 0; r^.next := NIL;
+    IF tail # NIL THEN tail^.next := r ELSE head := r END;
+    tail := r
+  END;
+  tail^.lo[tail^.count] := lo; tail^.hi[tail^.count] := hi;
+  INC(tail^.count)
+END LabRangeAdd;
+
+PROCEDURE LabRangeFree(VAR head: LabRangeNode);
+  VAR n, nx: LabRangeNode;
+BEGIN
+  n := head;
+  WHILE n # NIL DO nx := n^.next; DISPOSE(n); n := nx END;
+  head := NIL
+END LabRangeFree;
 
 PROCEDURE ArmSlotFree(VAR head: ArmSlotNode);
   VAR n, nx: ArmSlotNode;
@@ -494,6 +545,11 @@ BEGIN
         IF ~claimed[an^.idx[k]] THEN
           PatchSlot(tableOfs, an^.idx[k], WORD(bodyStart));
           claimed[an^.idx[k]] := TRUE
+        ELSE
+          (* Slot already owned by an earlier arm: Oberon-07 requires CASE
+             labels to be distinct.  The chain path catches this in
+             LabRangeAdd; here the claimed[] map already knows. *)
+          PExpr.Error("duplicate CASE label")
         END;
         INC(k)
       END;
@@ -515,6 +571,7 @@ END ParseCaseTable;
 
 PROCEDURE ParseCase(retType: Syms.TypeDesc);
   VAR caseSym: Syms.Symbol; caseLoad, expr: Cgen.Item; endList: BpNode;
+      labHead, labTail: LabRangeNode;
       bodyList: BpNode; skipArm, skipLo: Cgen.Backpatch;
       lo, hi: INTEGER; n: BpNode; more: BOOLEAN;
       preCount, preLo, preHi: INTEGER;
@@ -524,6 +581,7 @@ PROCEDURE ParseCase(retType: Syms.TypeDesc);
 BEGIN
   Scan.Next(PExpr.sc);
   endList := NIL;
+  labHead := NIL; labTail := NIL;   (* runtime does NOT zero locals *)
   PExpr.ParseExpression(expr); Cgen.CgLoadItem(expr);
   caseSym := Syms.SymNew("$case", Syms.KVar);
   caseSym.type := Syms.TypeInteger;
@@ -578,12 +636,14 @@ BEGIN
       lo := ParseConstLabel();
       IF IsLex(Scan.TDotdot) THEN
         hi := ParseConstLabel();
+        LabRangeAdd(labHead, labTail, lo, hi);
         Cgen.CgCmpAxImm(lo);
         Cgen.CgCondNear(Cgen.OpJl, skipLo);
         Cgen.CgCmpAxImm(hi);
         n := BpPush(bodyList); Cgen.CgCondNear(Cgen.OpJle, n^.bp); bodyList := n;
         Cgen.CgPatchNear(skipLo)
       ELSE
+        LabRangeAdd(labHead, labTail, lo, lo);
         Cgen.CgCmpAxImm(lo);
         n := BpPush(bodyList); Cgen.CgCondNear(Cgen.OpJz, n^.bp); bodyList := n
       END;
@@ -599,6 +659,7 @@ BEGIN
   END;
   IF IsLex(Scan.TElse) THEN ParseStatementSequence(retType) END;
   PExpr.Expect(Scan.TEnd);
+  LabRangeFree(labHead);
   BpPatchFree(endList)
 END ParseCase;
 
@@ -1407,13 +1468,14 @@ BEGIN
       IF pt2 = Syms.NoType THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
       IF (PExpr.sc.sym = Scan.TLparen) OR (pt2.tagIdOrNParams > 0) THEN
         PExpr2.ParseActualParameters(pt2) END;
-      (* DOCS/OVR.MD §9: mirrors PEXPR.MOD ParseFactor's
-         own isImp & isFr & overlayMode gate -- a procedure called as a bare
-         statement (no assignment/expression context, e.g. "Ovrdemo2.Run;")
-         is parsed HERE, not there, so it needs the same 5-byte
-         resume-trampoline padding reservation. *)
-      IF isImp & isFr & PExpr.overlayMode & ~PExpr.targetCP THEN Cgen.CgCallFarOvr(rdId)
-      ELSIF isImp & isFr THEN Cgen.CgCallFar(rdId)
+      (* A bare-statement call ("Ovrdemo2.Run;") is parsed HERE, not in
+         PEXPR2's factor grammar.  Both used to route $O+ imported far calls
+         through Cgen.CgCallFarOvr for 5 bytes of trampoline padding; that
+         padding became dead space when the resume trampoline moved into the
+         resident Overlay.ResumeTrapTable, and was removed 2026-09-05 (see
+         CGEN.MOD's tombstone comment).  A plain CALL FAR is all an overlay
+         call site needs -- the linker rewrites it in place. *)
+      IF isImp & isFr THEN Cgen.CgCallFar(rdId)
       ELSIF isImp THEN Cgen.CgCallNear(rdId)
       ELSIF item.fwdSym # Syms.NoSym THEN PExpr2.FwdEmitCall(item.fwdSym, isFr)
       ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)

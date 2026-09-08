@@ -34,19 +34,6 @@ VAR
   modUsesFpu*: BOOLEAN;
   boundsChk*:  BOOLEAN;
   overlayMode*: BOOLEAN;  (* $O+/$O- : module compiled overlay-eligible (DOCS/OVR.MD §4). *)
-  targetCP*:   BOOLEAN;   (* TRUE iff this whole compile is building the /CP (NE/DPMI16)
-                              target -- set once by TOCMAIN.MOD (mirrors its own private
-                              gTargetCP) right after parsing /CD vs /CP, before any module
-                              compiles.  $O+ has NO effect at all under /CP
-                              (Link.CalculateLayout clears every module's own isOverlay
-                              unconditionally, DOCS/OVR.MD §2) -- CgCallFarOvr's own 5-byte
-                              resume-trampoline padding would therefore be permanently dead
-                              NOP in a /CP build (found 2026-08-11, LinkNE.MOD's own $O+
-                              flag baking padding into /CP output for no reason); gating the
-                              padding decision on ~targetCP too, alongside overlayMode,
-                              avoids emitting it at all when the link target that will
-                              actually consume this .rdf is already known to make it
-                              pointless. *)
   modName*:    ARRAY 33 OF CHAR;
   condBpOomNode: CondBpNode;  (* OOM fallback, mirrors PSTMT.bpOomNode *)
   (* condBpList: the CURRENT condition's pending-jump list, threaded through

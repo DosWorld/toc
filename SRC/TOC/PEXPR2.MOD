@@ -13,7 +13,7 @@ MODULE PExpr2;
    (ParseExpression/ParseSimpleExpression/ParseTerm/ParseCondExpr and
    friends, const-folding, shared Error/Expect/IsLex infra, and every
    module-level VAR PARSER.MOD/PSTMT.MOD read directly -- sc, modName,
-   modUsesFpu, boundsChk, overlayMode, targetCP).  This module holds the
+   modUsesFpu, boundsChk, overlayMode).  This module holds the
    INNER designator/actual-parameter/factor grammar (ParseDesignator,
    ParseActualParameters, EmitInlineCall, ParseSystemIntrinsic,
    ParseFactor) -- everything reachable only through ParseFactor's own
@@ -984,15 +984,34 @@ BEGIN
                falls through to the original runtime address-math path,
                unchanged, with PExpr.ParseExpression called at its original spot
                (after the base address is already in BX). *)
+            (* Mark BEFORE any peeking: on a fall-through to the general
+               path the scanner must be back at the very first token of the
+               index, minus sign included. *)
+            Scan.Mark(PExpr.sc, mark, markPos);
             negConst := FALSE;
             IF PExpr.sc.sym = Scan.TMinus THEN
-              Scan.Mark(PExpr.sc, mark, markPos);
               Scan.Next(PExpr.sc);
-              IF PExpr.sc.sym = Scan.TInt THEN negConst := TRUE
-              ELSE Scan.Restore(PExpr.sc, mark, markPos)
-              END
+              IF PExpr.sc.sym = Scan.TInt THEN negConst := TRUE END
             END;
             wasConst := negConst OR (PExpr.sc.sym = Scan.TInt);
+            (* ...but only if that literal is the WHOLE index.  `a[3 - x]`
+               also starts with TInt, and the old test took the constant
+               path there, consumed just the `3`, then demanded `]` --
+               "syntax error: expected 33 got 11" for every index of the
+               form <int> <operator> ... (found via EXAMPLES/TETRIS,
+               2026-09-05).  Peek one token past the literal: only `]` or
+               `,` means the index really is that single constant. *)
+            IF wasConst THEN
+              Scan.Next(PExpr.sc);
+              IF (PExpr.sc.sym # Scan.TRbrak) & (PExpr.sc.sym # Scan.TComma) THEN
+                wasConst := FALSE; negConst := FALSE
+              END
+            END;
+            (* Rewind to the first index token either way: the constant
+               branch below re-reads sc.ival and does its own Scan.Next,
+               and the runtime branch needs a pristine ParseExpression. *)
+            Scan.Restore(PExpr.sc, mark, markPos);
+            IF negConst THEN Scan.Next(PExpr.sc) END;
             IF wasConst THEN
               index.val := PExpr.sc.ival;
               IF negConst THEN index.val := -index.val END;
@@ -1438,14 +1457,13 @@ BEGIN
         pt2 := item.type;
         IF pt2 = NIL THEN pt2 := Syms.TypeNewProc(Syms.TypeNotype) END;
         ParseActualParameters(pt2);
-        (* DOCS/OVR.MD §9: an imported far call made from
-           inside $O+ code MIGHT be rewritten by the linker into an overlay
-           trampoline whose call site later needs a return-address resume
-           trampoline installed right after it (Link.AddOvrReturnTrampoline)
-           -- reserve the 5 spare bytes now, since codegen doesn't yet know
-           whether this call's target will resolve to an overlay unit. *)
-        IF isImp & isFr & PExpr.overlayMode & ~PExpr.targetCP THEN Cgen.CgCallFarOvr(rdId)
-        ELSIF isImp & isFr THEN Cgen.CgCallFar(rdId)
+        (* An imported far call from $O+ code may be rewritten by the linker
+           into an overlay trampoline (4 bytes: CD 3F id:WORD) -- which fits
+           inside the plain 5-byte CALL FAR emitted here, so no padding is
+           reserved.  The return-address resume trampoline lives in the
+           resident Overlay.ResumeTrapTable, not in caller code; the old
+           5-byte reservation (Cgen.CgCallFarOvr) was removed 2026-09-05. *)
+        IF isImp & isFr THEN Cgen.CgCallFar(rdId)
         ELSIF isImp THEN Cgen.CgCallNear(rdId)
         ELSIF item.fwdSym # Syms.NoSym THEN FwdEmitCall(item.fwdSym, isFr)
         ELSIF isFr THEN Cgen.CgCallLocalFar(codeOfs)

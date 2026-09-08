@@ -189,8 +189,8 @@ interpreter.
 | Area | Support |
 |------|---------|
 | Types | `INTEGER`, `LONGINT` (32-bit), `WORD` (16-bit unsigned), `BYTE`, `CHAR`, `BOOLEAN`, `SET`, `REAL`/`LONGREAL` (x87), `ARRAY` (fixed/open/multi-dim), `RECORD` with single inheritance, `POINTER`, `FAR`/`NEAR` procedure variables |
-| Control flow | `IF/ELSIF/ELSE`, `WHILE/ELSIF`, `FOR/BY` (negative step), `REPEAT`, `CASE` (INTEGER or CHAR, incl. ranges) |
-| Procedures | `FAR`/`NEAR`, nested, `EXTERNAL`, `INLINE` (whole-body and statement forms), `FORWARD`, typeless `VAR` params, full actual-parameter type checking |
+| Control flow | `IF/ELSIF/ELSE`, `WHILE/ELSIF`, `FOR/BY` (negative step), `REPEAT`, `CASE` (INTEGER or CHAR, incl. ranges; labels must be distinct) |
+| Procedures | `FAR`/`NEAR`, nested, `EXTERNAL`, `INLINE` (whole-body and statement forms), `FORWARD`, typeless `VAR` params, full actual-parameter type checking, functions must contain a `RETURN` |
 | Object model | `POINTER TO RECORD` extension, runtime `IS` type tests (compile-time folded where possible), `NEW`/`DISPOSE` with runtime type tags |
 | Modules | Qualified imports, namespace isolation, `$L`/`$M`/`$R` directives, dead-code/unused-symbol warnings |
 | `SYSTEM` | `ADR`, `SEG`, `OFS`, `PTR`, `MOVE`, `FILL`, `PORTOUT`/`PORTIN`, `Intr`, `LSL`/`LSR`/`ASR`/`ROR`/`AND`/`IOR`/`XOR` |

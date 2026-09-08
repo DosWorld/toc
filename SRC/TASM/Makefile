@@ -42,6 +42,6 @@ install: $(TASM) $(TA2NASM)
 	cp $(TA2NASM) $(BIN_DIR)/$(TA2NASM)
 
 clean:
-	rm -f *.OM *.EXE *.OVR
+	rm -f *.OM *.EXE *.OVR *.LNK
 
 .PHONY: all install clean

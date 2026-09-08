@@ -1494,3 +1494,167 @@ callee. **Method note:** an initial pass wrongly classified four FPU emitters
 *qualified* form `Cgen.CgFld…`; they are called **unqualified from inside
 `CGEN.MOD` itself**. A dead-code check must count intra-module unqualified calls,
 not just `Module.Proc` references.
+
+---
+
+* **Split-driver path bug, failed-link cleanup, and TOCL leak guard
+(2026-09-05).**  Three defects in the new three-binary toolchain, all found by
+review rather than by the test suite, plus the test gaps that hid them.
+
+**1. Sources given with a directory path never linked.**  `TOCC`
+(`TocMain.WriteLinkFile`) names the `.LNK` control file after its *output*
+image, and `outExe` defaults to the root module's name with **no directory
+part** — so `toc /ENTRY=Run SUB/FOO.MOD` writes `FOO.LNK`/`FOO.OM`/`FOO.EXE`
+in the CWD.  The driver's `TOC.LnkName` instead derived the name from the
+*source* path via `Dos.FSplit` + `Dos.PathJoin`, keeping the `SUB/` prefix; it
+then looked for `SUB/FOO.LNK`, never found it, and aborted with `toc: compiler
+produced no link file` **before running the linker at all**.  Fixed by making
+`LnkName` strip the directory the same way `TocMain.BaseStem` does.  Note
+`Dos.FSplit` recognises only `\` and `:` as separators while `BaseStem` also
+accepts `/`, so *backslash* paths already worked — only forward-slash and
+nested paths were broken.  Regression: `TESTS/test_srcpath.sh`.
+
+**2. A failed link left a stale or truncated `.EXE` on disk.**  Every step in
+`TOCL.LinkFromFile` is guarded by `~LogErr.HaveErr()`, and `LinkMZ.WriteExe`
+detects a flush/disk-full error and latches it — but nothing *removed* the
+output.  The old in-process `TocMain.LinkAll` deleted it on `HaveErr` (a fact
+`LINKMZ.MOD`'s own `Files.Ok` comment still cites); the split lost that.  Any
+build step testing for the output by existence therefore treated a failed link
+as success.  **This is what produced the short gen2 `TOCC.EXE`** that surfaced
+much later, and very confusingly, as `FAIL: TOCC.EXE differs` — a byte-identity
+failure standing in for a link that had actually errored.  Restored in
+`TOCL.LinkFromFile` (the `.OVR` payload too).  Regression:
+`TESTS/test_linkfail.sh`, which also asserts the converse so the cleanup cannot
+overreach.
+
+**3. `TOCL` had no leak guard at all, and leaked 664 paragraphs per link.**
+`Link`'s symbol table interns every name through `StrTab` (`SymRec.nameId`), and
+`TOCL` never called `StrTab.Reset` — `TocMain.LinkAll` did, with a comment
+explaining exactly why, and that call did not come along in the split.  Measured
+by bisection: 31022 → 30358 free paragraphs across a trivial link, and
+*fixed-size, not per-module*, which is what identified StrTab.  `StrTab.Reset`
+took it to −10; disposing the never-freed `ns`/`ms` NE/MZ state records
+(`LinkNE.LinkFree`/`LinkMZ.LinkFree` free the state's chains but not the record)
+took it to **0**.  A `LeakGuard` matching `TocMain`'s shape now runs over the
+whole link, verified by negative control: removing `StrTab.Reset` again makes it
+report `tocl: heap leak whole link (654 paragraphs)`.
+
+**Why the suite missed all three.**  `TESTS/Makefile.man` copies each fixture
+into a flat work directory and passes a bare filename, so the 313-row manifest
+*structurally cannot* produce a directory-qualified source — hence shell tests
+for #1 and #2.  And `test_selfhost.sh` discarded all compiler output
+(`>/dev/null 2>&1 || true`), checking only that each binary was non-empty, so a
+partially written image slipped through to be reported as a byte-difference.
+That script now reports a failing compile or link at the point it happens (still
+non-fatal: gen1 may legitimately not reproduce current sources; only gen2 vs
+gen3 is asserted).
+
+**Follow-up (same day): the `LnkName` rewrite above had an unbounded scan.**
+`WHILE src[i] # 0X` over a by-value open-array parameter ran off the end when
+the copy was not NUL-terminated within bounds, corrupting the caller's stack
+frame.  The symptom was remote and misleading: `toc` returned **0 for a compile
+that had already failed**, losing `rc` from step 1 — even though `LnkName` is
+only reached in step 2, so the procedure at fault never ran on the failing path
+at all.  It surfaced as manifest row `coerce/real-from-int-rejected`
+(`compile exit=0, expect compile-fails`).
+
+Diagnosis note, because two hypotheses were wrong before the right one:
+reverting *only* `LnkName` fixed it, which looked like the documented rel8
+jump-range bug — but `CgPatchShort`'s fatal guard never fired, and adding an
+*unused* procedure of the same size (making the module **larger**, 16512 vs
+16400 bytes) left the binary working.  That ruled out both codegen and size and
+pointed back at the loop itself.  Fixed with `WHILE (i < LEN(src)) & (src[i] #
+0X)`.  Note `TocMain.BaseStem`, which this code was written to match, has the
+same unbounded scan and survives only because its callers always pass
+terminated strings.
+
+**Standing lesson, reinforced:** when a whole subsystem moves between processes,
+audit what the *old* call site did around it, not just the code that moved.  All
+three losses here — the `.LNK` naming rule, the delete-on-error, the
+`StrTab.Reset` — were behaviours of `TocMain.LinkAll` that had no counterpart in
+`TOCL`, and two of them were even described in comments that survived the move.
+
+---
+
+* **Overlay call-site padding removed (2026-09-05).**  `Cgen.CgCallFarOvr`
+emitted five `NOP` bytes after every eligible imported FAR call in `$O+` code,
+reserving room for a return-address resume trampoline.  That trampoline moved
+into the resident, never-swapped `Overlay.ResumeTrapTable` on 2026-08-08 (a
+trampoline baked into overlay code goes stale the instant the caller is evicted
+and reloaded at a different segment), after which nothing wrote into those
+bytes at all — `LINK.MOD`'s own comment and `DOCS/OVR.MD` §12 both recorded
+them as *"unused dead space … kept for now"*.
+
+Now removed: overlay call sites emit a plain `Cgen.CgCallFar`, reclaiming
+5 bytes per eligible call **including calls that turn out to target resident
+modules** (codegen cannot know the target's residency; only the linker can).
+`TOCC.EXE` shrank 260624 → 260576.
+
+**Why it is safe.**  `AddOvrReturnTrampoline` writes nothing into caller code —
+it only *records* `retOfs` into the caller's `ovrResumes` table for
+`LinkOvr.WriteOvrFile`.  The resume jump target is `patchAddr-1+5`, one past
+the **`CALL FAR` instruction's own** five bytes (`9A` + ofs:2 + seg:2), never a
+function of the padding.  And the swappable call-site trampoline is 4 bytes
+(`CD 3F id:WORD`), which already fits inside the 5-byte `CALL FAR` it replaces
+with a byte to spare — so the padding was not load-bearing for that rewrite
+either.  Consistent with the 2026-08-26 finding that a *plain* `CgCallFar` site
+(which never had padding) is already a legal overlay call target: `OnReloc`'s
+`isOverlayCall` branch fires for any site targeting an overlay module
+regardless of what the caller reserved.
+
+Orphan removed with it: `PExpr.targetCP`, whose only consumer was the padding
+gate (`~targetCP` skipped reserving under `/CP`, where `$O+` has no effect).
+
+**Verification:** self-host fixpoint gen2 == gen3, all three binaries
+byte-identical, built from `BOOT/`; plus the runnable `EXAMPLES/OVRDEMO`
+regressions — `run`, `run-eviction`, `run-ems`, `run-clearbuf`, `run-manysites`,
+`run-multisite` — all producing correct traces, including the three-deep
+evict-and-resume chain (`Ovra3 → Ovrb3 → Ovrdemo3` with both resumes) and
+multi-call-site dispatch, which are precisely the paths the padding served.
+(`run-appended` and `run-deepchain` could not run: `OVRAPPT.MOD` and
+`OVRA4.MOD` are absent from the repo — a pre-existing gap, unrelated.)
+
+---
+
+* **Two compiler correctness checks added (2026-09-08): duplicate CASE labels
+and missing RETURN.**  Both were gaps found by a correctness review — the
+compiler silently accepted programs Oberon-07 requires it to reject.
+
+**Duplicate CASE labels.**  `CASE x OF 1: … | 1: …` and overlapping ranges
+(`1..5 | 3..7`) compiled clean, with the first matching arm winning by
+accident of dispatch order.  Both dispatch paths now report
+`"duplicate CASE label"`:
+- *linear-scan path* (`PStmt.ParseCase`): a new chunked `LabRangeNode` list
+  records every `lo..hi` seen so far in the CASE and `LabRangeAdd` checks each
+  new label against all earlier ones before recording it.  A range list rather
+  than a bitmap — it costs nothing for sparse labels and, unlike the jump-table
+  path's `ClaimArr`, is not capped at `MaxTableSlots`, since the chain path
+  accepts any INTEGER label.  Chunked per the small-record rule.
+- *jump-table path* (`PStmt.ParseCaseTable`): its `claimed[]` map **already
+  detected** the collision — it just used the knowledge to replicate the chain
+  path's "first arm wins" instead of reporting it.  That `ELSE` branch now
+  raises the error.
+
+**Missing RETURN.**  A function with no RETURN at all fell off the end into
+`CgEpilogue`, and the caller read whatever was in DX:AX (measured: a
+`PROCEDURE F(): INTEGER` with an empty body compiled silently and returned 0 —
+incidentally, not reliably).  `Parser` now reports
+`"function has no RETURN statement"` when `PStmt.retPatchList` is still `NIL`
+at the end of a procedure with a result type: that list is reset to `NIL` at
+each procedure's entry and gains one node per RETURN parsed, so empty means
+none.  Deliberately the **zero-RETURN case only** — the compiler is single-pass
+with no AST, so there is nothing to run "every path returns" analysis over, and
+a function whose RETURNs all sit inside conditionals is accepted.
+
+**No false positives.**  Both checks were run over every source tree in the
+project before landing — `SRC/TOC` (the compiler self-compiling all three
+binaries), `SRC/LIB`, `SRC/TASM`, `SRC/TLINK`, `SRC/TOOLS`, `SRC/TRUBO` —
+with zero modules tripping either check.
+
+Regression rows (manifest 313 -> 318): `case/dup-label-rejected`,
+`case/overlap-range-rejected`, `case/distinct-labels-ok`,
+`return/missing-in-function-rejected`, `return/present-and-proc-ok`.  The two
+`*-ok` rows exist so an over-eager check cannot pass unnoticed: distinct
+labels, non-overlapping ranges, comma-separated label lists, a function whose
+RETURNs are all conditional, and a plain proper procedure with no RETURN must
+all still compile.  `DOCS/OBERON07.EBN` updated per the EBNF sync rule.

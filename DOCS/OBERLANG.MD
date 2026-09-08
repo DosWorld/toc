@@ -1800,11 +1800,89 @@ Tests: manifest rows `dbg/*` + `TESTS/test_dbg.sh` (see DOCS/TESTS.MD).
 
 ---
 
+## Statement-level correctness checks
+
+Two Oberon-07 rules the compiler silently ignored until 2026-09-08; both are
+now fatal errors.  See `DOCS/HISTORY.MD` for the full entry.
+
+### Distinct CASE labels
+
+Oberon-07 requires every label in a `CASE` to be distinct.  A duplicate single
+label (`1: … | 1: …`) or an overlapping range (`1..5 | 3..7`) is a fatal
+`"duplicate CASE label"`.
+
+Both dispatch paths enforce it, and they do so by different means because they
+already carry different bookkeeping:
+
+- **Linear-scan path** (`PStmt.ParseCase`) keeps a chunked `LabRangeNode` list
+  of every `lo..hi` seen so far in this `CASE`; `LabRangeAdd` checks each new
+  label against all earlier ones before recording it.  A range list, not a
+  bitmap: it costs nothing for sparse labels and — unlike the jump-table path's
+  `ClaimArr` — is not capped at `MaxTableSlots`, which matters because the
+  chain path accepts any INTEGER label.
+- **Jump-table path** (`PStmt.ParseCaseTable`) already had a `claimed[]` slot
+  map and already *detected* the collision; it simply used that knowledge to
+  replicate the chain path's "first arm wins" instead of reporting it.  That
+  `ELSE` branch now raises the error.
+
+Before this, a duplicate compiled clean and the first matching arm won by
+accident of dispatch order.
+
+### Functions must contain a RETURN
+
+A `PROCEDURE` with a result type must contain at least one `RETURN` statement.
+Without one, control falls off the end of the body into `CgEpilogue` and the
+caller reads whatever happens to be in `DX:AX` — measured: a
+`PROCEDURE F(): INTEGER` with an empty body compiled silently and returned 0,
+incidentally rather than reliably.  Now a fatal
+`"function has no RETURN statement"`.
+
+Implementation: `PStmt.retPatchList` is reset to `NIL` at each procedure's
+entry and gains one node per `RETURN` parsed in its body, so an empty list at
+the end of the body means there was none.
+
+**This is deliberately the zero-RETURN case only** — not "every path returns"
+analysis.  The compiler is single-pass with no AST, so there is nothing to run
+flow analysis over, and a function whose `RETURN`s all sit inside conditionals
+(`IF … THEN RETURN 1 ELSE RETURN 2 END`) is accepted.  A proper procedure with
+no result type is unaffected.
+
+---
+
 ## Known limitations (not yet implemented)
 
 | Feature | Workaround |
 |---------|------------|
 | `ARRAY OF CHAR` relational operators (`=`,`#`,`<`,`>`,`<=`,`>=`) beyond `s = ""` | Use `Strings.Equal` (no `<`/`>` string-ordering primitive exists yet) |
+| Type guards `p(T)` / `v(T)` | Not parsed at all — `selector` has no guard alternative (see `DOCS/OBERON07.EBN`).  `p(T).f` parses as a procedure call and fails with "type mismatch"; the VAR-param form `r(Ext).e` is a syntax error.  Use `IS` (fully working, incl. multi-level extension) plus a separate pointer variable of the target type. |
+
+### Checks not performed (accepted silently)
+
+Found by a correctness review 2026-09-08 and **left open** — each would reject
+code the compiler currently accepts, so each needs its own full-tree
+false-positive pass (compile `SRC/TOC`, `SRC/LIB`, `SRC/TASM`, `SRC/TLINK`,
+`SRC/TOOLS`, `SRC/TRUBO`) before landing, exactly as the two checks above got.
+
+| Not checked | Actual behavior |
+|-------------|-----------------|
+| Array assignment with mismatched lengths | Copies `min(src,dst)` bytes — **memory-safe** (verified with guard variables), but silently truncates, or leaves the destination's tail stale |
+| Record assignment between different record types | Same: copies the destination's size, memory-safe, silently wrong |
+| `CHAR := INTEGER` | Accepted |
+| SET element out of range (`{16}` with 16-bit SET) | Accepted |
+| Integer literal / constant-expression overflow (`i := 99999`, `32767 + 1`) | Silently wraps (`99999` → `-31073`) |
+| Assignment to a `FOR` control variable inside its own loop | Accepted |
+| Directly self-recursive record (`RECORD x: R END`) | Accepted; `SIZE(R)` = 4 (the field gets a placeholder size rather than an error) |
+
+Note the first two are **not** memory-corruption bugs — this was checked
+explicitly with guard variables placed adjacent to the destination, and they
+stayed intact.  They are missing diagnostics, not miscompiles.
+
+Verified *correct* in the same review, for the record: DIV/MOD use proper
+floored semantics (`-7 DIV 2 = -4`, `-7 MOD 2 = 1`) including the WORD-unsigned
+and LONGINT paths; `IS` is correct across a two-level extension hierarchy
+including transitive tests; constant array indices *are* bounds-checked under
+`$R+`; and all parameter checks (arg count both directions, arg type,
+VAR-actual l-value, procedure-variable signature) hold.
 
 Standard Oberon-07 defines relops on `ARRAY OF CHAR` operands as a full string
 comparison.  This compiler has no such codegen — comparing two array-of-char

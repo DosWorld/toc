@@ -427,54 +427,19 @@ BEGIN
   Rdoff.RdfAddSegReloc(CgObj, Rdoff.SegCode, segAt, importId)
 END CgCallFar;
 
-(* Same as CgCallFar, plus 5 bytes of NOP padding immediately after the
-   CALL FAR (DOCS/OVR.MD §9).  Callers (PEXPR.MOD/PSTMT.MOD) gate this on
-   isImp & isFr & overlayMode & ~targetCP: an imported far call made from
-   inside an overlay unit's own code MIGHT later be rewritten by the
-   linker (Link.OnReloc) into an INT 3Fh trampoline if the target turns
-   out to be another overlay unit -- and if so, Link.AddOvrReturnTrampoline
-   needs 5 spare bytes right after the call to install a SECOND trampoline
-   (the return-address resume point) without clobbering real caller code.
-   The padding is reserved unconditionally at codegen time within a /CD
-   compile (codegen doesn't know yet whether the target will resolve to an
-   overlay unit -- only the linker knows that, much later); it is dead NOP
-   if the call turns out to target a resident procedure, since only
-   Link.OnReloc's isOverlayCall branch ever touches it.  The ~targetCP
-   half of the gate (added 2026-08-11) skips reserving it AT ALL when this
-   whole compile is building the /CP target: $O+ has no effect at all
-   under /CP (Link.CalculateLayout clears every module's own isOverlay
-   unconditionally regardless of source, DOCS/OVR.MD §2), so the padding
-   would be PERMANENTLY dead in that binary -- found via LINKNE.MOD
-   becoming $O+ (DOCS/OVR.MD's own /CD-hot-path memory-pressure fix) and
-   baking pointless padding into every one of its own far calls when
-   compiled for a /CP target too, since compile-time overlayMode has
-   no visibility into the link target on its own. *)
-PROCEDURE CgCallFarOvr*(importId: INTEGER);
-BEGIN
-  CgCallFar(importId);
-  (* 5x NOP -- resume-trampoline BOOKKEEPING slot, genuinely dead space
-     at the machine-code level (see Link.AddOvrReturnTrampoline's own
-     comment: resume trampolines live in the resident
-     Overlay.ResumeTrapTable, never physically patched here).  Widening
-     this to 6x (DOCS/OVR-ID-WIDEN-PLAN.MD step 2, first attempt,
-     2026-08-26) turned out to be the WRONG fix for the trampoline id's
-     BYTE->WORD widening and was reverted: it only grows this padding,
-     but Link.OnReloc's isOverlayCall decision fires for ANY call site
-     targeting an overlay module regardless of whether the CALLER
-     reserved this padding at all (only overlayMode-gated CgCallFarOvr
-     callers do) -- a plain CgCallFar call site that turns out to target
-     an overlay module has ZERO padding, so a 6-byte trampoline
-     silently overwrote one byte of whatever code followed it (found via
-     a real crash compiling SRC/TASM/TASM.MOD with a widened build).
-     Fixed instead by moving entryOfs out of the call-site trampoline
-     format entirely, into the .OVR directory (LinkOvr.WriteOvrFile,
-     OVERLAY.MOD's DirEntryOfs) -- the swappable form is now
-     `CD 3F id:WORD` = 4 bytes, fitting comfortably inside the plain
-     5-byte CALL FAR it replaces with room to spare, exactly like the
-     original 1-byte-id design did, so this padding's own width never
-     needed to change at all. *)
-  EmitCodeStr("90,90,90,90,90")
-END CgCallFarOvr;
+(* CgCallFarOvr (5 NOP bytes after an imported far call from $O+ code) was
+   REMOVED 2026-09-05.  It reserved room for a return-address trampoline that
+   Link.AddOvrReturnTrampoline used to patch physically into those bytes -- but
+   that trampoline moved into the resident, never-swapped
+   Overlay.ResumeTrapTable on 2026-08-08 (LINK.MOD's own comment there, and
+   DOCS/OVR.MD §12, both recorded the padding as "unused dead space ... kept
+   for now").  AddOvrReturnTrampoline only RECORDS retOfs into the resume table
+   now; nothing writes into caller code at that offset.  The resume jump target
+   is patchAddr-1+5, one past the CALL FAR's OWN five bytes (9A + ofs:2 +
+   seg:2) -- never a function of this padding -- so removing it changes no
+   offset the overlay runtime depends on.  Overlay call sites now go through
+   plain CgCallFar, reclaiming 5 bytes per eligible imported far call in every
+   $O+ module. *)
 
 (* Load the FAR address of an imported procedure into DX:AX.
    Used by SYSTEM.ADR(ImportedProc) — the linker fills in both placeholder
