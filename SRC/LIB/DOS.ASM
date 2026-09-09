@@ -51,8 +51,6 @@ section .text
 global Dos_GetDate, Dos_SetDate, Dos_GetTime, Dos_SetTime
 global Dos_GetCBreak, Dos_SetCBreak, Dos_GetVerify, Dos_SetVerify
 global Dos_GetDTA, Dos_SetDTA, Dos_GetIntVec, Dos_SetIntVec
-global Dos_MkDir, Dos_ChDir
-
 ; -----------------------------------------------------------------------------
 ; PROCEDURE GetDate*(VAR Year,Month,Day,DayOfWeek: INTEGER);
 ; INT 21h/AH=2Ah -> CX=year, DH=month, DL=day, AL=day-of-week.
@@ -398,52 +396,11 @@ Dos_SetIntVec:
         RETMACRO 6
 
 ; -----------------------------------------------------------------------------
-; PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN;   INT 21h/AH=39h.
-; PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN;   INT 21h/AH=3Bh.
-; An open-array CHAR parameter arrives as {seg, ofs, len} (DOCS/OBERLANG.MD
-; open-array ABI); the string is already 0X-terminated by the caller, so the
-; length word is ignored and DS:DX points straight at it.  Result AX = 0/1.
+; MkDir / ChDir deliberately live in DOS.MOD, not here: both must SET
+; DosError, which is DOS.MOD's own global.  An assembly version returned the
+; correct BOOLEAN but left DosError stale, breaking every caller written to
+; the documented "Sets DosError" contract (found 2026-09-08 -- see DOS.MOD's
+; own comment above MkDir).  Anything that must touch module-level state
+; belongs on the Oberon side.
 ; -----------------------------------------------------------------------------
-Dos_MkDir:
-        push    bp
-        mov     bp, sp
-        ; open array = {ofs:2, seg:2, len:2}, sole param so it starts at +2
-        %define mk_ofs [bp+RSIZE+2]
-        %define mk_seg [bp+RSIZE+4]
-        push    ds
-        push    dx
-        mov     dx, mk_ofs
-        mov     ax, mk_seg
-        mov     ds, ax
-        mov     ah, 39h
-        int     21h
-        mov     ax, 1
-        jnc     .ret
-        xor     ax, ax
-.ret:
-        pop     dx
-        pop     ds
-        pop     bp
-        RETMACRO 6
 
-Dos_ChDir:
-        push    bp
-        mov     bp, sp
-        ; open array = {ofs:2, seg:2, len:2}, sole param so it starts at +2
-        %define cd_ofs [bp+RSIZE+2]
-        %define cd_seg [bp+RSIZE+4]
-        push    ds
-        push    dx
-        mov     dx, cd_ofs
-        mov     ax, cd_seg
-        mov     ds, ax
-        mov     ah, 3Bh
-        int     21h
-        mov     ax, 1
-        jnc     .ret
-        xor     ax, ax
-.ret:
-        pop     dx
-        pop     ds
-        pop     bp
-        RETMACRO 6

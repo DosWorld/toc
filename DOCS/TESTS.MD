@@ -317,6 +317,8 @@ exactly like the Section 17 modules.
 | `TFBUF.MOD` | `Files` (buffered I/O regression) | Writes 20000 bytes 1 byte at a time, reads back, spot-checks at offsets 8191/8192/8193/16384 (BUFSIZE boundary). Guards the `SYSTEM.AND` bit-mask fix in `BlockRead`/`BlockWrite`. |
 | `TFREC.MOD` | `Files` (embedded-File / imported-record-size regression) | Embeds a `Files.File` in a record with a trailing `BOOLEAN`/`INTEGER`, writes the trailing field right after `Reset`, then reads back. Guards against an importer laying a field on top of an embedded `File`'s internals when `Files.File` grows (gr_bug 2026-06-23). |
 | `TEMSTMP.MOD` | `Files` (EMS temp backend regression) | Three concurrent `ReWriteTemp` temp files, odd 277-byte records, 110800 bytes/handle (>64 KB, crosses BUFSIZE), interleaved random-access read-back while files grow. Guards the unification of the `BkEms` backend into the shared `BufFetch`/`BufFlush` path (2026-06-26) — the prior separate EMS staging path made the compiler write no output under EMS. Passes under both EMS and `--noems` (transparent disk fallback). |
+| `TRELB.MOD` | `PExpr` (relop codegen regression) | Relational operators on **1-byte** variables (`BYTE`, `BOOLEAN`), locals and globals, all six relops, the unsigned `255 > 0` boundary, comparison against literals, and `CHAR`/`INTEGER` as unaffected controls. Guards the 2026-09-08 fix: the relop memory-operand fast path emitted `CMP AX,[mem]` (opcode `3B`, a **16-bit** read) for 1-byte operands, so the compare read the variable's byte *plus its neighbour* and answered against unrelated memory — `p = q` and `p # q` could both report "differ". The `adjacentMemory` suite is the deterministic detector: it asserts an unchanged comparison gives the same answer with neighbouring bytes set to `0FFFFH` and to `0`. Verified discriminating: 3 of 6 suites fail on a pre-fix toolchain, 6/6 pass after. |
+| `TRETLONG.MOD` | `PStmt` (RETURN-widening regression) | `RETURN` of a value narrower than a function's declared `LONGINT` result: negative and positive literals, the `-32767`/`-32768` boundaries, a genuinely-32-bit control, non-constant expressions, unsigned sources (zero- vs sign-extension), `RETURN` inside IF/WHILE/CASE, and an INTEGER-returning control. Guards the 2026-09-09 fix: `ParseReturn` loaded the value but never widened it, so only AX was set and DX held junk — `RETURN -1` gave 65535, `RETURN 1` gave 655361. **Each result is captured into a LONGINT variable and the variable asserted**: passing the call directly as an actual parameter masks the bug, because the actual-parameter path widens on its way onto the stack. Verified discriminating: 5 of 6 suites fail pre-fix, 6/6 pass after. |
 
 **How they run.**  `testall.exe` (`RunSection18`) first compiles the
 Oberon-port dependency modules (`Scan`, `Syms`, `Rdoff`, `Cgen`,
@@ -413,7 +415,8 @@ Exit code 0 if all pass, 1 if any fail; `testall.exe` uses the exit code to reco
 - `AssertReal(expected, actual)` (with epsilon = 1.0e-6)
 - `AssertStr(expected, actual)`
 
-**Linking.** With the all-in-one `toc.exe`, linking is automatic via `/ENTRY=`:
+**Linking.** Linking is automatic via `/ENTRY=` (`toc.exe` execs the link half
+itself, so this stays a single command):
 ```sh
 OBERON_LIB=lib toc /ENTRY=RunAllTests MyTest.Mod my.exe
 # Test.om, Out.om, SYSTEM.om etc. come from BIN/OBERON.OM automatically
@@ -434,20 +437,102 @@ to `I.N`) as CASE labels.
 
 ---
 
+## Failed-link cleanup test
+
+`TESTS/test_linkfail.sh` checks that a **failed link leaves no `.EXE` behind**.
+
+Every link step in `TOCL.LinkFromFile` is guarded by `~LogErr.HaveErr()`, and
+`LinkMZ.WriteExe` detects a flush/disk-full error and latches it (its
+`Files.Ok` check) — but nothing *removed* the output file, so a failed link
+left either a truncated image or the previous run's complete-but-now-stale
+`.EXE` in place. Anything testing for the output by existence then treats the
+failed link as a success.
+
+That is what produced a short gen2 `TOCC.EXE` inside `test_selfhost.sh`, which
+surfaced much later — and very confusingly — as `FAIL: TOCC.EXE differs`, a
+byte-identity failure standing in for a link that had actually errored.
+`test_selfhost.sh` discards compiler output and only checks the result is
+non-empty, so a partial file slips straight through.
+
+The old in-process `TocMain.LinkAll` deleted the output on `HaveErr`;
+`LINKMZ.MOD`'s `Files.Ok` comment still refers to that deletion. The split
+linker lost it — restored in `TOCL.LinkFromFile` (2026-09-05).
+
+The test also asserts the converse — that a *successful* link keeps its output,
+byte-identical and runnable — so the cleanup cannot overreach.
+
+```bash
+bash TESTS/test_linkfail.sh
+# … 6 passed, 0 failed
+```
+
+Run as part of `make test`.
+
+---
+
+## Source-path regression test
+
+`TESTS/test_srcpath.sh` checks that the split driver accepts a source given
+with a **directory path**, not just a bare filename in the current directory.
+
+`TOC.EXE` is only a driver: it execs `TOCC.EXE` to compile, then locates the
+`<stem>.LNK` control file `TOCC` wrote and execs `TOCL.EXE` on it.  The two
+halves derived that name differently — `TOCC` names it after its *output*
+image (which defaults to the module name, no directory), while the driver
+derived it from the *source* path and kept the directory prefix.  So
+`toc /ENTRY=Run SUB/FOO.MOD` wrote `FOO.LNK` but looked for `SUB/FOO.LNK`,
+then aborted with `toc: compiler produced no link file` before ever running
+the linker: every source passed with a directory path compiled fine and
+silently failed to link (fixed 2026-09-05).
+
+This cannot be a manifest row: `TESTS/Makefile.man` copies each fixture into a
+flat work directory and passes a bare filename, so the manifest structurally
+cannot produce a directory-qualified source — which is exactly why it stayed
+green through the bug.
+
+Covers bare / forward-slash / backslash / nested paths and `/CP`, and runs the
+resulting `.EXE` to confirm it links *and* works.  Note `Dos.FSplit` recognises
+only `\` and `:` as separators while `TocMain.BaseStem` — the code that picks
+the output name — also accepts `/`; the backslash case therefore passed even
+before the fix, and the forward-slash and nested cases are the real regression.
+
+```bash
+bash TESTS/test_srcpath.sh
+# … 6 passed, 0 failed
+```
+
+Run as part of `make test`.
+
+---
+
 ## Self-hosting regression test
 
 `TESTS/test_selfhost.sh` verifies the compiler can reproduce itself byte-identically:
 
-1. `BOOT/TOC.EXE` compiles `SRC/TOC/*.MOD` → `toc1.exe`
-2. `toc1.exe` under xt recompiles the same sources → per-module `.om` files
-3. `toc1.exe /ENTRY=Run` links them → `toc2.exe`
-4. Assert `toc1.exe == toc2.exe` byte-for-byte, and each `.om` is byte-identical
+1. `BIN/{TOC,TOCC,TOCL}.EXE` rebuild themselves from `SRC/TOC/*.MOD` → gen2
+2. each generation rebuilds itself the same way → gen3, gen4
+3. Assert gen3 == gen4 byte-for-byte, **for all three binaries**
 
-Run manually (not part of `make test` or `make testall`):
+It compares **gen3 vs gen4, not gen1 vs gen2**: gen1 comes from whatever is in
+`BIN/`, which may predate the current sources, so a gen1 != gen2 difference is
+expected and benign after any codegen change.
+
+**Why gen3/gen4 and not gen2/gen3** — a codegen change can cost *two*
+generations of lag, not one. `make test` rebuilds `BIN/` from `BOOT/` before
+running this script, so when `BOOT/` predates the change, gen1 (built by BOOT)
+and gen2 (built by gen1, which still carries the old codegen) are **both**
+pre-convergence; the new codegen first appears in gen3. Comparing gen2 vs gen3
+then reports a spurious failure on a stable compiler — observed 2026-09-09 with
+the RETURN-widening fix (gen2 = 262768, gen3 = gen4 = 262544). gen3 == gen4 is
+correct whether the lag is one generation or two.
+
+Because the toolchain is three binaries, the script stages them under distinct
+names (`SELF.EXE`/`SELFC.EXE`/`SELFL.EXE`) and drives the two halves directly —
+`SELFC.EXE /ENTRY=Run <m>.MOD` to compile, then `SELFL.EXE <m>.LNK` to link.
 
 ```bash
 bash TESTS/test_selfhost.sh
-# … 13 passed, 0 failed
+# … 3 passed, 0 failed   (one per binary)
 ```
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
@@ -559,12 +644,16 @@ bash TESTS/test_tlink.sh
 
 Skips silently if `xt` is not on `PATH` (or `$XT` is not set).
 
-> **Host-filesystem caveat:** the gen-1 compiler is staged as `SELFTOC.EXE`, **not**
-> `toc.exe`.  On a case-insensitive host filesystem (macOS) `toc.exe` and the
-> compiler's own `TOC.exe` output collide on the same path, so a self-compile would
-> overwrite the running binary mid-link and corrupt gen-2 (symptom: `OC.om` differs
-> by 1 byte, `toc2.exe` not produced).  Keep the staged compiler name distinct from
-> the `OC` output module.
+> **Host-filesystem caveat:** the staged compiler is named `SELF*.EXE`, **not**
+> `TOC*.EXE`.  On a case-insensitive host filesystem (macOS) the staged binary and
+> the compiler's own `TOC.exe`/`TOCC.exe`/`TOCL.exe` output collide on the same
+> path, so a self-compile would overwrite the running binary mid-link and corrupt
+> the next generation.  Keep the staged names distinct from the output modules.
+>
+> The same hazard is why `SRC/TOC/Makefile` stages the bootstrap toolchain as
+> `_TOC.EXE`/`_TOCC.EXE`/`_TOCL.EXE` — and why the driver resolves its children by
+> its **own** basename prefix, so `_TOC.EXE` execs `_TOCC.EXE`, never the
+> half-written `TOCC.EXE` being built beside it.
 
 ---
 

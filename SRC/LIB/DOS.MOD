@@ -344,17 +344,58 @@ BEGIN
   END
 END FindNext;
 
+(* MkDir / ChDir stay in Oberon, unlike the other twelve INT 21h wrappers
+   moved to DOS.ASM: both must SET DosError, and DosError is this module's
+   own global.  A DOS.ASM implementation returned the right BOOLEAN but left
+   DosError untouched, so a caller written to the documented contract --
+   `IF ~MkDir(d) & (DosError # 5) & (DosError # 3) THEN fatal END`, the
+   idiom TESTALL.MOD uses to tolerate an already-existing directory -- read
+   a stale value and reported a fatal error on every failure.  Found
+   2026-09-08 via `make testall`'s "cannot create TWD subdir, err=0". *)
+
 (* MkDir: create a directory.  Returns TRUE on success, FALSE if the
    directory already exists or cannot be created.  Sets DosError.
    Parameters: Path — ASCIIZ directory path to create.
    Result: TRUE on success, FALSE on failure. *)
-PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN; FAR; EXTERNAL;
+PROCEDURE MkDir*(Path: ARRAY OF CHAR): BOOLEAN;
+  VAR r: SYSTEM.Registers; z: ARRAY 128 OF CHAR; i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (i < LEN(z) - 1) & (i < LEN(Path)) & (Path[i] # 0X) DO z[i] := Path[i]; INC(i) END;
+  z[i] := 0X;
+  r.AX := 3900H;
+  r.DS := SYSTEM.SEG(z);
+  r.DX := SYSTEM.OFS(z);
+  r.ES := SYSTEM.GetES();
+  r.Flags := SYSTEM.FCarry;
+  SYSTEM.Intr(21H, r);
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
+    DosError := SYSTEM.AND(r.AX, 0FFH); RETURN FALSE
+  END;
+  DosError := 0; RETURN TRUE
+END MkDir;
 
 (* ChDir: change current directory.  Returns TRUE on success.  Sets
    DosError.
    Parameters: Path — ASCIIZ directory path to change into.
    Result: TRUE on success, FALSE on failure. *)
-PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN; FAR; EXTERNAL;
+PROCEDURE ChDir*(Path: ARRAY OF CHAR): BOOLEAN;
+  VAR r: SYSTEM.Registers; z: ARRAY 128 OF CHAR; i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (i < LEN(z) - 1) & (i < LEN(Path)) & (Path[i] # 0X) DO z[i] := Path[i]; INC(i) END;
+  z[i] := 0X;
+  r.AX := 3B00H;
+  r.DS := SYSTEM.SEG(z);
+  r.DX := SYSTEM.OFS(z);
+  r.ES := SYSTEM.GetES();
+  r.Flags := SYSTEM.FCarry;
+  SYSTEM.Intr(21H, r);
+  IF SYSTEM.AND(r.Flags, SYSTEM.FCarry) # 0 THEN
+    DosError := SYSTEM.AND(r.AX, 0FFH); RETURN FALSE
+  END;
+  DosError := 0; RETURN TRUE
+END ChDir;
 
 (* GetDate: retrieve the current system date, via INT 21h AH=2Ah.
    Parameters: Year — output, full year (e.g. 2026); Month — output,
@@ -637,16 +678,20 @@ PROCEDURE SwapVectors*;
 BEGIN
 END SwapVectors;
 
-(* Link in DOS.ASM's object, which implements the 14 EXTERNAL procedures
+(* Link in DOS.ASM's object, which implements the 12 EXTERNAL procedures
    declared above (GetDate/SetDate/GetTime/SetTime/GetCBreak/SetCBreak/
-   GetVerify/SetVerify/GetDTA/SetDTA/GetIntVec/SetIntVec/MkDir/ChDir).
+   GetVerify/SetVerify/GetDTA/SetDTA/GetIntVec/SetIntVec).
    Each was a thin INT 21h wrapper whose whole Oberon body was "fill a
    SYSTEM.Registers record, call SYSTEM.Intr, read the fields back" -- ~30
    bytes of stack and a store per field to make a two-instruction DOS call.
 
-   DiskFree/DiskSize deliberately stay in Oberon: unlike the rest they do
-   real 32-bit arithmetic (sectors x bytes x clusters), which is clearer
-   and safer here than as a hand-written widening multiply.
+   Three stay in Oberon on purpose.  DiskFree/DiskSize do real 32-bit
+   arithmetic (sectors x bytes x clusters), clearer and safer here than as a
+   hand-written widening multiply.  MkDir/ChDir must SET DosError -- this
+   module's own global -- and an assembly version that returned the right
+   BOOLEAN while leaving DosError stale silently broke every caller written
+   to the documented contract (2026-09-08; see the comment above MkDir).
+   RULE: a procedure that must touch module-level state stays in Oberon.
 
    Same .MOD/.ASM pairing as EMS.MOD/EMS.ASM and OVERLAY.MOD/OVERLAY.ASM;
    regenerate DOS.RDF with `make regen-asm` after editing DOS.ASM. *)

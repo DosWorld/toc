@@ -1658,3 +1658,173 @@ Regression rows (manifest 313 -> 318): `case/dup-label-rejected`,
 labels, non-overlapping ranges, comma-separated label lists, a function whose
 RETURNs are all conditional, and a plain proper procedure with no RETURN must
 all still compile.  `DOCS/OBERON07.EBN` updated per the EBNF sync rule.
+
+---
+
+* **BYTE/BOOLEAN variable comparisons were wrong (2026-09-08) — reported bug,
+fixed.**  `b1 = b2` on two `BYTE` variables, and `p = q` on two `BOOLEAN`
+variables, produced answers determined by **unrelated adjacent memory**.  For
+the same pair of values `p = q` could report "not equal" while `p # q` reported
+"differ" — both cannot be true, which is the tell that the comparison was not
+really being evaluated.  Silent: no diagnostic, and the module compiled clean.
+
+**Root cause.**  `PEXPR.MOD`'s relop memory-operand fast path (`isFastCmpEligible`
++ rhs in `MGlobal`/`MLocal`) emits `CMP AX,[mem]` — opcode **`3B`**, which is
+`CMP r16, r/m16`, a **16-bit** read.  `isFastCmpEligible` admits `TFInteger`,
+`TFWord`, `TFByte` and `TFBoolean`, but the latter two occupy a single byte, so
+the compare read the variable's byte **plus the byte next to it**.  `CHAR` was
+spared only because it is not in that set at all — which is exactly the clue the
+bug report identified ("CHAR works and BYTE does not, so the path selects on
+type rather than operand size").
+
+Proven rather than inferred: with `gb1 = gb2` held constant at `5 = 5`, writing
+`0FFFFH` vs `0` into an *adjacent* `INTEGER` flipped the result from
+"NOT EQUAL" to "equal".
+
+**Fix.**  Guard the memory-operand branch with `(item.type.size # 1) &
+(rhs.type.size # 1)`, so 1-byte operands fall through to the general
+`CgLoadItem` path, which loads each side as a byte.  The compare-against-constant
+branch above it needed no change: it emits `CMP AX,imm16` against a
+zero-extended AX with no memory read, which is why `p = TRUE` always worked.
+
+**Audited for the same defect elsewhere.**  Only two other users of the 16-bit
+memory-CMP emitters exist.  `PEXPR.MOD` had the one bug; `PSTMT.MOD`'s FOR-limit
+`CgCmpAxBp` is safe because `limSym.type := Syms.TypeInteger` makes that hidden
+local always 2 bytes.  The 32-bit widening paths at PEXPR 659/978/1261 mention
+`TFByte`/`TFBoolean` but zero-extend into LONGINT rather than comparing memory.
+
+**Scope note.**  Narrower than the report suggested but the same root cause: on
+a pure pre-fix toolchain, local `BYTE` pairs and both global pairs failed while
+a local `BOOLEAN` pair happened to pass — whether any given site breaks depends
+on what sits next to the operands, so it is layout-dependent, not type-exact.
+
+**Tests.**  `TESTS/TRELB.MOD` (Section 18, registered in
+`SRC/TOOLS/TESTALL.MOD`) — 6 suites over BYTE/BOOLEAN locals and globals, all
+six relops, the unsigned `255 > 0` boundary, comparison against literals, and
+`CHAR`/`INTEGER` as controls.  Its `adjacentMemory` suite is the deterministic
+one: it asserts an unchanged comparison gives the same answer with neighbouring
+bytes set to `0FFFFH` and to `0`.  Verified discriminating — **3 of 6 suites
+fail on a pre-fix toolchain, 6/6 pass after**.  Plus manifest row
+`relop/byte-bool-var-compare` (`TESTS/FIX/BYTEBOOL.MOD`, 39 inline checks) for
+compile-level coverage.
+
+**Method note worth keeping.**  The first negative control was invalid and
+looked like a passing test: the pre-fix driver was staged as `OLD.EXE`, whose
+basename does not end in "TOC", so `ChildPath` fell back to the bare
+`TOCC.EXE` sitting beside it — the *fixed* one.  A pre/post comparison must put
+each toolchain in its **own directory**; renaming the driver silently
+re-points its children.
+
+---
+
+* **`Dos.MkDir`/`Dos.ChDir` stopped setting `DosError` (2026-09-08) — a
+regression from the DOS.ASM move, found by `make testall`.**
+
+Both are documented "Sets DosError", and callers rely on it to distinguish
+"failed" from "already exists".  `SRC/TOOLS/TESTALL.MOD` uses the canonical
+idiom:
+
+```oberon
+IF ~Dos.MkDir("TWD") & (Dos.DosError # 5) & (Dos.DosError # 3) THEN  (* fatal *)
+```
+
+When these two moved into `DOS.ASM` earlier in the session they returned the
+correct BOOLEAN but never wrote `DosError`, so the guard read a **stale**
+value, matched neither tolerated code, and reported a fatal error.  Symptom:
+`make testall` died immediately with `FATAL: cannot create TWD subdir, err=0`
+— note `err=0`, the giveaway that nothing had written the variable.  Directly
+demonstrated: pre-set `DosError := 999`, call `MkDir` twice, and it read 999
+both times.
+
+**Fix:** `MkDir`/`ChDir` restored to Oberon in `DOS.MOD`, since they must touch
+this module's own global.  Removed from `DOS.ASM` (which now exports 12
+procedures, not 14) and `DOS.RDF` regenerated via `make regen-asm` (789 -> 693
+bytes).
+
+**Rule this establishes, recorded at both sites:** a procedure that must touch
+**module-level state** stays in Oberon.  The DOS.ASM move was sound for the
+twelve pure INT 21h wrappers — fill registers, call, read back — but wrong the
+moment a procedure has a side effect on its module's own data.
+
+**Diagnosis note.**  This took several wrong turns worth recording.  The
+failure looked at first like a codegen bug in the *same area* as the
+BYTE/BOOLEAN relop fix landed minutes earlier — `~F() & (expr)` on a BOOLEAN
+result — and the obvious suspicion was that the new fix had broken it.  It had
+not: the pre-fix BOOT toolchain reproduced the failure identically, and
+`~F() & x` with plain local functions, and with the equally imported/FAR/
+open-array `Strings.Equal`, were all correct.  Only `Dos.MkDir` failed, which
+localised it to that procedure rather than to the expression form.  **Lesson:
+when a failure appears right after a change in the same area, test the
+pre-change toolchain before assuming causation.**
+
+Unrelated pre-existing `make testall` harness bugs (libDir `\lib` vs `\bin`,
+rdf-extract paths) still stand; `make test` remains the authoritative gate.
+
+---
+
+* **RETURN of a narrow value from a LONGINT function did not widen
+(2026-09-09) — reported bug, fixed.**  `PStmt.ParseReturn` called
+`Cgen.CgLoadItem` on the returned expression but never widened it to the
+declared result type, so only AX was set and DX kept whatever it happened to
+hold.
+
+**Wider than the report.**  The report was `RETURN -1` -> 65535, but the fault
+covers **every** narrower-than-LONGINT RETURN, positive included:
+
+| Source | Got | Want |
+|---|---|---|
+| `RETURN -1` | 65535 (`0000FFFF`) | -1 |
+| `RETURN -2` | 720894 | -2 |
+| `RETURN 1` | 655361 (`000A0001`) | 1 |
+| `RETURN 0 - 1` | 720895 | -1 |
+| `RETURN -100000` | -100000 | ok (needs 32 bits, already loaded as 32-bit) |
+
+`x := -1; RETURN x` was correct because the *assignment* path widens, which is
+why the bug looked specific to the literal.  It was not — the literal simply
+made it visible.
+
+**Fix.**  `ParseReturn` now mirrors the assignment path (`ParseAssign`'s
+`TFLongint` branch) in two steps: retype an `MConst` to `TypeLongint` *before*
+the load so `CgLoadItem` emits a full 32-bit immediate, then for a non-constant
+narrower source emit `CgZeroDx` (WORD/BYTE/CHAR/BOOLEAN — unsigned) or `CgCwd`
+(INTEGER — signed).  Verified both directions: `WORD 0FFFFH` -> 65535, not -1.
+
+**Tests.**  `TESTS/TRETLONG.MOD` (Section 18, registered in TESTALL) — 6 suites
+covering negative and positive literals, `-32768`/`-32767` boundaries, the
+already-working 32-bit control, non-constant expressions, unsigned sources
+(zero- vs sign-extension), RETURN inside IF/WHILE/CASE, and an INTEGER-returning
+control.  Plus manifest row `return/longint-widen-narrow-value`
+(`TESTS/FIX/RETLONG.MOD`, 320 rows).
+
+**Method note — the first version of this test was worthless and passed on the
+broken compiler.**  It asserted `Test.AssertLong(-1, RNeg1(), ...)`, passing the
+call *directly as an actual parameter* — and the actual-parameter path widens
+the value on its way onto the stack, so the assertion saw a correct -1 even
+though the RETURN was broken.  Fixed by capturing each result into a LONGINT
+variable and asserting the variable; the test then failed 5 of 6 suites pre-fix
+and passes 6/6 after.  A warning to that effect is now in the test's own header,
+since the masking form is the more natural thing to write.  This is the second
+time this session a first-draft regression test passed against the unfixed
+compiler (see the TRELB entry, 2026-09-08) — **a regression test is not done
+until it has been shown to fail without the fix.**
+
+**Self-host note.**  gen1 -> gen2 changed `TOCC` by +32 bytes (the fixed
+compiler emits widening in its own RETURNs); gen2 == gen3 byte-identical, the
+expected one-generation lag for any codegen change.
+**Follow-up: `test_selfhost.sh` extended to gen3 == gen4.**  The fix above made
+`make test`'s self-host check fail with `TOCC.EXE differs` on a compiler that
+was in fact perfectly stable.  The script compared **gen2 vs gen3**, on the
+stated assumption that a codegen change costs one generation of lag.  It can
+cost **two**: `make test` rebuilds `BIN/` from `BOOT/` before running the
+script, so when `BOOT/` predates the change, gen1 (built by BOOT) *and* gen2
+(built by gen1, still old codegen) are both pre-convergence — the new codegen
+first appears in gen3.  Measured here: gen2 = 262768, gen3 = gen4 = 262544.
+
+Comparing gen3 vs gen4 is correct whether the lag is one generation or two, so
+the script now builds a fourth generation.  Verified: 3/3 standalone, and the
+gen2-vs-gen3 comparison that failed would have passed at gen3 vs gen4.
+
+Worth noting the earlier `cmp: EOF ... after byte N` symptom is *not* what
+happened here — that one means a truncated/killed build (see the 2026-09-05
+failed-link entry).  Here both files were complete and simply belonged to
+different generations.

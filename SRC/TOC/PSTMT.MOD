@@ -672,7 +672,35 @@ BEGIN
   IF (PExpr.sc.sym # Scan.TSemi) & (PExpr.sc.sym # Scan.TEnd) &
      (PExpr.sc.sym # Scan.TElse) & (PExpr.sc.sym # Scan.TElsif) &
      (PExpr.sc.sym # Scan.TBar) & (PExpr.sc.sym # Scan.TUntil) THEN
-    PExpr.ParseExpression(val); Cgen.CgLoadItem(val)
+    PExpr.ParseExpression(val);
+    (* Widen to the declared result type -- the same two steps the assignment
+       path does (see ParseAssign's TFLongint branch).  Without this, RETURN
+       of anything narrower than LONGINT from a LONGINT function loaded only
+       AX and left DX holding junk: `RETURN -1` produced 65535 (0000FFFF) and
+       even `RETURN 1` produced 0x000A0001, because nothing ever set the high
+       half.  Assigning to a LONGINT local first and returning that worked,
+       which is why the bug looked specific to the literal (reported and
+       fixed 2026-09-09).
+
+       Step 1: an MConst destined for LONGINT must be RETYPED before the load,
+       so CgLoadItem emits the full 32-bit immediate rather than a 16-bit one. *)
+    IF (retType # Syms.NoType) & (retType.form = Syms.TFLongint) &
+       (val.type # Syms.NoType) & (val.type.form # Syms.TFLongint) &
+       (val.mode = Cgen.MConst) THEN
+      val.type := Syms.TypeLongint
+    END;
+    Cgen.CgLoadItem(val);
+    (* Step 2: a non-constant narrower value arrives in AX only -- extend it
+       into DX by signedness (WORD/BYTE/CHAR/BOOLEAN are unsigned). *)
+    IF (retType # Syms.NoType) & (retType.form = Syms.TFLongint) &
+       (val.type # Syms.NoType) & (val.type.form # Syms.TFLongint) THEN
+      IF (val.type.form = Syms.TFByte) OR (val.type.form = Syms.TFChar) OR
+         (val.type.form = Syms.TFBoolean) OR (val.type.form = Syms.TFWord) THEN
+        Cgen.CgZeroDx()     (* XOR DX,DX -- zero-extend *)
+      ELSE
+        Cgen.CgCwd()        (* CWD -- sign-extend INTEGER *)
+      END
+    END
   ELSIF (retType # Syms.NoType) & (retType.form # Syms.TFNotype) THEN
     PExpr.Error("RETURN value required")
   END;

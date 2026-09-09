@@ -1800,6 +1800,63 @@ Tests: manifest rows `dbg/*` + `TESTS/test_dbg.sh` (see DOCS/TESTS.MD).
 
 ---
 
+## RETURN must widen to the declared result type  ← CRITICAL codegen rule
+
+A `RETURN` expression narrower than the function's declared result type must be
+**widened before the epilogue**, exactly as an assignment to a variable of that
+type would be.  `Cgen.CgLoadItem` alone only fills AX; DX is left holding
+whatever it had.
+
+This was a real bug (reported and fixed 2026-09-09): a `LONGINT` function
+returning a 16-bit value produced `RETURN -1` -> **65535** (`0000FFFF`) and even
+`RETURN 1` -> **655361** (`000A0001`).  `x := -1; RETURN x` was correct, because
+the assignment path already widened — which made the fault look specific to the
+literal when it actually affected every narrow RETURN, positive or negative.
+`RETURN -100000` escaped only because it genuinely needs 32 bits.
+
+`PStmt.ParseReturn` now performs the same two steps as `ParseAssign`'s
+`TFLongint` branch:
+
+1. **Retype an `MConst` before loading it** — otherwise `CgLoadItem` emits a
+   16-bit immediate and the high half is never written at all.
+2. **Extend a non-constant narrower source by signedness** — `CgZeroDx`
+   (`XOR DX,DX`) for WORD/BYTE/CHAR/BOOLEAN, `CgCwd` (`CWD`) for INTEGER.
+
+**Rule for new codegen:** any path that materialises a value into a
+*declared-type* destination — RETURN, assignment, actual parameter, array
+element, record field — owns the widening.  Do not assume an earlier stage did
+it: `ParseReturn` and `ParseAssign` are independent, and only the latter had it.
+Regression coverage: `TESTS/TRETLONG.MOD`.
+
+---
+
+## Relational operators on 1-byte types  ← CRITICAL codegen rule
+
+`BYTE` and `BOOLEAN` occupy **one byte**.  Any comparison path that reaches for
+a 16-bit memory operand is therefore wrong for them: `CMP AX,[mem]` (opcode
+`3B` = `CMP r16, r/m16`) reads the variable's byte *plus the adjacent byte*, so
+the answer depends on unrelated neighbouring memory.
+
+This was a real bug (reported and fixed 2026-09-08): `b1 = b2` on two equal
+`BYTE`s, and `p = q` on two equal `BOOLEAN`s, returned whatever the neighbouring
+byte implied — and for one value pair `p = q` and `p # q` could *both* report
+"differ".  `PEXPR.MOD`'s `isFastCmpEligible` set admitted `TFByte`/`TFBoolean`
+alongside the genuinely 2-byte `TFInteger`/`TFWord`; that branch is now guarded
+by `(item.type.size # 1) & (rhs.type.size # 1)`, and 1-byte operands take the
+general `CgLoadItem` path, which loads each side as a byte.
+
+`CHAR` was never affected only because it is not in `isFastCmpEligible`.
+
+**Rule for new codegen:** before using a 16-bit memory operand (`CgCmpAxBp`,
+`CgCmpMemGlobal`, or any `r16, r/m16` form) against a variable, check
+`type.size`.  Do not gate on the type *form* — `TFByte`, `TFBoolean` and
+`TFChar` are all one byte, and gating on form is precisely how this bug arose.
+Regression coverage: `TESTS/TRELB.MOD`, whose `adjacentMemory` suite asserts an
+unchanged comparison yields the same answer with neighbouring bytes set to
+`0FFFFH` and to `0`.
+
+---
+
 ## Statement-level correctness checks
 
 Two Oberon-07 rules the compiler silently ignored until 2026-09-08; both are
