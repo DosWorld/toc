@@ -339,3 +339,4 @@ case/distinct-labels-ok	CASEOK.MOD		has-global	Caseok__init
 return/missing-in-function-rejected	NORETFN.MOD	fails	compile-fails
 return/present-and-proc-ok	RETFNOK.MOD		has-global	Retfnok__init
 relop/byte-bool-var-compare	BYTEBOOL.MOD		has-global	Bytebool__init
+return/longint-widen-narrow-value	RETLONG.MOD		has-global	Retlong__init

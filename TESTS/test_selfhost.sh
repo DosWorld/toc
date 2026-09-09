@@ -10,10 +10,19 @@
 # change every later image even with a byte-stable compiler, so a check that
 # only compared TOC.EXE (or only the .om files) would miss it.
 #
-# Why gen2 vs gen3 rather than gen1 vs gen2: gen1 is produced by whatever is
+# Why gen3 vs gen4 rather than gen1 vs gen2: gen1 is produced by whatever is
 # in BIN/, which may predate the current sources -- a gen1 != gen2 difference
 # is the normal one-generation lag after any codegen change, not a defect.
-# gen2 == gen3 is the real fixpoint.
+#
+# TWO generations of lag are possible, which is why this compares gen3 vs gen4
+# and not gen2 vs gen3.  `make test` rebuilds BIN/ from BOOT/ before running
+# this script, so after a codegen change that BOOT/ predates, BOTH gen1 (built
+# by BOOT) and gen2 (built by gen1, which still contains the old codegen) are
+# pre-convergence; the new codegen first appears in gen3.  Comparing gen2 vs
+# gen3 then reports a spurious failure on a perfectly stable compiler -- seen
+# 2026-09-09 with the RETURN-widening fix, where gen2=262768 and
+# gen3=gen4=262544.  gen3 == gen4 is correct whether the lag is one generation
+# or two.
 #
 # Each generation goes through the REAL split path: TOCC compiles and emits a
 # .LNK control file, TOCL links from it.  That exercises the handoff, not just
@@ -44,7 +53,8 @@ mkdir -p "$ROOT/TMP"
 G1="$(mktemp -d "$ROOT/TMP/selfhost-g1.XXXXXX")"
 G2="$(mktemp -d "$ROOT/TMP/selfhost-g2.XXXXXX")"
 G3="$(mktemp -d "$ROOT/TMP/selfhost-g3.XXXXXX")"
-trap 'rm -rf "$G1" "$G2" "$G3"' EXIT
+G4="$(mktemp -d "$ROOT/TMP/selfhost-g4.XXXXXX")"
+trap 'rm -rf "$G1" "$G2" "$G3" "$G4"' EXIT
 
 # Build the three binaries in $2, using the TOCC/TOCL found in $1.
 # Each is compiled (producing a .LNK) and then linked, i.e. the same two-step
@@ -101,14 +111,20 @@ for e in TOC.EXE TOCC.EXE TOCL.EXE; do
     [ -s "$G3/$e" ] || { echo "FAIL: gen3 $e not produced"; exit 1; }
 done
 
-echo "[selfhost] comparing gen2 vs gen3 (all three binaries) ..."
+echo "[selfhost] gen4: rebuilding with gen3 ..."
+generation "$G3" "$G4"
+for e in TOC.EXE TOCC.EXE TOCL.EXE; do
+    [ -s "$G4/$e" ] || { echo "FAIL: gen4 $e not produced"; exit 1; }
+done
+
+echo "[selfhost] comparing gen3 vs gen4 (all three binaries) ..."
 PASS=0; FAIL=0
 for e in TOC.EXE TOCC.EXE TOCL.EXE; do
-    if cmp -s "$G2/$e" "$G3/$e"; then
-        echo "PASS: $e byte-identical (gen2 == gen3)"
+    if cmp -s "$G3/$e" "$G4/$e"; then
+        echo "PASS: $e byte-identical (gen3 == gen4)"
         PASS=$((PASS+1))
     else
-        echo "FAIL: $e differs ($(cmp -l "$G2/$e" "$G3/$e" | wc -l | tr -d ' ') bytes)"
+        echo "FAIL: $e differs ($(cmp -l "$G3/$e" "$G4/$e" | wc -l | tr -d ' ') bytes)"
         FAIL=$((FAIL+1))
     fi
 done
